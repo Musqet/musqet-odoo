@@ -37,10 +37,15 @@ class PosPaymentMethod(models.Model):
         copy=False,
         groups='base.group_erp_manager',
     )
+    # Restricted to ERP managers like the key: it's the destination the bearer token is
+    # sent to (an SSRF sink), so configuring it needs the same privilege as the token.
+    # Not surfaced to the POS frontend — every Musqet call is backend-proxied (see below),
+    # so the browser never needs the base URL.
     musqet_base_url = fields.Char(
         string="Musqet API URL",
         help="Base URL of the Musqet terminal API.",
         default=DEFAULT_MUSQET_BASE_URL,
+        groups='base.group_erp_manager',
     )
     musqet_terminal_serial = fields.Char(
         string="Musqet Terminal Serial",
@@ -50,10 +55,11 @@ class PosPaymentMethod(models.Model):
 
     @api.model
     def _load_pos_data_fields(self, config):
-        # Surface only non-sensitive fields to the POS frontend. The API key is
-        # deliberately omitted so it never reaches the browser.
+        # Surface only non-sensitive fields to the POS frontend. The API key and base URL
+        # are deliberately omitted — the key must never reach the browser, and the base
+        # URL isn't needed there since every Musqet call goes through the backend proxy.
         params = super()._load_pos_data_fields(config)
-        params += ['musqet_terminal_serial', 'musqet_base_url']
+        params += ['musqet_terminal_serial']
         return params
 
     @api.constrains('musqet_terminal_serial')
@@ -138,6 +144,10 @@ class PosPaymentMethod(models.Model):
         """
         self.ensure_one()
         self._musqet_check_access()
+        if not self.musqet_base_url:
+            # Keep the "always return {error}" contract: rstrip on a falsy field would
+            # otherwise raise a raw AttributeError before the try block below.
+            return {'error': {'message': _("No Musqet API URL is configured.")}}
         url = self._musqet_url(path)
         _logger.info("Musqet %s %s by user #%d", method, path, self.env.uid)
         if payload is not None:
@@ -148,6 +158,11 @@ class PosPaymentMethod(models.Model):
                 headers=self._musqet_headers(),
                 json=payload if payload is not None else None,
                 timeout=MUSQET_TIMEOUT,
+                # The base URL is statically validated (https, no IP/internal hosts, locked
+                # to musqet.tech), but that guard only covers the configured URL. Don't
+                # follow redirects, or a 3xx Location could send the request — and return a
+                # response body — from an internal/loopback host, defeating the SSRF guard.
+                allow_redirects=False,
             )
         except requests.exceptions.RequestException as error:
             # str(error) may include the URL but never the headers, so no key leaks.
@@ -158,7 +173,16 @@ class PosPaymentMethod(models.Model):
             }}
         if response.status_code // 100 != 2:
             _logger.warning("Musqet %s %s returned HTTP %s", method, path, response.status_code)
-            return {'error': {'status_code': response.status_code, 'message': response.text}}
+            # Prefer the structured JSON error body; fall back to raw text as a detail.
+            try:
+                detail = response.json()
+            except ValueError:
+                detail = response.text
+            return {'error': {
+                'status_code': response.status_code,
+                'message': _("The Musqet terminal service returned an error."),
+                'detail': detail,
+            }}
         try:
             return response.json()
         except ValueError:
