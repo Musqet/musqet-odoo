@@ -170,6 +170,11 @@ export class PaymentMusqet extends PaymentInterface {
                 if (status === SUCCESS_STATUS) {
                     // transaction_id = saleId for reconciliation against Musqet.
                     line.transaction_id = sale.saleId || saleId;
+                    // Record which rail the terminal settled on, straight from the
+                    // top-level field ("card" | "bitcoin") — never inferred from metadata.
+                    // Persisted on pos.payment so it survives to a later-session refund,
+                    // which #7 gates on (card vs Lightning reverse differently).
+                    line.musqet_rail = sale.rail || false;
                     line.setReceiptInfo(this._receiptInfo(sale));
                     line.setPaymentStatus("done");
                     return true;
@@ -197,10 +202,23 @@ export class PaymentMusqet extends PaymentInterface {
         // the raw enum token.
         const labels = { card: _t("Card"), bitcoin: _t("Lightning") };
         const label = labels[sale.rail];
-        if (label) {
-            return _t("Paid via Musqet (%s)", label);
+        let info = label ? _t("Paid via Musqet (%s)", label) : _t("Paid via Musqet");
+        // Supplementary Lightning detail: the sats the terminal settled, if it reported
+        // any. Gate on the top-level rail and read only the bitcoin metadata block — the
+        // terminal still prints the authoritative slip, so this is a convenience line.
+        if (sale.rail === "bitcoin") {
+            const sats = Number(sale.metadata?.bitcoin?.satsAmount);
+            if (Number.isFinite(sats) && sats > 0) {
+                info += "\n" + _t("%s sats", this._formatSats(sats));
+            }
         }
-        return _t("Paid via Musqet");
+        return info;
+    }
+
+    _formatSats(sats) {
+        // Group thousands for readability (1234567 -> "1,234,567"). Sats are whole units;
+        // round defensively in case the API ever sends a fractional value.
+        return Math.round(sats).toLocaleString();
     }
 
     // -- helpers --------------------------------------------------------------
