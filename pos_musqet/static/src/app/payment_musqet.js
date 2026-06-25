@@ -50,10 +50,10 @@ export class PaymentMusqet extends PaymentInterface {
         // supports_reversals is unused in 19.0), so we mirror pos_stripe: a negative amount
         // means refund the original Musqet sale via type:"refund". Everything downstream —
         // the create→poll engine and the shared settle-back — is identical to a sale.
-        const payload =
-            line.amount < 0
-                ? this._refundPreflight(order, line)
-                : this._createSalePayload(order, line);
+        const isRefund = line.amount < 0;
+        const payload = isRefund
+            ? this._refundPreflight(order, line)
+            : this._createSalePayload(order, line);
         if (!payload) {
             // Refund preflight refused (no original Musqet sale to reverse, or a non-card
             // rail the terminal can't refund). It has already messaged the cashier and reset
@@ -70,10 +70,20 @@ export class PaymentMusqet extends PaymentInterface {
         this.pollState[line.uuid] = state;
         try {
             line.setPaymentStatus("waiting");
-            const response = await this._call("musqet_create_sale", [
-                [this.payment_method_id.id],
-                payload,
-            ]);
+            // A refund goes through musqet_create_refund, which re-reads the original payment
+            // server-side and is the authority on rail + amount (the API enforces neither —
+            // Musqet/musqet#2094); the frontend gate in _refundPreflight is only a fast-fail.
+            // A sale uses the plain create proxy.
+            const response = isRefund
+                ? await this._call("musqet_create_refund", [
+                      [this.payment_method_id.id],
+                      payload,
+                      line.uiState?.musqetRefund?.paymentId,
+                  ])
+                : await this._call("musqet_create_sale", [
+                      [this.payment_method_id.id],
+                      payload,
+                  ]);
             if (!response || response.error) {
                 this._showError(this._errorMessage(response));
                 line.setPaymentStatus("retry");
@@ -92,7 +102,7 @@ export class PaymentMusqet extends PaymentInterface {
             // now exists on the terminal, so abort it rather than start polling a sale the
             // cashier already abandoned.
             if (state.cancelled) {
-                this._call("musqet_cancel_sale", [[this.payment_method_id.id], saleId]);
+                this._cancelRemoteSale(saleId);
                 return false;
             }
 
@@ -134,13 +144,9 @@ export class PaymentMusqet extends PaymentInterface {
             // Best-effort: free the physical terminal. If the create RPC hasn't returned
             // yet there's no saleId to cancel — sendPaymentRequest re-checks the cancelled
             // flag once it does and aborts then. We return true unconditionally so the core
-            // payment screen sets the line back to "retry"; the cancel only takes effect
-            // while the sale is PENDING/PROCESSING (§4.3), which is the in-flight case here.
+            // payment screen sets the line back to "retry".
             if (state.saleId) {
-                this._call("musqet_cancel_sale", [
-                    [this.payment_method_id.id],
-                    state.saleId,
-                ]);
+                this._cancelRemoteSale(state.saleId);
             }
         }
         return true;
@@ -149,19 +155,21 @@ export class PaymentMusqet extends PaymentInterface {
     close() {
         super.close();
         // Closing the payment screen abandons any in-flight payment. Stop the poll loop and
-        // free the physical terminal for each sale that's already armed (has a saleId) and
-        // not yet settled — otherwise it would sit waiting for a card the cashier walked away
-        // from. Best-effort and fire-and-forget, like sendPaymentCancel; the cancel only
-        // takes effect while the sale is PENDING/PROCESSING (§4.3), which is exactly this case.
+        // free the physical terminal for each sale that's already armed (has a saleId) and not
+        // yet settled — otherwise it would sit waiting for a card the cashier walked away from.
         for (const state of Object.values(this.pollState)) {
             state.cancelled = true;
             if (state.saleId && !state.settled) {
-                this._call("musqet_cancel_sale", [
-                    [this.payment_method_id.id],
-                    state.saleId,
-                ]);
+                this._cancelRemoteSale(state.saleId);
             }
         }
+    }
+
+    _cancelRemoteSale(saleId) {
+        // Best-effort, fire-and-forget cancel of an armed sale on the terminal. The remote
+        // cancel only takes effect while the sale is PENDING/PROCESSING (§4.3) — exactly the
+        // in-flight/abandoned case every caller here is in.
+        this._call("musqet_cancel_sale", [[this.payment_method_id.id], saleId]);
     }
 
     // -- create→poll engine ---------------------------------------------------
@@ -200,11 +208,14 @@ export class PaymentMusqet extends PaymentInterface {
     }
 
     /**
-     * Validate a refund-order line and build its create-refund payload, or return null after
-     * messaging the cashier. The original Musqet sale id and rail are carried onto the refund
-     * line's uiState by updateRefundPaymentLine (see the pos.payment override). We refund only
-     * card-settled sales: the terminal can't reverse Lightning (epic §7), and an unknown rail
-     * can't be confirmed as card — both are sent to a manual refund rather than guessed at.
+     * Frontend fast-fail for a refund-order line: validate it and build the create-refund
+     * payload, or return null after messaging the cashier. The original Musqet sale id, rail
+     * and pos.payment id are carried onto the refund line's uiState by updateRefundPaymentLine
+     * (see the pos.payment override). We refund only card-settled sales: the terminal can't
+     * reverse Lightning (epic §7), and an unknown rail can't be confirmed as card — both are
+     * sent to a manual refund rather than guessed at. This gate is UX only; musqet_create_refund
+     * re-reads the original payment server-side and is the authority (the API enforces neither
+     * the rail nor the amount — Musqet/musqet#2094).
      */
     _refundPreflight(order, line) {
         const refund = line.uiState?.musqetRefund;
@@ -231,14 +242,21 @@ export class PaymentMusqet extends PaymentInterface {
             line.setPaymentStatus("retry");
             return null;
         }
+        // Record which original sale this refund reverses, on the refund payment itself, so it
+        // survives sync for reconciliation and cumulative-refund accounting (#9). The API keeps
+        // no sale↔refund linkage of its own (Musqet/musqet#2094), so this is the link.
+        line.musqet_refund_of = originalSaleId;
         return {
             ...this._commonPayload(order),
+            // Pin the rail to card. The terminal can't reverse Lightning, and the API does NOT
+            // reject mode:"any" on a refund (Musqet/musqet#2094) — so "any" could let the device
+            // attempt a rail it can't refund. originalSaleId is intentionally not sent: the API
+            // strips unknown keys and keeps no sale↔refund linkage of its own (#2094); the
+            // original-sale link lives in Odoo, and the gate above is what enforces card-only.
+            mode: "card",
             // Positive magnitude of the refund; type:"refund" denotes the direction.
             amountInCents: this._amountInCents(Math.abs(line.amount)),
             type: "refund",
-            // The original card sale this refund reverses. NOTE: confirm the exact field name
-            // against the Musqet refund contract (ticket Musqet/musqet#2094) before go-live.
-            refundSaleId: originalSaleId,
         };
     }
 
@@ -314,8 +332,9 @@ export class PaymentMusqet extends PaymentInterface {
             // transaction_id = saleId for reconciliation against Musqet.
             line.transaction_id = sale.saleId || state.saleId;
             // Record which rail the terminal settled on, straight from the top-level field
-            // ("card" | "bitcoin") — never inferred from metadata. Persisted on pos.payment
-            // so it survives to a later-session refund, which #7 gates on.
+            // ("card" | "bitcoin") — never inferred from metadata. Persisted on pos.payment so
+            // it survives to a later-session refund, which the refund preflight gates on (a
+            // refund is only auto-driven for a card-settled original; see _refundPreflight).
             line.musqet_rail = sale.rail || false;
             line.setReceiptInfo(this._receiptInfo(sale));
             line.setPaymentStatus("done");

@@ -9,24 +9,29 @@ import { patch } from "@web/core/utils/patch";
 // updateRefundPaymentLine never fires and the refund has no original sale to reverse.
 patch(PaymentScreen.prototype, {
     async addNewPaymentLine(paymentMethod) {
+        let matchedPaymentLine = null;
         if (paymentMethod.use_payment_terminal === "musqet" && this.isRefundOrder) {
             const refundedOrder = this.currentOrder.lines[0]?.refunded_orderline_id?.order_id;
             const amountDue = Math.abs(this.currentOrder.remainingDue);
-            // Match a Musqet line on the original order big enough to cover this refund. amount
-            // is positive on the original sale; >= so a partial refund still matches its sale.
-            const matchedPaymentLine = refundedOrder?.payment_ids.find(
+            // Candidate original sales: settled Musqet lines (transaction_id present) big enough
+            // to cover this refund. amount is positive on a sale, so `>= amountDue` also excludes
+            // refund lines (negative) — a refund-of-refund finds no candidate and bails.
+            const candidates = (refundedOrder?.payment_ids ?? []).filter(
                 (line) =>
                     line.payment_method_id.use_payment_terminal === "musqet" &&
+                    line.transaction_id &&
                     line.amount >= amountDue
             );
-            if (matchedPaymentLine) {
-                const added = await super.addNewPaymentLine(paymentMethod);
-                if (added) {
-                    this.paymentLines.at(-1).updateRefundPaymentLine(matchedPaymentLine);
-                }
-                return added;
-            }
+            // Prefer a card sale (the only rail we can auto-refund). Fall back to any Musqet
+            // sale so a Lightning-only original still stashes its rail and the driver shows the
+            // precise "refund manually" message instead of a generic "no original sale" error.
+            matchedPaymentLine =
+                candidates.find((line) => line.musqet_rail === "card") || candidates[0] || null;
         }
-        return await super.addNewPaymentLine(paymentMethod);
+        const added = await super.addNewPaymentLine(paymentMethod);
+        if (added && matchedPaymentLine) {
+            this.paymentLines.at(-1).updateRefundPaymentLine(matchedPaymentLine);
+        }
+        return added;
     },
 });

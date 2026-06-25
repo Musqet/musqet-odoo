@@ -242,3 +242,126 @@ class TestMusqetLatestStatus(TransactionCase):
         with patch.object(pos_payment_method.requests, 'request', return_value=fake):
             self.method.with_user(self.cashier).musqet_create_sale({'serial': 'MSQ-WH-002'})
         self.assertFalse(self.method.musqet_latest_response)
+
+
+@tagged('post_install', '-at_install')
+class TestMusqetCreateRefund(TransactionCase):
+    """musqet_create_refund is the server-side authority for a refund.
+
+    The Musqet API enforces neither rail correctness nor over-refund (Musqet/musqet#2094), so
+    this method must: re-read the (untrusted) original payment by id, refuse anything that
+    isn't a card-settled Musqet sale of this company whose captured amount covers the request,
+    and FORCE the refund-defining fields (type, mode, serial) so a tampered payload can't widen
+    the action. The original pos.payment is stubbed (a real one needs a full POS session, left
+    to the live smoke run) so these tests exercise the authorization logic directly.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.cashier = self.env['res.users'].create({
+            'name': 'Musqet Cashier',
+            'login': 'musqet_cashier_refund',
+            'groups_id': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
+        })
+        self.method = self.env['pos.payment.method'].create({
+            'name': 'Musqet Terminal',
+            'use_payment_terminal': 'musqet',
+            'musqet_base_url': 'https://api.musqet.tech/api/v1',
+            'musqet_api_key': 'secret-token',
+            'musqet_terminal_serial': 'MSQ-RF-001',
+        })
+
+    def _stub_original(self, rail='card', amount=10.0, terminal='musqet', company=None):
+        original = MagicMock()
+        original.exists.return_value = original
+        original.company_id = company if company is not None else self.method.company_id
+        original.payment_method_id.use_payment_terminal = terminal
+        original.musqet_rail = rail
+        original.amount = amount
+        original.currency_id.decimal_places = 2
+        original.currency_id.name = 'USD'
+        return original
+
+    def _call_refund(self, payload, original, original_payment_id=123):
+        fake = MagicMock()
+        fake.status_code = 200
+        fake.json.return_value = {'saleId': 'refund-1', 'status': 'PENDING'}
+        with patch.object(type(self.env['pos.payment']), 'browse', return_value=original), \
+             patch.object(pos_payment_method.requests, 'request', return_value=fake) as mock_request:
+            result = self.method.with_user(self.cashier).musqet_create_refund(
+                payload, original_payment_id)
+        return result, mock_request
+
+    def test_refunds_a_card_sale_within_the_captured_amount(self):
+        original = self._stub_original(rail='card', amount=10.0)
+        result, mock_request = self._call_refund({'amountInCents': 500}, original)
+        self.assertNotIn('error', result)
+        _, called_args, called_kwargs = mock_request.mock_calls[0]
+        self.assertEqual(called_args[0], 'POST')
+        self.assertEqual(called_args[1], 'https://api.musqet.tech/api/v1/terminal/sales')
+        self.assertEqual(called_kwargs['json']['type'], 'refund')
+        self.assertEqual(called_kwargs['json']['amountInCents'], 500)
+
+    def test_forces_refund_fields_and_drops_unknown_keys(self):
+        # A tampered payload must not be able to flip the action to a sale, switch the rail to
+        # "any", spoof another terminal's serial, or smuggle extra keys through the proxy.
+        original = self._stub_original(rail='card', amount=10.0)
+        payload = {
+            'amountInCents': 1000,
+            'type': 'sale',
+            'mode': 'any',
+            'serial': 'MSQ-EVIL-999',
+            'currency': 'EUR',
+            'extra': 'smuggled',
+        }
+        result, mock_request = self._call_refund(payload, original)
+        self.assertNotIn('error', result)
+        sent = mock_request.mock_calls[0].kwargs['json']
+        self.assertEqual(sent['type'], 'refund')
+        self.assertEqual(sent['mode'], 'card')
+        self.assertEqual(sent['serial'], 'MSQ-RF-001')   # this method's serial, not the payload's
+        self.assertEqual(sent['currency'], 'USD')        # the original's currency, not the payload's
+        self.assertNotIn('extra', sent)
+
+    def test_rejects_refund_of_a_lightning_sale(self):
+        original = self._stub_original(rail='bitcoin', amount=10.0)
+        result, mock_request = self._call_refund({'amountInCents': 500}, original)
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_rejects_refund_of_a_non_musqet_payment(self):
+        original = self._stub_original(rail='card', amount=10.0, terminal='stripe')
+        result, mock_request = self._call_refund({'amountInCents': 500}, original)
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_rejects_over_refund(self):
+        original = self._stub_original(rail='card', amount=10.0)   # captured = 1000 cents
+        result, mock_request = self._call_refund({'amountInCents': 1500}, original)
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_rejects_non_positive_amount(self):
+        original = self._stub_original(rail='card', amount=10.0)
+        for amount in (0, -100, None, 'x'):
+            result, mock_request = self._call_refund({'amountInCents': amount}, original)
+            self.assertIn('error', result, msg=amount)
+            mock_request.assert_not_called()
+
+    def test_rejects_cross_company_original(self):
+        other_company = self.env['res.company'].create({'name': 'Other Co'})
+        original = self._stub_original(rail='card', amount=10.0, company=other_company)
+        result, mock_request = self._call_refund({'amountInCents': 500}, original)
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_rejects_unknown_original_payment(self):
+        empty = self.env['pos.payment']
+        result, mock_request = self._call_refund({'amountInCents': 500}, empty)
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_denies_a_non_pos_user(self):
+        public = self.env.ref('base.public_user')
+        with self.assertRaises(AccessDenied):
+            self.method.with_user(public).musqet_create_refund({'amountInCents': 500}, 123)
