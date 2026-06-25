@@ -4,6 +4,7 @@ import { PaymentInterface } from "@point_of_sale/app/utils/payment/payment_inter
 import { AlertDialog } from "@web/core/confirmation_dialog/confirmation_dialog";
 import { register_payment_method } from "@point_of_sale/app/services/pos_store";
 import { logPosMessage } from "@point_of_sale/app/utils/pretty_console_log";
+import { formatInteger } from "@web/views/fields/formatters";
 
 // Poll cadence for the create→poll result engine. Polling — not the webhook — is the
 // primary result mechanism for the pilot: the merchant is behind NAT with no public
@@ -209,16 +210,13 @@ export class PaymentMusqet extends PaymentInterface {
         if (sale.rail === "bitcoin") {
             const sats = Number(sale.metadata?.bitcoin?.satsAmount);
             if (Number.isFinite(sats) && sats > 0) {
-                info += "\n" + _t("%s sats", this._formatSats(sats));
+                // formatInteger groups thousands using the POS session's Odoo locale (and
+                // rounds to a whole unit), so the sats line matches the rest of the
+                // receipt's number formatting rather than the raw JS runtime locale.
+                info += "\n" + _t("%s sats", formatInteger(sats));
             }
         }
         return info;
-    }
-
-    _formatSats(sats) {
-        // Group thousands for readability (1234567 -> "1,234,567"). Sats are whole units;
-        // round defensively in case the API ever sends a fractional value.
-        return Math.round(sats).toLocaleString();
     }
 
     // -- helpers --------------------------------------------------------------
