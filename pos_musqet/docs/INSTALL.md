@@ -61,15 +61,14 @@ your Odoo addons path.
    (Settings → scroll down → *Activate the developer mode*), then go to
    **Apps → Update Apps List** and confirm.
 
-4. **Install.** Search Apps for **"POS Musqet"** (clear the default *Apps* filter so
-   modules without a category show up) and click **Install**. The Point of Sale
-   module is pulled in automatically as a dependency.
+4. **Install.** Search Apps for **"POS Musqet"** and click **Install**. The Point of
+   Sale module is pulled in automatically as a dependency.
 
-   Command-line equivalent (also runs the test suite):
+   Command-line equivalent:
 
    ```bash
    odoo -d <your_db> -i pos_musqet --stop-after-init
-   odoo -d <your_db> -i pos_musqet --test-enable --stop-after-init   # with tests
+   odoo -d <your_db> -i pos_musqet --test-enable --stop-after-init   # also runs the tests
    ```
 
 ---
@@ -85,7 +84,7 @@ your Odoo addons path.
    |---|---|---|
    | **Musqet API Key** | The Bearer token Musqet issued for this merchant | Stored on the backend only, **never** sent to the browser. Visible to ERP managers only. |
    | **Musqet API URL** | Production base URL from Musqet (default: `https://api.musqet.tech/api/v1`) | Locked to the `musqet.tech` domain. Visible to ERP managers only. |
-   | **Musqet Terminal Serial** | The serial number of the physical terminal bound to this method | One serial per payment method / register — see section 6. |
+   | **Musqet Terminal Serial** | The serial number of the physical terminal bound to this method | One serial per payment method / register — see section 8. |
 
 3. **Add the method to your POS.** Go to **Point of Sale → Configuration →
    Point of Sale**, open your shop config, and add the Musqet method under

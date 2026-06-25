@@ -19,8 +19,8 @@ automatically.
    restart Odoo.
 2. **Apps → Update Apps List**, then install **POS Musqet**.
 3. **Point of Sale → Configuration → Payment Methods**: new method, *Use a Payment
-   Terminal* = **Musqet**, fill in **API Key**, **API URL**, **Terminal Serial**, and
-   add it to your POS.
+   Terminal* = **Musqet**, fill in **Musqet API Key**, **Musqet API URL**, **Musqet
+   Terminal Serial**, and add it to your POS.
 4. Open a POS session and ring a test sale on the Musqet method.
 
 ⚠️ **Make your POS/company currency match the terminal's currency at Musqet** — the
