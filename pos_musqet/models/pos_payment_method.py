@@ -132,8 +132,8 @@ class PosPaymentMethod(models.Model):
         # it lives only in this header and is never logged.
         return {'Authorization': 'Bearer %s' % (self.sudo().musqet_api_key or '')}
 
-    def _musqet_url(self, path):
-        return self.musqet_base_url.rstrip('/') + '/' + path.lstrip('/')
+    def _musqet_url(self, base_url, path):
+        return base_url.rstrip('/') + '/' + path.lstrip('/')
 
     def _musqet_request(self, method, path, payload=None):
         """Make one server-side call to the Musqet API.
@@ -144,11 +144,15 @@ class PosPaymentMethod(models.Model):
         """
         self.ensure_one()
         self._musqet_check_access()
-        if not self.musqet_base_url:
+        # Read with sudo() because the field is restricted to ERP managers (like the key),
+        # but _musqet_check_access intentionally lets a plain POS cashier drive the
+        # terminal — a cashier isn't an ERP manager, so an un-sudo'd read would fail.
+        base_url = self.sudo().musqet_base_url
+        if not base_url:
             # Keep the "always return {error}" contract: rstrip on a falsy field would
             # otherwise raise a raw AttributeError before the try block below.
             return {'error': {'message': _("No Musqet API URL is configured.")}}
-        url = self._musqet_url(path)
+        url = self._musqet_url(base_url, path)
         _logger.info("Musqet %s %s by user #%d", method, path, self.env.uid)
         if payload is not None:
             _logger.debug("Musqet request payload:\n%s", pprint.pformat(payload))
