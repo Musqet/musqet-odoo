@@ -1,19 +1,28 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
+import hashlib
+import hmac
 import ipaddress
+import json
 import logging
 import pprint
+import time
 import urllib.parse
 
 import requests
 
 from odoo import fields, models, api, _
 from odoo.exceptions import ValidationError, AccessDenied
+from odoo.tools import consteq
 
 _logger = logging.getLogger(__name__)
 
 DEFAULT_MUSQET_BASE_URL = 'https://api.musqet.tech/api/v1'
 # Network timeout (seconds) for every server-side call to the Musqet API.
 MUSQET_TIMEOUT = 10
+# Reject webhook signatures whose timestamp is more than this many seconds from now, to
+# blunt replay of a captured-but-stale notification (§4.5). Generous enough to absorb
+# clock skew between Musqet and the merchant host.
+MUSQET_WEBHOOK_TOLERANCE = 300
 # The base URL must point at the Musqet cloud. The field stays configurable (prod vs
 # staging) but is locked to this domain so an ERP manager can't repoint it at an
 # internal host and exfiltrate the bearer token (SSRF). See _check_musqet_base_url.
@@ -52,6 +61,33 @@ class PosPaymentMethod(models.Model):
         help="Serial number of the physical Musqet terminal bound to this payment method.",
         copy=False,
     )
+    # Webhook (#6) — only used on publicly-reachable deployments. The pilot is behind NAT
+    # and settles via polling, so these stay unset there and the push path simply never fires.
+    musqet_webhook_secret = fields.Char(
+        string="Musqet Webhook Signing Secret",
+        help="Shared secret used to verify the HMAC signature of inbound Musqet webhooks. "
+             "Only needed for publicly-reachable deployments; the pilot settles via polling.",
+        copy=False,
+        groups='base.group_erp_manager',
+    )
+    # Buffer for the latest asynchronous webhook result, read by the POS frontend after a
+    # MUSQET_LATEST_RESPONSE notification (mirrors pos_adyen.adyen_latest_response). Restricted
+    # like the other Musqet config; whitelisted in _is_write_forbidden so the public webhook
+    # controller can write it while a POS session is open.
+    musqet_latest_response = fields.Char(copy=False, groups='base.group_erp_manager')
+    musqet_webhook_url = fields.Char(
+        string="Musqet Webhook URL",
+        help="Register this URL with Musqet to receive signed sale notifications. "
+             "Reachable only on a public-HTTPS deployment.",
+        readonly=True,
+        store=False,
+        compute='_compute_musqet_webhook_url',
+    )
+
+    def _compute_musqet_webhook_url(self):
+        # get_base_url() forbids a multi-record recordset, so resolve it per record.
+        for payment_method in self:
+            payment_method.musqet_webhook_url = '%s/musqet/webhook' % payment_method.get_base_url()
 
     @api.model
     def _load_pos_data_fields(self, config):
@@ -203,6 +239,10 @@ class PosPaymentMethod(models.Model):
         shouldPrint, language, reference); amountInCents must already be integer minor
         units of the business currency. Returns ``{saleId, status, ...}`` or ``{error}``.
         """
+        # Drop any buffered webhook result from a previous sale so a late notification for
+        # it can't be mistaken for this one (mirrors pos_adyen). Written with sudo() because
+        # the field is ERP-manager-restricted but a plain cashier drives the terminal.
+        self.sudo().musqet_latest_response = ''
         return self._musqet_request('POST', '/terminal/sales', payload=payload)
 
     def musqet_get_sale(self, sale_id):
@@ -220,3 +260,71 @@ class PosPaymentMethod(models.Model):
         """
         return self._musqet_request(
             'POST', '/terminal/sales/%s/cancel' % urllib.parse.quote(str(sale_id), safe=''))
+
+    # -- Webhook (async push) -------------------------------------------------
+    # Used only on publicly-reachable deployments. The public controller verifies the HMAC,
+    # buffers the result here and pings the POS session; the frontend pulls it via
+    # musqet_get_latest_status. The pilot is behind NAT and relies on polling instead.
+
+    def _is_write_forbidden(self, fields):
+        # The base blocks writes to most config fields while a POS session is open. Allow
+        # the webhook controller to buffer its result during a session (mirrors pos_adyen).
+        return super()._is_write_forbidden(fields - {'musqet_latest_response'})
+
+    def musqet_get_latest_status(self):
+        """Return the latest webhook-buffered sale result for the POS frontend.
+
+        Named with the ``musqet_`` prefix to match the proxy convention and the JS call site.
+        Same access guard as the proxy: a POS cashier (or an internal/sudo call) may read it.
+        Returns the parsed canonical sale shape, or ``False`` if nothing is buffered.
+        """
+        self.ensure_one()
+        self._musqet_check_access()
+        latest = self.sudo().musqet_latest_response
+        if not latest:
+            return False
+        # Consume-once: clear the buffer as we hand it over so a duplicate notification — or a
+        # captured-but-still-fresh webhook replayed inside the timestamp window — can't drive a
+        # second settlement. Assumes one terminal per method (see the webhook controller); if a
+        # result is consumed by the wrong session the poll loop remains the backstop.
+        self.sudo().musqet_latest_response = ''
+        return json.loads(latest)
+
+    def _musqet_verify_webhook(self, signature_header, raw_body):
+        """Verify a Musqet webhook signature (§4.5).
+
+        Header form ``x-webhook-signature: t=<ts>,v1=<hmac>`` where
+        ``hmac = HMAC-SHA256("<ts>.<rawBody>", signing_secret)`` (hex). Returns True only if
+        the configured signing secret reproduces the signature AND the timestamp is fresh.
+        Comparison is constant-time (consteq); a missing secret, malformed header or stale
+        timestamp is rejected. ``raw_body`` must be the exact bytes received — re-encoding a
+        parsed body could change it and break the signature.
+        """
+        self.ensure_one()
+        secret = self.sudo().musqet_webhook_secret
+        if not secret or not signature_header:
+            return False
+        # Parse "t=<ts>,v1=<hmac>" into a dict, tolerant of surrounding spaces.
+        parts = {}
+        for chunk in signature_header.split(','):
+            key, sep, value = chunk.partition('=')
+            if sep:
+                parts[key.strip()] = value.strip()
+        timestamp = parts.get('t')
+        signature = parts.get('v1')
+        if not timestamp or not signature:
+            return False
+        # Reject stale/future timestamps to blunt replay (seconds since the epoch).
+        try:
+            age = abs(time.time() - int(timestamp))
+        except (TypeError, ValueError):
+            return False
+        if age > MUSQET_WEBHOOK_TOLERANCE:
+            return False
+        # Recompute over the raw bytes: b"<ts>." + body. Built from bytes so the body is
+        # never re-encoded (which could change it and fail an otherwise-valid signature).
+        if isinstance(raw_body, str):
+            raw_body = raw_body.encode()
+        signed_payload = timestamp.encode() + b'.' + (raw_body or b'')
+        expected = hmac.new(secret.encode(), signed_payload, hashlib.sha256).hexdigest()
+        return consteq(expected, signature)

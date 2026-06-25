@@ -21,9 +21,11 @@ const FAILURE_STATUSES = ["ERROR", "CANCELLED", "CANCELLED_REMOTE", "TIMED_OUT"]
 export class PaymentMusqet extends PaymentInterface {
     setup() {
         super.setup(...arguments);
-        // Per-paymentline poll bookkeeping, keyed by line uuid:
-        //   { saleId, cancelled }
-        // so sendPaymentCancel()/close() can stop an in-flight poll loop.
+        // Per-paymentline bookkeeping, keyed by line uuid:
+        //   { cancelled, saleId, settled, resolve }
+        // cancelled/saleId let sendPaymentCancel()/close() stop an in-flight poll loop;
+        // settled makes the shared settler run exactly once across the poll loop and an
+        // inbound webhook; resolve is the request promise both paths resolve through.
         this.pollState = {};
     }
 
@@ -54,7 +56,7 @@ export class PaymentMusqet extends PaymentInterface {
         // otherwise the abort is dropped and the just-created sale is left armed on the
         // terminal. saleId is filled in once the create returns. This method owns the
         // state's whole lifecycle (the finally below removes it on every exit path).
-        const state = { cancelled: false, saleId: null };
+        const state = { cancelled: false, saleId: null, settled: false, resolve: null };
         this.pollState[line.uuid] = state;
         try {
             line.setPaymentStatus("waiting");
@@ -85,7 +87,29 @@ export class PaymentMusqet extends PaymentInterface {
             }
 
             line.setPaymentStatus("waitingCard");
-            return await this._pollSale(saleId, line, state);
+            // The sale settles when EITHER the poll loop or an inbound webhook reports a
+            // terminal status — whichever lands first. Both funnel through _finishSale,
+            // which settles exactly once, so the slower path is a harmless no-op. Polling is
+            // the path the pilot relies on; the webhook only fires on reachable deployments.
+            // resolve is captured synchronously here, before _pollSale is fired and before
+            // any webhook can match this saleId — so state.resolve is always set by the time
+            // either path settles. The optional-chaining on the resolve calls below is purely
+            // defensive against an unforeseen reordering, not a real nullable window.
+            const settled = new Promise((resolve) => {
+                state.resolve = resolve;
+            });
+            // _pollSale drives `settled` itself and is fire-and-forget so a webhook can
+            // settle first; this catch only guards against an unexpected throw leaving the
+            // request hung forever (the awaited #4 version surfaced such errors directly).
+            this._pollSale(saleId, line, state).catch((error) => {
+                logPosMessage("PaymentMusqet", "_pollSale", "poll loop crashed", false, [error]);
+                if (!state.settled) {
+                    state.settled = true;
+                    line.setPaymentStatus("retry");
+                    state.resolve?.(false);
+                }
+            });
+            return await settled;
         } finally {
             delete this.pollState[line.uuid];
         }
@@ -145,20 +169,25 @@ export class PaymentMusqet extends PaymentInterface {
     }
 
     /**
-     * Poll musqet_get_sale until a terminal status or the overall timeout. Resolves the
-     * paymentline standalone — no webhook required. Returns true on COMPLETE, false on a
-     * failure status / timeout / cancel. ``state`` is owned by sendPaymentRequest (which
-     * registered and will remove it) so a cancel landing mid-poll is observed here.
+     * Poll musqet_get_sale until a terminal status or the overall timeout, settling the line
+     * through _finishSale (which resolves sendPaymentRequest's promise). Fire-and-forget: the
+     * result is delivered via ``state.resolve``, not a return value, so an inbound webhook can
+     * settle the same line first. ``state`` is owned by sendPaymentRequest (which registered
+     * and will remove it) so a cancel — or a webhook that already settled — is observed here.
      */
     async _pollSale(saleId, line, state) {
         const start = Date.now();
-        while (!state.cancelled && Date.now() - start < POLL_TIMEOUT_MS) {
+        while (!state.cancelled && !state.settled && Date.now() - start < POLL_TIMEOUT_MS) {
             // Poll first, then sleep, so a sale the terminal resolves immediately settles
             // without waiting a full interval up front.
             const sale = await this._call("musqet_get_sale", [
                 [this.payment_method_id.id],
                 saleId,
             ]);
+            if (state.settled) {
+                // A webhook settled this line while the poll was in flight — nothing to do.
+                return;
+            }
             if (state.cancelled) {
                 // Cancelled during the poll round-trip — don't act on a stale result.
                 break;
@@ -167,34 +196,116 @@ export class PaymentMusqet extends PaymentInterface {
             // sale — keep polling until the overall timeout. Persistent-failure hardening
             // is issue #8.
             if (sale && !sale.error) {
-                const status = sale.status;
-                if (status === SUCCESS_STATUS) {
-                    // transaction_id = saleId for reconciliation against Musqet.
-                    line.transaction_id = sale.saleId || saleId;
-                    // Record which rail the terminal settled on, straight from the
-                    // top-level field ("card" | "bitcoin") — never inferred from metadata.
-                    // Persisted on pos.payment so it survives to a later-session refund,
-                    // which #7 gates on (card vs Lightning reverse differently).
-                    line.musqet_rail = sale.rail || false;
-                    line.setReceiptInfo(this._receiptInfo(sale));
-                    line.setPaymentStatus("done");
-                    return true;
-                }
-                if (FAILURE_STATUSES.includes(status)) {
-                    this._showError(this._statusErrorMessage(status));
-                    line.setPaymentStatus("retry");
-                    return false;
+                this._finishSale(line, sale, state);
+                if (state.settled) {
+                    return;
                 }
                 // PENDING / PROCESSING / anything unrecognised → keep polling.
             }
             await this._sleep(POLL_INTERVAL_MS);
         }
-        if (state.cancelled) {
-            return false;
+        if (state.settled) {
+            return;
         }
+        if (state.cancelled) {
+            // Resolve as non-success; pay()'s handlePaymentResponse(false) sets the line
+            // back to "retry". The remote terminal cancel was already fired by the cancel path.
+            state.resolve?.(false);
+            return;
+        }
+        // Overall budget exhausted.
+        state.settled = true;
         this._showError(this._statusErrorMessage("TIMED_OUT"));
         line.setPaymentStatus("retry");
-        return false;
+        state.resolve?.(false);
+    }
+
+    /**
+     * Apply a terminal sale result to the line exactly once. Both the poll loop and an
+     * inbound webhook funnel through here; ``state.settled`` makes the second arrival a
+     * no-op, so a sale is never double-settled when a webhook and a poll both land
+     * (the idempotency requirement of #6). Non-terminal statuses are ignored (keep waiting).
+     */
+    _finishSale(line, sale, state) {
+        // Settle at most once (settled) and never settle a line the cashier already
+        // cancelled (cancelled). The poll loop observes cancellation on its own wake, but a
+        // webhook can funnel a success in here during the cancel→cleanup window — guard it
+        // here too so the shared funnel can't break the cancel invariant the other paths hold.
+        if (state.settled || state.cancelled) {
+            return;
+        }
+        const status = sale.status;
+        if (status === SUCCESS_STATUS) {
+            state.settled = true;
+            // transaction_id = saleId for reconciliation against Musqet.
+            line.transaction_id = sale.saleId || state.saleId;
+            // Record which rail the terminal settled on, straight from the top-level field
+            // ("card" | "bitcoin") — never inferred from metadata. Persisted on pos.payment
+            // so it survives to a later-session refund, which #7 gates on.
+            line.musqet_rail = sale.rail || false;
+            line.setReceiptInfo(this._receiptInfo(sale));
+            line.setPaymentStatus("done");
+            state.resolve?.(true);
+        } else if (FAILURE_STATUSES.includes(status)) {
+            state.settled = true;
+            this._showError(this._statusErrorMessage(status));
+            line.setPaymentStatus("retry");
+            state.resolve?.(false);
+        }
+        // PENDING / PROCESSING / anything unrecognised → not terminal, leave the line waiting.
+    }
+
+    /**
+     * Handle an inbound webhook (push path). Invoked by the PosStore websocket patch once the
+     * backend controller has verified a signature and buffered the result. Pulls the buffer
+     * and settles the pending line. Only fires on publicly-reachable deployments; the pilot
+     * settles via the poll loop and never reaches here.
+     */
+    async handleMusqetStatusResponse() {
+        const sale = await this._call("musqet_get_latest_status", [
+            [this.payment_method_id.id],
+        ]);
+        if (!sale || sale.error) {
+            // Nothing buffered, or a transient RPC failure — the poll loop is the backstop.
+            return;
+        }
+        const line = this.pos.getPendingPaymentLine("musqet");
+        if (!line) {
+            return;
+        }
+        const state = this.pollState[line.uuid];
+        if (state) {
+            // Only settle if this buffered result is for the sale this line is waiting on.
+            // The contract guarantees a webhook carries saleId, so require an exact match — a
+            // missing/foreign saleId, or the window before our own create has returned
+            // (state.saleId still null), means we can't confirm it's ours, so we leave it to
+            // the poll loop rather than settle on a guess.
+            if (sale.saleId !== state.saleId) {
+                return;
+            }
+            this._finishSale(line, sale, state);
+            return;
+        }
+        // The in-memory poll state was lost (e.g. the page was refreshed mid-payment). We no
+        // longer have our saleId, so match by order reference and refuse to settle on "can't
+        // confirm" — never settle a line the result can't be positively tied to.
+        const order = line.pos_order_id;
+        const reference = order?.pos_reference || order?.uuid;
+        if (!reference || sale.reference !== reference) {
+            return;
+        }
+        const success = sale.status === SUCCESS_STATUS;
+        if (success) {
+            line.transaction_id = sale.saleId || line.transaction_id;
+            line.musqet_rail = sale.rail || false;
+            line.setReceiptInfo(this._receiptInfo(sale));
+        } else if (!FAILURE_STATUSES.includes(sale.status)) {
+            // Non-terminal status buffered — nothing to settle yet.
+            return;
+        } else {
+            this._showError(this._statusErrorMessage(sale.status));
+        }
+        line.handlePaymentResponse(success);
     }
 
     _receiptInfo(sale) {
