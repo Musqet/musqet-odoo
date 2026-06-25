@@ -18,6 +18,23 @@ const POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const SUCCESS_STATUS = "COMPLETE";
 const FAILURE_STATUSES = ["ERROR", "CANCELLED", "CANCELLED_REMOTE", "TIMED_OUT"];
 
+// Resilience (issue #8). The poll loop tolerates transient blips: a single failed
+// musqet_get_sale (an Odoo RPC dropped, or the proxy briefly returning {error}) must not
+// kill a card payment that may still be completing at the terminal. But a *sustained* run
+// of failed reads means we've lost contact with Odoo/the proxy and are polling blind, so
+// after this many CONSECUTIVE failures we stop and let the cashier retry rather than spin to
+// the overall timeout (mirrors pos_adyen's _handleOdooConnectionFailure). A single clean
+// poll resets the count. At POLL_INTERVAL_MS that's ~12s of sustained failure before bailing.
+const MAX_POLL_CONNECTION_FAILURES = 8;
+
+// §4.7: at most one sale/refund in flight per physical terminal. The Musqet API itself
+// rejects a second command on the same (business, serial) with 409 CONFLICT while one is in
+// flight (Musqet/musqet#2094), and the §2 serial-uniqueness constraint stops two payment
+// methods sharing a serial — but we guard client-side first, keyed by serial, so the cashier
+// gets a clear message instead of a raw API error. Module-level so the guard spans every
+// PaymentMusqet instance, not just one payment method.
+const inFlightSerials = new Set();
+
 export class PaymentMusqet extends PaymentInterface {
     setup() {
         super.setup(...arguments);
@@ -61,13 +78,33 @@ export class PaymentMusqet extends PaymentInterface {
             return false;
         }
 
+        // §4.7: refuse to fire a second command at a terminal that's already taking a
+        // payment. The terminal's own 409 CONFLICT is the backstop, but guarding here gives
+        // the cashier a clear message up front instead of a failed create round-trip.
+        const serial = this.payment_method_id.musqet_terminal_serial;
+        if (serial && inFlightSerials.has(serial)) {
+            this._showError(
+                _t(
+                    "This Musqet terminal is already taking a payment. Wait for it to finish before starting another."
+                )
+            );
+            line.setPaymentStatus("retry");
+            return false;
+        }
+
         // Register poll state BEFORE the create round-trip. If the cashier cancels while
         // the create RPC is in flight, sendPaymentCancel must find a state object to flag —
         // otherwise the abort is dropped and the just-created sale is left armed on the
         // terminal. saleId is filled in once the create returns. This method owns the
-        // state's whole lifecycle (the finally below removes it on every exit path).
+        // state's whole lifecycle (the finally below removes it, and releases the terminal
+        // lock, on every exit path). The lock is held for the whole in-flight window because
+        // the try body awaits `settled`, which resolves only once the sale settles, times
+        // out, or is cancelled.
         const state = { cancelled: false, saleId: null, settled: false, resolve: null };
         this.pollState[line.uuid] = state;
+        if (serial) {
+            inFlightSerials.add(serial);
+        }
         try {
             line.setPaymentStatus("waiting");
             // A refund goes through musqet_create_refund, which re-reads the original payment
@@ -132,6 +169,9 @@ export class PaymentMusqet extends PaymentInterface {
             return await settled;
         } finally {
             delete this.pollState[line.uuid];
+            if (serial) {
+                inFlightSerials.delete(serial);
+            }
         }
     }
 
@@ -265,6 +305,10 @@ export class PaymentMusqet extends PaymentInterface {
      */
     async _pollSale(saleId, line, state) {
         const start = Date.now();
+        // Count consecutive failed status reads; any clean poll resets it. A sustained run
+        // means we've lost contact with Odoo/the proxy (issue #8 — see
+        // MAX_POLL_CONNECTION_FAILURES) and should stop rather than poll blind.
+        let connectionFailures = 0;
         while (!state.cancelled && !state.settled && Date.now() - start < POLL_TIMEOUT_MS) {
             // Poll first, then sleep, so a sale the terminal resolves immediately settles
             // without waiting a full interval up front.
@@ -280,15 +324,31 @@ export class PaymentMusqet extends PaymentInterface {
                 // Cancelled during the poll round-trip — don't act on a stale result.
                 break;
             }
-            // A transient transport blip (proxy {error}) or RPC failure shouldn't kill the
-            // sale — keep polling until the overall timeout. Persistent-failure hardening
-            // is issue #8.
+            // A single transient transport blip (proxy {error}) or RPC failure shouldn't kill
+            // the sale — keep polling so a card payment that's still completing settles.
             if (sale && !sale.error) {
+                connectionFailures = 0;
                 this._finishSale(line, sale, state);
                 if (state.settled) {
                     return;
                 }
                 // PENDING / PROCESSING / anything unrecognised → keep polling.
+            } else if (++connectionFailures >= MAX_POLL_CONNECTION_FAILURES) {
+                // Lost contact for several polls running. Stop and let the cashier retry
+                // rather than spin to the overall timeout (mirrors pos_adyen's
+                // _handleOdooConnectionFailure). A sale already armed on the terminal is left
+                // for reconciliation (#9): we can't read its status from here, so we must not
+                // claim success — and the terminal's 409 still blocks an accidental re-arm
+                // while that original sale is in flight.
+                state.settled = true;
+                this._showError(
+                    _t(
+                        "Lost connection to the Odoo server while waiting for the Musqet terminal. Please check the connection and try again."
+                    )
+                );
+                line.setPaymentStatus("retry");
+                state.resolve?.(false);
+                return;
             }
             await this._sleep(POLL_INTERVAL_MS);
         }
