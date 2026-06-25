@@ -4,6 +4,7 @@ import { PaymentInterface } from "@point_of_sale/app/utils/payment/payment_inter
 import { AlertDialog } from "@web/core/confirmation_dialog/confirmation_dialog";
 import { register_payment_method } from "@point_of_sale/app/services/pos_store";
 import { logPosMessage } from "@point_of_sale/app/utils/pretty_console_log";
+import { formatInteger } from "@web/views/fields/formatters";
 
 // Poll cadence for the create→poll result engine. Polling — not the webhook — is the
 // primary result mechanism for the pilot: the merchant is behind NAT with no public
@@ -170,6 +171,11 @@ export class PaymentMusqet extends PaymentInterface {
                 if (status === SUCCESS_STATUS) {
                     // transaction_id = saleId for reconciliation against Musqet.
                     line.transaction_id = sale.saleId || saleId;
+                    // Record which rail the terminal settled on, straight from the
+                    // top-level field ("card" | "bitcoin") — never inferred from metadata.
+                    // Persisted on pos.payment so it survives to a later-session refund,
+                    // which #7 gates on (card vs Lightning reverse differently).
+                    line.musqet_rail = sale.rail || false;
                     line.setReceiptInfo(this._receiptInfo(sale));
                     line.setPaymentStatus("done");
                     return true;
@@ -197,10 +203,20 @@ export class PaymentMusqet extends PaymentInterface {
         // the raw enum token.
         const labels = { card: _t("Card"), bitcoin: _t("Lightning") };
         const label = labels[sale.rail];
-        if (label) {
-            return _t("Paid via Musqet (%s)", label);
+        let info = label ? _t("Paid via Musqet (%s)", label) : _t("Paid via Musqet");
+        // Supplementary Lightning detail: the sats the terminal settled, if it reported
+        // any. Gate on the top-level rail and read only the bitcoin metadata block — the
+        // terminal still prints the authoritative slip, so this is a convenience line.
+        if (sale.rail === "bitcoin") {
+            const sats = Number(sale.metadata?.bitcoin?.satsAmount);
+            if (Number.isFinite(sats) && sats > 0) {
+                // formatInteger groups thousands using the POS session's Odoo locale (and
+                // rounds to a whole unit), so the sats line matches the rest of the
+                // receipt's number formatting rather than the raw JS runtime locale.
+                info += "\n" + _t("%s sats", formatInteger(sats));
+            }
         }
-        return _t("Paid via Musqet");
+        return info;
     }
 
     // -- helpers --------------------------------------------------------------
