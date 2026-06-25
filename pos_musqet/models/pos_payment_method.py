@@ -201,7 +201,7 @@ class PosPaymentMethod(models.Model):
 
         ``payload`` is built by the caller (§4.1: serial, amountInCents, mode, type,
         shouldPrint, language, reference); amountInCents must already be integer minor
-        units of the business currency. Returns ``{id, status}`` or ``{error}``.
+        units of the business currency. Returns ``{saleId, status, ...}`` or ``{error}``.
         """
         return self._musqet_request('POST', '/terminal/sales', payload=payload)
 

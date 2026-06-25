@@ -48,26 +48,46 @@ export class PaymentMusqet extends PaymentInterface {
             return false;
         }
 
-        line.setPaymentStatus("waiting");
-        const response = await this._call("musqet_create_sale", [
-            [this.payment_method_id.id],
-            this._createSalePayload(order, line),
-        ]);
-        if (!response || response.error) {
-            this._showError(this._errorMessage(response));
-            line.setPaymentStatus("retry");
-            return false;
-        }
+        // Register poll state BEFORE the create round-trip. If the cashier cancels while
+        // the create RPC is in flight, sendPaymentCancel must find a state object to flag —
+        // otherwise the abort is dropped and the just-created sale is left armed on the
+        // terminal. saleId is filled in once the create returns. This method owns the
+        // state's whole lifecycle (the finally below removes it on every exit path).
+        const state = { cancelled: false, saleId: null };
+        this.pollState[line.uuid] = state;
+        try {
+            line.setPaymentStatus("waiting");
+            const response = await this._call("musqet_create_sale", [
+                [this.payment_method_id.id],
+                this._createSalePayload(order, line),
+            ]);
+            if (!response || response.error) {
+                this._showError(this._errorMessage(response));
+                line.setPaymentStatus("retry");
+                return false;
+            }
 
-        const saleId = response.saleId;
-        if (!saleId) {
-            this._showError(_t("The Musqet terminal did not return a sale reference."));
-            line.setPaymentStatus("retry");
-            return false;
-        }
+            const saleId = response.saleId;
+            if (!saleId) {
+                this._showError(_t("The Musqet terminal did not return a sale reference."));
+                line.setPaymentStatus("retry");
+                return false;
+            }
+            state.saleId = saleId;
 
-        line.setPaymentStatus("waitingCard");
-        return this._pollSale(saleId, line);
+            // The cashier may have cancelled while the create RPC was in flight. The sale
+            // now exists on the terminal, so abort it rather than start polling a sale the
+            // cashier already abandoned.
+            if (state.cancelled) {
+                this._call("musqet_cancel_sale", [[this.payment_method_id.id], saleId]);
+                return false;
+            }
+
+            line.setPaymentStatus("waitingCard");
+            return await this._pollSale(saleId, line, state);
+        } finally {
+            delete this.pollState[line.uuid];
+        }
     }
 
     async sendPaymentCancel(order, uuid) {
@@ -76,8 +96,10 @@ export class PaymentMusqet extends PaymentInterface {
         const state = this.pollState[uuid];
         if (state) {
             state.cancelled = true;
-            // Best-effort: free the physical terminal. The full cancel UX (surfacing
-            // failures, reversals) is issue #7; here we just fire and forget.
+            // Best-effort: free the physical terminal. If the create RPC hasn't returned
+            // yet there's no saleId to cancel — sendPaymentRequest re-checks the cancelled
+            // flag once it does and aborts then. The full cancel UX (surfacing failures,
+            // reversals) is issue #7; here we just fire and forget.
             if (state.saleId) {
                 this._call("musqet_cancel_sale", [
                     [this.payment_method_id.id],
@@ -124,28 +146,26 @@ export class PaymentMusqet extends PaymentInterface {
     /**
      * Poll musqet_get_sale until a terminal status or the overall timeout. Resolves the
      * paymentline standalone — no webhook required. Returns true on COMPLETE, false on a
-     * failure status / timeout / cancel.
+     * failure status / timeout / cancel. ``state`` is owned by sendPaymentRequest (which
+     * registered and will remove it) so a cancel landing mid-poll is observed here.
      */
-    async _pollSale(saleId, line) {
-        const state = { saleId, cancelled: false };
-        this.pollState[line.uuid] = state;
+    async _pollSale(saleId, line, state) {
         const start = Date.now();
-        try {
-            while (!state.cancelled && Date.now() - start < POLL_TIMEOUT_MS) {
-                await this._sleep(POLL_INTERVAL_MS);
-                if (state.cancelled) {
-                    break;
-                }
-                const sale = await this._call("musqet_get_sale", [
-                    [this.payment_method_id.id],
-                    saleId,
-                ]);
-                // A transient transport blip (proxy {error}) or RPC failure shouldn't kill
-                // the sale — keep polling until the overall timeout. Persistent-failure
-                // hardening is issue #8.
-                if (!sale || sale.error) {
-                    continue;
-                }
+        while (!state.cancelled && Date.now() - start < POLL_TIMEOUT_MS) {
+            // Poll first, then sleep, so a sale the terminal resolves immediately settles
+            // without waiting a full interval up front.
+            const sale = await this._call("musqet_get_sale", [
+                [this.payment_method_id.id],
+                saleId,
+            ]);
+            if (state.cancelled) {
+                // Cancelled during the poll round-trip — don't act on a stale result.
+                break;
+            }
+            // A transient transport blip (proxy {error}) or RPC failure shouldn't kill the
+            // sale — keep polling until the overall timeout. Persistent-failure hardening
+            // is issue #8.
+            if (sale && !sale.error) {
                 const status = sale.status;
                 if (status === SUCCESS_STATUS) {
                     // transaction_id = saleId for reconciliation against Musqet.
@@ -161,22 +181,24 @@ export class PaymentMusqet extends PaymentInterface {
                 }
                 // PENDING / PROCESSING / anything unrecognised → keep polling.
             }
-            if (state.cancelled) {
-                return false;
-            }
-            this._showError(_t("The Musqet payment timed out. Please try again."));
-            line.setPaymentStatus("retry");
-            return false;
-        } finally {
-            delete this.pollState[line.uuid];
+            await this._sleep(POLL_INTERVAL_MS);
         }
+        if (state.cancelled) {
+            return false;
+        }
+        this._showError(this._statusErrorMessage("TIMED_OUT"));
+        line.setPaymentStatus("retry");
+        return false;
     }
 
     _receiptInfo(sale) {
-        // Minimal by design: the terminal prints the card slip. Use the top-level rail —
-        // never derive payment detail from the opaque metadata.card blob.
-        if (sale.rail) {
-            return _t("Paid via Musqet (%s)", sale.rail);
+        // Minimal by design: the terminal prints the card slip. Use the top-level rail
+        // (never the opaque metadata.card blob), mapped to a friendly label rather than
+        // the raw enum token.
+        const labels = { card: _t("Card"), bitcoin: _t("Lightning") };
+        const label = labels[sale.rail];
+        if (label) {
+            return _t("Paid via Musqet (%s)", label);
         }
         return _t("Paid via Musqet");
     }
