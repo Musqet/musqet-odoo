@@ -12,6 +12,7 @@
     'installable': True,
     'assets': {
         'point_of_sale._assets_pos': [
+            # Empty until the POS payment handler JS lands (#4); a zero-match glob is a no-op.
             'pos_musqet/static/src/**/*',
         ],
     },

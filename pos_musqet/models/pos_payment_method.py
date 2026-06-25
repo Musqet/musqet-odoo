@@ -12,9 +12,9 @@ class PosPaymentMethod(models.Model):
         return super()._get_payment_terminal_selection() + [('musqet', 'Musqet')]
 
     # Musqet
-    # The API key authenticates the Odoo backend to the Musqet terminal API. It is
-    # read server-side only (self.sudo().musqet_api_key) and is NEVER surfaced to the
-    # browser / POS JS. groups= restricts it to ERP managers in the form view.
+    # groups= controls ORM/UI visibility, not storage. The key is read server-side via
+    # self.sudo().musqet_api_key and is intentionally excluded from _load_pos_data_fields
+    # so it is never loaded into POS JS.
     musqet_api_key = fields.Char(
         string="Musqet API Key",
         help="Bearer token used by Odoo to authenticate to the Musqet terminal API. "
