@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Odoo runtime / local dev
+*.log
+.odoorc
+odoo.conf
+*.sqlite
+data_dir/
+filestore/
+sessions/
+
+# Node / POS asset tooling (if used locally)
+node_modules/
+*.tsbuildinfo
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Secrets — never commit API keys / webhook signing secrets
+.env
+.env.*
+*.secret
+secrets.json
