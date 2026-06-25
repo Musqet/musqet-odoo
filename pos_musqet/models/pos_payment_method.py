@@ -297,7 +297,12 @@ class PosPaymentMethod(models.Model):
             amount = int(payload.get('amountInCents'))
         except (TypeError, ValueError):
             return {'error': {'message': _("The refund amount is invalid.")}}
-        decimals = original.currency_id.decimal_places or 2
+        # `is not None`, not `or 2`: a zero-decimal currency (JPY) has decimal_places == 0,
+        # and `0 or 2` would wrongly use 2 — computing a cap 100x too loose. Mirrors the
+        # frontend's Number.isInteger() check, which also preserves 0.
+        decimals = original.currency_id.decimal_places
+        if decimals is None:
+            decimals = 2
         captured = int(round(original.amount * (10 ** decimals)))
         if amount <= 0 or amount > captured:
             return {'error': {'message': _("The refund amount exceeds the original payment.")}}

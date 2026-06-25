@@ -12,15 +12,21 @@ patch(PaymentScreen.prototype, {
         let matchedPaymentLine = null;
         if (paymentMethod.use_payment_terminal === "musqet" && this.isRefundOrder) {
             const refundedOrder = this.currentOrder.lines[0]?.refunded_orderline_id?.order_id;
-            const amountDue = Math.abs(this.currentOrder.remainingDue);
+            // Compare in rounded minor units so sub-cent float drift in remainingDue (e.g.
+            // 10.000000001) can't make an exact full refund miss its original sale.
+            const decimals = Number.isInteger(this.pos.currency?.decimal_places)
+                ? this.pos.currency.decimal_places
+                : 2;
+            const toMinor = (amount) => Math.round(amount * Math.pow(10, decimals));
+            const dueMinor = toMinor(Math.abs(this.currentOrder.remainingDue));
             // Candidate original sales: settled Musqet lines (transaction_id present) big enough
-            // to cover this refund. amount is positive on a sale, so `>= amountDue` also excludes
+            // to cover this refund. amount is positive on a sale, so `>= dueMinor` also excludes
             // refund lines (negative) — a refund-of-refund finds no candidate and bails.
             const candidates = (refundedOrder?.payment_ids ?? []).filter(
                 (line) =>
                     line.payment_method_id.use_payment_terminal === "musqet" &&
                     line.transaction_id &&
-                    line.amount >= amountDue
+                    toMinor(line.amount) >= dueMinor
             );
             // Prefer a card sale (the only rail we can auto-refund). Fall back to any Musqet
             // sale so a Lightning-only original still stashes its rail and the driver shows the
