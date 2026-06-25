@@ -280,16 +280,31 @@ class TestMusqetCreateRefund(TransactionCase):
         original.amount = amount
         original.currency_id.decimal_places = 2
         original.currency_id.name = 'USD'
+        # A real string saleId so the cumulative-refund search runs against a concrete value
+        # (the search itself is stubbed in _call_refund — see prior_refunds).
+        original.transaction_id = 'sale-orig-1'
         return original
 
-    def _call_refund(self, payload, original, original_payment_id=123):
+    def _stub_prior_refund(self, amount, reference='OTHER-ORDER'):
+        # A previously-settled refund of the original. Refund payment lines carry a negative
+        # amount in a real order, which the cumulative cap takes the magnitude of.
+        refund = MagicMock()
+        refund.amount = amount
+        refund.pos_order_id.pos_reference = reference
+        refund.pos_order_id.uuid = reference
+        return refund
+
+    def _call_refund(self, payload, original, original_payment_id=123, prior_refunds=None):
         # Default the request currency to the stub's so the currency-equality guard passes
         # unless a test deliberately overrides it.
         payload = {'currency': 'USD', **payload}
         fake = MagicMock()
         fake.status_code = 200
         fake.json.return_value = {'saleId': 'refund-1', 'status': 'PENDING'}
+        # Stub the prior-refunds search so the cumulative cap / dedup logic is exercised without
+        # a populated POS database; default to none.
         with patch.object(type(self.env['pos.payment']), 'browse', return_value=original), \
+             patch.object(type(self.env['pos.payment']), 'search', return_value=prior_refunds or []), \
              patch.object(pos_payment_method.requests, 'request', return_value=fake) as mock_request:
             result = self.method.with_user(self.cashier).musqet_create_refund(
                 payload, original_payment_id)
@@ -358,6 +373,49 @@ class TestMusqetCreateRefund(TransactionCase):
             result, mock_request = self._call_refund({'amountInCents': amount}, original)
             self.assertIn('error', result, msg=amount)
             mock_request.assert_not_called()
+
+    def test_caps_against_remaining_after_prior_refunds(self):
+        # captured = 1000 cents; a prior 400-cent refund leaves 600 refundable.
+        original = self._stub_original(rail='card', amount=10.0)
+        prior = [self._stub_prior_refund(-4.0)]
+        # Exactly the remaining 600 is allowed through.
+        result, mock_request = self._call_refund(
+            {'amountInCents': 600}, original, prior_refunds=prior)
+        self.assertNotIn('error', result)
+        self.assertEqual(mock_request.mock_calls[0].kwargs['json']['amountInCents'], 600)
+        # One cent past the remaining is rejected before any terminal command.
+        result, mock_request = self._call_refund(
+            {'amountInCents': 601}, original, prior_refunds=prior)
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_rejects_when_prior_refunds_exhaust_the_amount(self):
+        # captured = 1000 cents; prior refunds already total 1000, so nothing remains.
+        original = self._stub_original(rail='card', amount=10.0)
+        prior = [self._stub_prior_refund(-6.0), self._stub_prior_refund(-4.0)]
+        result, mock_request = self._call_refund(
+            {'amountInCents': 1}, original, prior_refunds=prior)
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_rejects_duplicate_refund_reference(self):
+        # A refund of this original already carries this refund order's reference -> duplicate.
+        original = self._stub_original(rail='card', amount=10.0)
+        prior = [self._stub_prior_refund(-3.0, reference='REFUND-ORDER-7')]
+        result, mock_request = self._call_refund(
+            {'amountInCents': 200, 'reference': 'REFUND-ORDER-7'}, original, prior_refunds=prior)
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_allows_a_distinct_reference_within_the_remaining_amount(self):
+        # Same original, a different (genuinely new) refund order reference, still within the
+        # remaining amount -> allowed through. Guards against the dedup over-matching.
+        original = self._stub_original(rail='card', amount=10.0)
+        prior = [self._stub_prior_refund(-3.0, reference='REFUND-ORDER-7')]
+        result, mock_request = self._call_refund(
+            {'amountInCents': 200, 'reference': 'REFUND-ORDER-8'}, original, prior_refunds=prior)
+        self.assertNotIn('error', result)
+        self.assertEqual(mock_request.mock_calls[0].kwargs['json']['amountInCents'], 200)
 
     def test_rejects_cross_company_original(self):
         other_company = self.env['res.company'].create({'name': 'Other Co'})
