@@ -44,10 +44,20 @@ export class PaymentMusqet extends PaymentInterface {
         if (!line) {
             return false;
         }
-        // Refunds/reversals are out of scope here (issue #7); a Musqet sale is a debit.
-        if (line.amount < 0) {
-            this._showError(_t("Musqet cannot process a negative amount."));
-            line.setPaymentStatus("retry");
+
+        // A refund order rings a negative payment line. Odoo 19 routes it through this same
+        // sendPaymentRequest (no shipped terminal driver implements sendPaymentReversal, and
+        // supports_reversals is unused in 19.0), so we mirror pos_stripe: a negative amount
+        // means refund the original Musqet sale via type:"refund". Everything downstream —
+        // the create→poll engine and the shared settle-back — is identical to a sale.
+        const payload =
+            line.amount < 0
+                ? this._refundPreflight(order, line)
+                : this._createSalePayload(order, line);
+        if (!payload) {
+            // Refund preflight refused (no original Musqet sale to reverse, or a non-card
+            // rail the terminal can't refund). It has already messaged the cashier and reset
+            // the line, so just abort here.
             return false;
         }
 
@@ -62,7 +72,7 @@ export class PaymentMusqet extends PaymentInterface {
             line.setPaymentStatus("waiting");
             const response = await this._call("musqet_create_sale", [
                 [this.payment_method_id.id],
-                this._createSalePayload(order, line),
+                payload,
             ]);
             if (!response || response.error) {
                 this._showError(this._errorMessage(response));
@@ -123,8 +133,9 @@ export class PaymentMusqet extends PaymentInterface {
             state.cancelled = true;
             // Best-effort: free the physical terminal. If the create RPC hasn't returned
             // yet there's no saleId to cancel — sendPaymentRequest re-checks the cancelled
-            // flag once it does and aborts then. The full cancel UX (surfacing failures,
-            // reversals) is issue #7; here we just fire and forget.
+            // flag once it does and aborts then. We return true unconditionally so the core
+            // payment screen sets the line back to "retry"; the cancel only takes effect
+            // while the sale is PENDING/PROCESSING (§4.3), which is the in-flight case here.
             if (state.saleId) {
                 this._call("musqet_cancel_sale", [
                     [this.payment_method_id.id],
@@ -137,34 +148,97 @@ export class PaymentMusqet extends PaymentInterface {
 
     close() {
         super.close();
-        // Closing the payment screen abandons any in-flight polls.
+        // Closing the payment screen abandons any in-flight payment. Stop the poll loop and
+        // free the physical terminal for each sale that's already armed (has a saleId) and
+        // not yet settled — otherwise it would sit waiting for a card the cashier walked away
+        // from. Best-effort and fire-and-forget, like sendPaymentCancel; the cancel only
+        // takes effect while the sale is PENDING/PROCESSING (§4.3), which is exactly this case.
         for (const state of Object.values(this.pollState)) {
             state.cancelled = true;
+            if (state.saleId && !state.settled) {
+                this._call("musqet_cancel_sale", [
+                    [this.payment_method_id.id],
+                    state.saleId,
+                ]);
+            }
         }
     }
 
     // -- create→poll engine ---------------------------------------------------
 
-    _createSalePayload(order, line) {
+    _amountInCents(amount) {
         const currency = this.pos.currency;
         // decimal_places is the currency's minor-unit exponent (2 for USD/EUR, 0 for JPY);
         // fall back to 2 so a malformed currency can never yield NaN cents (a wrong charge).
         const decimals = Number.isInteger(currency.decimal_places) ? currency.decimal_places : 2;
+        // Integer minor units of the business currency (§4.1) — yields cents/sen without
+        // assuming two decimals. Math.round absorbs binary-float drift.
+        return Math.round(amount * Math.pow(10, decimals));
+    }
+
+    _commonPayload(order) {
         return {
             serial: this.payment_method_id.musqet_terminal_serial,
-            // Integer minor units of the business currency (§4.1) — yields cents/sen
-            // without assuming two decimals. Math.round absorbs binary-float drift.
-            amountInCents: Math.round(line.amount * Math.pow(10, decimals)),
-            currency: currency.name,
+            currency: this.pos.currency.name,
             // The terminal prompts the rail and handles QR + FX for Bitcoin/Lightning.
             mode: "any",
-            type: "sale",
-            // Let the terminal print its own card slip; Odoo's receipt stays minimal.
+            // Let the terminal print its own slip; Odoo's receipt stays minimal.
             shouldPrint: true,
-            // Stable, unique Odoo order ref — used to reconcile and to keep result
-            // handling idempotent if a webhook and a poll both land later (#6).
+            // Stable, unique Odoo order ref — used to reconcile and to keep result handling
+            // idempotent if a webhook and a poll both land later (#6).
             reference: order.pos_reference || order.uuid,
             language: (this.pos.user?.lang || "en").split("_")[0],
+        };
+    }
+
+    _createSalePayload(order, line) {
+        return {
+            ...this._commonPayload(order),
+            amountInCents: this._amountInCents(line.amount),
+            type: "sale",
+        };
+    }
+
+    /**
+     * Validate a refund-order line and build its create-refund payload, or return null after
+     * messaging the cashier. The original Musqet sale id and rail are carried onto the refund
+     * line's uiState by updateRefundPaymentLine (see the pos.payment override). We refund only
+     * card-settled sales: the terminal can't reverse Lightning (epic §7), and an unknown rail
+     * can't be confirmed as card — both are sent to a manual refund rather than guessed at.
+     */
+    _refundPreflight(order, line) {
+        const refund = line.uiState?.musqetRefund;
+        const originalSaleId = refund?.saleId;
+        if (!originalSaleId) {
+            this._showError(
+                _t(
+                    "This order has no original Musqet card payment to refund. Refund it with the same method that took it."
+                )
+            );
+            line.setPaymentStatus("retry");
+            return null;
+        }
+        if (refund.rail !== "card") {
+            const body =
+                refund.rail === "bitcoin"
+                    ? _t(
+                          "Lightning payments can't be refunded automatically. Please refund this payment manually in the Musqet app."
+                      )
+                    : _t(
+                          "This Musqet payment can't be refunded automatically. Please refund it manually in the Musqet app."
+                      );
+            this._showError(body);
+            line.setPaymentStatus("retry");
+            return null;
+        }
+        return {
+            ...this._commonPayload(order),
+            // Positive magnitude of the refund; type:"refund" denotes the direction.
+            amountInCents: this._amountInCents(Math.abs(line.amount)),
+            type: "refund",
+            // The original card sale this refund reverses. NOTE: confirm the exact field name
+            // against the Musqet refund contract (ticket Musqet/musqet#2094) before go-live.
+            refundSaleId: originalSaleId,
         };
     }
 
