@@ -283,6 +283,9 @@ class TestMusqetCreateRefund(TransactionCase):
         return original
 
     def _call_refund(self, payload, original, original_payment_id=123):
+        # Default the request currency to the stub's so the currency-equality guard passes
+        # unless a test deliberately overrides it.
+        payload = {'currency': 'USD', **payload}
         fake = MagicMock()
         fake.status_code = 200
         fake.json.return_value = {'saleId': 'refund-1', 'status': 'PENDING'}
@@ -311,17 +314,25 @@ class TestMusqetCreateRefund(TransactionCase):
             'type': 'sale',
             'mode': 'any',
             'serial': 'MSQ-EVIL-999',
-            'currency': 'EUR',
+            'currency': 'USD',   # must match the original; the mismatch case is tested separately
             'extra': 'smuggled',
         }
         result, mock_request = self._call_refund(payload, original)
         self.assertNotIn('error', result)
         sent = mock_request.mock_calls[0].kwargs['json']
-        self.assertEqual(sent['type'], 'refund')
-        self.assertEqual(sent['mode'], 'card')
+        self.assertEqual(sent['type'], 'refund')         # forced — not the payload's "sale"
+        self.assertEqual(sent['mode'], 'card')           # forced — not the payload's "any"
         self.assertEqual(sent['serial'], 'MSQ-RF-001')   # this method's serial, not the payload's
-        self.assertEqual(sent['currency'], 'USD')        # the original's currency, not the payload's
+        self.assertEqual(sent['currency'], 'USD')        # the original's currency, from the record
         self.assertNotIn('extra', sent)
+
+    def test_rejects_currency_mismatch(self):
+        # The over-refund cap compares minor units, so a request in a different currency than
+        # the original could compare mismatched scales — reject before forwarding.
+        original = self._stub_original(rail='card', amount=10.0)   # currency USD
+        result, mock_request = self._call_refund({'amountInCents': 500, 'currency': 'EUR'}, original)
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
 
     def test_rejects_refund_of_a_lightning_sale(self):
         original = self._stub_original(rail='bitcoin', amount=10.0)

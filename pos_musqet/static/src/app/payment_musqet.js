@@ -242,10 +242,6 @@ export class PaymentMusqet extends PaymentInterface {
             line.setPaymentStatus("retry");
             return null;
         }
-        // Record which original sale this refund reverses, on the refund payment itself, so it
-        // survives sync for reconciliation and cumulative-refund accounting (#9). The API keeps
-        // no sale↔refund linkage of its own (Musqet/musqet#2094), so this is the link.
-        line.musqet_refund_of = originalSaleId;
         return {
             ...this._commonPayload(order),
             // Pin the rail to card. The terminal can't reverse Lightning, and the API does NOT
@@ -336,6 +332,14 @@ export class PaymentMusqet extends PaymentInterface {
             // it survives to a later-session refund, which the refund preflight gates on (a
             // refund is only auto-driven for a card-settled original; see _refundPreflight).
             line.musqet_rail = sale.rail || false;
+            // On a settled refund, record which original sale it reversed — only once the
+            // refund actually completes, so an abandoned/failed attempt never leaves a stale
+            // link. The API keeps no sale↔refund linkage of its own (Musqet/musqet#2094); this
+            // is what cumulative-refund accounting (#9) reconciles against. Null on a sale.
+            const refundOf = line.uiState?.musqetRefund?.saleId;
+            if (refundOf) {
+                line.musqet_refund_of = refundOf;
+            }
             line.setReceiptInfo(this._receiptInfo(sale));
             line.setPaymentStatus("done");
             state.resolve?.(true);

@@ -276,16 +276,23 @@ class PosPaymentMethod(models.Model):
         if not original:
             return {'error': {'message': _("The original payment to refund could not be found.")}}
         # Same company as the method driving the refund (defence-in-depth over the API's own
-        # merchant scoping). Skip only if this is a cross-company (no-company) method.
-        if self.company_id and original.company_id != self.company_id:
+        # merchant scoping). Fall back to the active company so a no-company method can't refund
+        # an arbitrary company's payment.
+        if original.company_id != (self.company_id or self.env.company):
             return {'error': {'message': _("This payment cannot be refunded here.")}}
         # Card-settled Musqet sale only: the terminal can't reverse Lightning and the API
         # won't refuse the attempt for us (Musqet/musqet#2094).
         if original.payment_method_id.use_payment_terminal != 'musqet' or original.musqet_rail != 'card':
             return {'error': {'message': _(
                 "Only card payments taken on a Musqet terminal can be refunded automatically.")}}
+        # The cap below compares minor units, so the requested amount (computed by the POS in
+        # the session currency) and the captured amount (the original's currency) must be the
+        # same currency, or the exponents could differ and the over-refund guard would compare
+        # mismatched scales. Enforce the assumption rather than only commenting it.
+        if payload.get('currency') != original.currency_id.name:
+            return {'error': {'message': _("The refund currency does not match the original payment.")}}
         # Validate the requested amount against the captured amount, in the same minor units the
-        # POS computed it (same currency -> same exponent). Reject non-positive or over-refund.
+        # POS computed it. Reject a non-positive amount or an over-refund.
         try:
             amount = int(payload.get('amountInCents'))
         except (TypeError, ValueError):
