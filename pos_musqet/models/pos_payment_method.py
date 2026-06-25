@@ -264,23 +264,31 @@ class PosPaymentMethod(models.Model):
     # -- Webhook (async push) -------------------------------------------------
     # Used only on publicly-reachable deployments. The public controller verifies the HMAC,
     # buffers the result here and pings the POS session; the frontend pulls it via
-    # get_latest_musqet_status. The pilot is behind NAT and relies on polling instead.
+    # musqet_get_latest_status. The pilot is behind NAT and relies on polling instead.
 
     def _is_write_forbidden(self, fields):
         # The base blocks writes to most config fields while a POS session is open. Allow
         # the webhook controller to buffer its result during a session (mirrors pos_adyen).
         return super()._is_write_forbidden(fields - {'musqet_latest_response'})
 
-    def get_latest_musqet_status(self):
+    def musqet_get_latest_status(self):
         """Return the latest webhook-buffered sale result for the POS frontend.
 
-        Same access guard as the proxy: a POS cashier (or an internal/sudo call) may read
-        it. Returns the parsed canonical sale shape, or ``False`` if nothing is buffered.
+        Named with the ``musqet_`` prefix to match the proxy convention and the JS call site.
+        Same access guard as the proxy: a POS cashier (or an internal/sudo call) may read it.
+        Returns the parsed canonical sale shape, or ``False`` if nothing is buffered.
         """
         self.ensure_one()
         self._musqet_check_access()
         latest = self.sudo().musqet_latest_response
-        return json.loads(latest) if latest else False
+        if not latest:
+            return False
+        # Consume-once: clear the buffer as we hand it over so a duplicate notification — or a
+        # captured-but-still-fresh webhook replayed inside the timestamp window — can't drive a
+        # second settlement. Assumes one terminal per method (see the webhook controller); if a
+        # result is consumed by the wrong session the poll loop remains the backstop.
+        self.sudo().musqet_latest_response = ''
+        return json.loads(latest)
 
     def _musqet_verify_webhook(self, signature_header, raw_body):
         """Verify a Musqet webhook signature (§4.5).

@@ -190,7 +190,7 @@ class TestMusqetWebhookVerification(TransactionCase):
 
 @tagged('post_install', '-at_install')
 class TestMusqetLatestStatus(TransactionCase):
-    """get_latest_musqet_status is the cashier-facing read of the webhook buffer."""
+    """musqet_get_latest_status is the cashier-facing, consume-once read of the webhook buffer."""
 
     def setUp(self):
         super().setUp()
@@ -208,16 +208,37 @@ class TestMusqetLatestStatus(TransactionCase):
         })
 
     def test_returns_false_when_nothing_buffered(self):
-        self.assertFalse(self.method.with_user(self.cashier).get_latest_musqet_status())
+        self.assertFalse(self.method.with_user(self.cashier).musqet_get_latest_status())
 
     def test_returns_parsed_buffer_for_a_cashier(self):
         # The buffer is ERP-manager-restricted, but a cashier must be able to read it via the
         # method's sudo() — same context bug class as the proxy fields.
         sale = {'saleId': 's-9', 'status': 'COMPLETE', 'rail': 'bitcoin'}
         self.method.musqet_latest_response = json.dumps(sale)
-        self.assertEqual(self.method.with_user(self.cashier).get_latest_musqet_status(), sale)
+        self.assertEqual(self.method.with_user(self.cashier).musqet_get_latest_status(), sale)
+
+    def test_consumes_the_buffer_once(self):
+        # Consume-once idempotency: the first read returns the result and clears the buffer,
+        # so a duplicate notification (or a replayed-but-fresh webhook) reads nothing.
+        sale = {'saleId': 's-9', 'status': 'COMPLETE'}
+        self.method.musqet_latest_response = json.dumps(sale)
+        method_as_cashier = self.method.with_user(self.cashier)
+        self.assertEqual(method_as_cashier.musqet_get_latest_status(), sale)
+        self.assertFalse(self.method.musqet_latest_response)
+        self.assertFalse(method_as_cashier.musqet_get_latest_status())
 
     def test_denies_a_non_pos_user(self):
         public = self.env.ref('base.public_user')
         with self.assertRaises(AccessDenied):
-            self.method.with_user(public).get_latest_musqet_status()
+            self.method.with_user(public).musqet_get_latest_status()
+
+    def test_create_sale_clears_a_stale_buffer(self):
+        # A new sale must drop any buffered result from a previous one so a late notification
+        # for it can't be mistaken for the new sale.
+        self.method.musqet_latest_response = json.dumps({'saleId': 'old', 'status': 'COMPLETE'})
+        fake = MagicMock()
+        fake.status_code = 200
+        fake.json.return_value = {'saleId': 'new', 'status': 'PENDING'}
+        with patch.object(pos_payment_method.requests, 'request', return_value=fake):
+            self.method.with_user(self.cashier).musqet_create_sale({'serial': 'MSQ-WH-002'})
+        self.assertFalse(self.method.musqet_latest_response)

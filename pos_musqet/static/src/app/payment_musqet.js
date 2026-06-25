@@ -21,9 +21,11 @@ const FAILURE_STATUSES = ["ERROR", "CANCELLED", "CANCELLED_REMOTE", "TIMED_OUT"]
 export class PaymentMusqet extends PaymentInterface {
     setup() {
         super.setup(...arguments);
-        // Per-paymentline poll bookkeeping, keyed by line uuid:
-        //   { saleId, cancelled }
-        // so sendPaymentCancel()/close() can stop an in-flight poll loop.
+        // Per-paymentline bookkeeping, keyed by line uuid:
+        //   { cancelled, saleId, settled, resolve }
+        // cancelled/saleId let sendPaymentCancel()/close() stop an in-flight poll loop;
+        // settled makes the shared settler run exactly once across the poll loop and an
+        // inbound webhook; resolve is the request promise both paths resolve through.
         this.pollState = {};
     }
 
@@ -89,6 +91,10 @@ export class PaymentMusqet extends PaymentInterface {
             // terminal status — whichever lands first. Both funnel through _finishSale,
             // which settles exactly once, so the slower path is a harmless no-op. Polling is
             // the path the pilot relies on; the webhook only fires on reachable deployments.
+            // resolve is captured synchronously here, before _pollSale is fired and before
+            // any webhook can match this saleId — so state.resolve is always set by the time
+            // either path settles. The optional-chaining on the resolve calls below is purely
+            // defensive against an unforeseen reordering, not a real nullable window.
             const settled = new Promise((resolve) => {
                 state.resolve = resolve;
             });
@@ -221,7 +227,11 @@ export class PaymentMusqet extends PaymentInterface {
      * (the idempotency requirement of #6). Non-terminal statuses are ignored (keep waiting).
      */
     _finishSale(line, sale, state) {
-        if (state.settled) {
+        // Settle at most once (settled) and never settle a line the cashier already
+        // cancelled (cancelled). The poll loop observes cancellation on its own wake, but a
+        // webhook can funnel a success in here during the cancel→cleanup window — guard it
+        // here too so the shared funnel can't break the cancel invariant the other paths hold.
+        if (state.settled || state.cancelled) {
             return;
         }
         const status = sale.status;
@@ -265,21 +275,23 @@ export class PaymentMusqet extends PaymentInterface {
         }
         const state = this.pollState[line.uuid];
         if (state) {
-            // The buffer holds the latest result for this method; ignore it if it isn't for
-            // the sale this line is actually waiting on (e.g. a late notification for a prior
-            // sale). The poll loop owns the authoritative saleId for the line.
-            if (sale.saleId && state.saleId && sale.saleId !== state.saleId) {
+            // Only settle if this buffered result is for the sale this line is waiting on.
+            // The contract guarantees a webhook carries saleId, so require an exact match — a
+            // missing/foreign saleId, or the window before our own create has returned
+            // (state.saleId still null), means we can't confirm it's ours, so we leave it to
+            // the poll loop rather than settle on a guess.
+            if (sale.saleId !== state.saleId) {
                 return;
             }
             this._finishSale(line, sale, state);
             return;
         }
-        // The in-memory poll state was lost (e.g. the page was refreshed mid-payment). Match
-        // the buffered result to this line by order reference, then settle directly and let
-        // the line's own handler resolve pay()'s pending promise.
+        // The in-memory poll state was lost (e.g. the page was refreshed mid-payment). We no
+        // longer have our saleId, so match by order reference and refuse to settle on "can't
+        // confirm" — never settle a line the result can't be positively tied to.
         const order = line.pos_order_id;
         const reference = order?.pos_reference || order?.uuid;
-        if (sale.reference && reference && sale.reference !== reference) {
+        if (!reference || sale.reference !== reference) {
             return;
         }
         const success = sale.status === SUCCESS_STATUS;
