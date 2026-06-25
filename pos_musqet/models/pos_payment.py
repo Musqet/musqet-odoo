@@ -14,3 +14,9 @@ class PosPayment(models.Model):
     # stored fields (read([]) == all fields) — this field therefore loads into the frontend
     # and serializes back on sync with no extra wiring, matching pos_razorpay/pos_pine_labs.
     musqet_rail = fields.Char(string="Musqet Rail", copy=False)
+    # On a refund payment line, the Musqet saleId of the original card sale this refund
+    # reverses (set in the POS frontend on a refund order). The Musqet API keeps no
+    # sale↔refund linkage of its own (Musqet/musqet#2094), so this is where the link lives:
+    # the create-refund backend guard reads the original payment by id, and cumulative-refund
+    # accounting (#9) will reconcile refunds to their original sale through this field.
+    musqet_refund_of = fields.Char(string="Musqet Refund Of", copy=False)

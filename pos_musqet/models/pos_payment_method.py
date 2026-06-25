@@ -245,6 +245,83 @@ class PosPaymentMethod(models.Model):
         self.sudo().musqet_latest_response = ''
         return self._musqet_request('POST', '/terminal/sales', payload=payload)
 
+    def musqet_create_refund(self, payload, original_payment_id):
+        """POST /terminal/sales with type:"refund" — refund a card-settled Musqet sale.
+
+        The Musqet terminal API is a thin command pipe: it enforces merchant scoping but NOT
+        over-refund, rail correctness, or any sale<->refund linkage (Musqet/musqet#2094). So
+        THIS method — not the browser — is the authority for a refund.
+
+        ``original_payment_id`` (the Odoo id of the original pos.payment, supplied by the POS)
+        is UNTRUSTED, like the rest of the payload. We re-read that payment server-side and
+        refuse the refund unless it is a card-settled Musqet payment of this company whose
+        captured amount covers the request, then FORCE the refund-defining fields (type, mode,
+        serial) and forward only known keys — so a tampered payload (mode:"any", type:"sale",
+        a foreign serial/amount, extra keys) cannot widen the action. Returns the create
+        response or a clean ``{error}``.
+
+        Cumulative-refund accounting and idempotency/dedup are deliberately out of scope here
+        (a partial-refund total can't be reconciled until the refund order syncs); Odoo's
+        native refund-quantity capping is the backstop until #9 adds them.
+        """
+        self.ensure_one()
+        self._musqet_check_access()
+        # Re-read the claimed original payment server-side; never trust the browser's word for
+        # it. sudo() to read across the cashier's restrictions — the validation below, not the
+        # ORM record rules, is what authorises the refund.
+        try:
+            original = self.env['pos.payment'].sudo().browse(int(original_payment_id)).exists()
+        except (TypeError, ValueError):
+            original = self.env['pos.payment']
+        if not original:
+            return {'error': {'message': _("The original payment to refund could not be found.")}}
+        # Same company as the method driving the refund (defence-in-depth over the API's own
+        # merchant scoping). Fall back to the active company so a no-company method can't refund
+        # an arbitrary company's payment.
+        if original.company_id != (self.company_id or self.env.company):
+            return {'error': {'message': _("This payment cannot be refunded here.")}}
+        # Card-settled Musqet sale only: the terminal can't reverse Lightning and the API
+        # won't refuse the attempt for us (Musqet/musqet#2094).
+        if original.payment_method_id.use_payment_terminal != 'musqet' or original.musqet_rail != 'card':
+            return {'error': {'message': _(
+                "Only card payments taken on a Musqet terminal can be refunded automatically.")}}
+        # The cap below compares minor units, so the requested amount (computed by the POS in
+        # the session currency) and the captured amount (the original's currency) must be the
+        # same currency, or the exponents could differ and the over-refund guard would compare
+        # mismatched scales. Enforce the assumption rather than only commenting it.
+        if payload.get('currency') != original.currency_id.name:
+            return {'error': {'message': _("The refund currency does not match the original payment.")}}
+        # Validate the requested amount against the captured amount, in the same minor units the
+        # POS computed it. Reject a non-positive amount or an over-refund.
+        try:
+            amount = int(payload.get('amountInCents'))
+        except (TypeError, ValueError):
+            return {'error': {'message': _("The refund amount is invalid.")}}
+        # `is not None`, not `or 2`: a zero-decimal currency (JPY) has decimal_places == 0,
+        # and `0 or 2` would wrongly use 2 — computing a cap 100x too loose. Mirrors the
+        # frontend's Number.isInteger() check, which also preserves 0.
+        decimals = original.currency_id.decimal_places
+        if decimals is None:
+            decimals = 2
+        captured = int(round(original.amount * (10 ** decimals)))
+        if amount <= 0 or amount > captured:
+            return {'error': {'message': _("The refund amount exceeds the original payment.")}}
+        # Forward only known fields and FORCE the refund-defining ones server-side. serial and
+        # currency are taken from trusted server records, not the payload.
+        outgoing = {
+            'serial': self.musqet_terminal_serial,
+            'type': 'refund',
+            'mode': 'card',
+            'amountInCents': amount,
+            'currency': original.currency_id.name,
+            'reference': payload.get('reference'),
+            'language': payload.get('language'),
+            'shouldPrint': bool(payload.get('shouldPrint', True)),
+        }
+        # Drop any buffered webhook result from a previous sale (mirrors musqet_create_sale).
+        self.sudo().musqet_latest_response = ''
+        return self._musqet_request('POST', '/terminal/sales', payload=outgoing)
+
     def musqet_get_sale(self, sale_id):
         """GET /terminal/sales/:id — poll a sale's status.
 
