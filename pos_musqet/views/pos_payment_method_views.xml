@@ -17,6 +17,12 @@
                 <field name="musqet_terminal_serial"
                        invisible="use_payment_terminal != 'musqet'"
                        required="use_payment_terminal == 'musqet'"/>
+                <!-- Webhook (optional; public-HTTPS deployments only — the pilot uses polling) -->
+                <field name="musqet_webhook_secret"
+                       invisible="use_payment_terminal != 'musqet'"
+                       password="True"/>
+                <field name="musqet_webhook_url"
+                       invisible="use_payment_terminal != 'musqet'"/>
             </xpath>
         </field>
     </record>
