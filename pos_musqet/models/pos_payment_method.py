@@ -260,9 +260,14 @@ class PosPaymentMethod(models.Model):
         a foreign serial/amount, extra keys) cannot widen the action. Returns the create
         response or a clean ``{error}``.
 
-        Cumulative-refund accounting and idempotency/dedup are deliberately out of scope here
-        (a partial-refund total can't be reconciled until the refund order syncs); Odoo's
-        native refund-quantity capping is the backstop until #9 adds them.
+        Cumulative-refund accounting and idempotency/dedup (issue #9): the request is capped
+        against the REMAINING refundable amount (captured minus refunds already settled against
+        this same original, linked via musqet_refund_of), and a refund whose order reference was
+        already processed is refused. Both are best-effort for the trusted-operator pilot — a
+        refund's pos.payment isn't in the DB until its refund order syncs, so two refunds fired
+        inside that window can't see each other here and instead rely on the per-terminal
+        in-flight lock (#8), the API's 409 on a concurrent command, and the frontend
+        single-settle guard. Odoo's native refund-quantity capping remains a further backstop.
         """
         self.ensure_one()
         self._musqet_check_access()
@@ -304,8 +309,46 @@ class PosPaymentMethod(models.Model):
         if decimals is None:
             decimals = 2
         captured = int(round(original.amount * (10 ** decimals)))
-        if amount <= 0 or amount > captured:
+        # Cumulative over-refund cap (issue #9). The per-call cap (amount <= captured) isn't
+        # enough on its own: the Musqet API keeps no sale<->refund linkage and enforces no
+        # cumulative limit (Musqet/musqet#2094), so N separate refunds each <= captured could
+        # sum past the original. Subtract what's already been refunded against this same original
+        # sale — linked through the musqet_refund_of saleId that _finishSale persists on every
+        # settled Musqet refund — and cap against the REMAINING refundable amount instead.
+        #
+        # Window: a refund's pos.payment isn't in the DB until its refund order syncs, so two
+        # refunds fired before the first syncs won't see each other here. That window is closed
+        # upstream by the per-terminal in-flight lock (#8), the API's 409 on a second concurrent
+        # command, and the frontend single-settle guard — refunds settle one at a time and the
+        # order syncs on validation, so by the time a second refund order is rung the first is
+        # persisted. Best-effort for the trusted-operator pilot (documented on issue #9).
+        prior_refunds = self.env['pos.payment']
+        already_refunded = 0
+        if original.transaction_id:
+            prior_refunds = self.env['pos.payment'].sudo().search([
+                ('musqet_refund_of', '=', original.transaction_id),
+                ('company_id', '=', original.company_id.id),
+            ])
+            # Refund payment lines carry a negative amount, so take the magnitude.
+            already_refunded = sum(
+                abs(int(round(refund.amount * (10 ** decimals)))) for refund in prior_refunds
+            )
+        remaining = captured - already_refunded
+        if amount <= 0 or amount > remaining:
             return {'error': {'message': _("The refund amount exceeds the original payment.")}}
+        # Idempotency / dedup (issue #9). The API has no idempotency key, so a re-fired refund
+        # carrying the same order reference would create a SECOND refund. If a refund already
+        # settled against this original carries this refund order's reference, treat the new call
+        # as a duplicate and refuse it. (Same unsynced window as the cap above; the in-flight
+        # cases are covered by the frontend single-settle guard and the API 409.) Compare against
+        # both the order's pos_reference and uuid to mirror how the reference is built caller-side
+        # (order.pos_reference || order.uuid).
+        reference = payload.get('reference')
+        if reference and any(
+            reference in (refund.pos_order_id.pos_reference, refund.pos_order_id.uuid)
+            for refund in prior_refunds
+        ):
+            return {'error': {'message': _("This refund has already been processed.")}}
         # Forward only known fields and FORCE the refund-defining ones server-side. serial and
         # currency are taken from trusted server records, not the payload.
         outgoing = {
@@ -314,7 +357,7 @@ class PosPaymentMethod(models.Model):
             'mode': 'card',
             'amountInCents': amount,
             'currency': original.currency_id.name,
-            'reference': payload.get('reference'),
+            'reference': reference,
             'language': payload.get('language'),
             'shouldPrint': bool(payload.get('shouldPrint', True)),
         }
