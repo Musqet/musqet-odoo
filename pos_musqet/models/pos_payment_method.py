@@ -357,7 +357,7 @@ class PosPaymentMethod(models.Model):
             'mode': 'card',
             'amountInCents': amount,
             'currency': original.currency_id.name,
-            'reference': payload.get('reference'),
+            'reference': reference,
             'language': payload.get('language'),
             'shouldPrint': bool(payload.get('shouldPrint', True)),
         }

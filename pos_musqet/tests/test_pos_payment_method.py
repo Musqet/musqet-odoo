@@ -285,13 +285,15 @@ class TestMusqetCreateRefund(TransactionCase):
         original.transaction_id = 'sale-orig-1'
         return original
 
-    def _stub_prior_refund(self, amount, reference='OTHER-ORDER'):
+    def _stub_prior_refund(self, amount, reference='OTHER-ORDER', pos_reference=None, uuid=None):
         # A previously-settled refund of the original. Refund payment lines carry a negative
-        # amount in a real order, which the cumulative cap takes the magnitude of.
+        # amount in a real order, which the cumulative cap takes the magnitude of. By default
+        # both order keys carry `reference`; pass pos_reference/uuid explicitly to exercise a
+        # single arm of the dedup's `reference in (pos_reference, uuid)` membership check.
         refund = MagicMock()
         refund.amount = amount
-        refund.pos_order_id.pos_reference = reference
-        refund.pos_order_id.uuid = reference
+        refund.pos_order_id.pos_reference = reference if pos_reference is None else pos_reference
+        refund.pos_order_id.uuid = reference if uuid is None else uuid
         return refund
 
     def _call_refund(self, payload, original, original_payment_id=123, prior_refunds=None):
@@ -404,6 +406,17 @@ class TestMusqetCreateRefund(TransactionCase):
         prior = [self._stub_prior_refund(-3.0, reference='REFUND-ORDER-7')]
         result, mock_request = self._call_refund(
             {'amountInCents': 200, 'reference': 'REFUND-ORDER-7'}, original, prior_refunds=prior)
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_dedup_matches_on_the_order_uuid_arm(self):
+        # The reference is built caller-side as order.pos_reference || order.uuid, so a prior
+        # refund whose pos_reference is empty but whose uuid carries the reference must still be
+        # caught. Exercises the uuid arm of the `reference in (pos_reference, uuid)` check alone.
+        original = self._stub_original(rail='card', amount=10.0)
+        prior = [self._stub_prior_refund(-3.0, pos_reference=False, uuid='REFUND-UUID-7')]
+        result, mock_request = self._call_refund(
+            {'amountInCents': 200, 'reference': 'REFUND-UUID-7'}, original, prior_refunds=prior)
         self.assertIn('error', result)
         mock_request.assert_not_called()
 
