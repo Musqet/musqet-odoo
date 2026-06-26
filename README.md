@@ -15,6 +15,21 @@ automatically.
 
 ## Quickstart
 
+The quickest way to side-load onto an existing Odoo 19 server is the install script,
+which fetches the addon from GitHub and drops it on your addons path:
+
+```bash
+# place the files only:
+curl -fsSL https://raw.githubusercontent.com/Musqet/musqet-odoo/main/install.sh \
+  | bash -s -- --addons-path /opt/odoo/extra-addons
+# or place AND install into a database, then restart Odoo:
+curl -fsSL https://raw.githubusercontent.com/Musqet/musqet-odoo/main/install.sh \
+  | bash -s -- --addons-path /opt/odoo/extra-addons --db live --restart "sudo systemctl restart odoo"
+```
+
+Run `install.sh --help` for all options (`--ref` to pin a release, `--source` for a
+local checkout, `--upgrade`, etc.). Or do it by hand:
+
 1. Put `pos_musqet/`'s parent directory (`musqet-odoo/`) on your Odoo `addons_path` and
    restart Odoo.
 2. **Apps → Update Apps List**, then install **POS Musqet**.
