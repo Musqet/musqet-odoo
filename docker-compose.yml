@@ -1,0 +1,46 @@
+# Local Odoo 19 stack for developing and testing the pos_musqet addon.
+#
+# Throwaway by design — `docker compose down -v` removes the database and
+# filestore so you can start clean. See docs/DEV.md for full usage.
+#
+# Quick start:
+#   docker compose up -d                 # start Odoo at http://localhost:8069
+#   docker compose run --rm odoo \
+#     odoo -d test -i pos_musqet --test-enable --test-tags=/pos_musqet --stop-after-init
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
+      POSTGRES_DB: postgres
+    volumes:
+      - odoo-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "odoo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  odoo:
+    image: odoo:19
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8069:8069"
+    environment:
+      # The odoo image reads these to reach Postgres.
+      HOST: db
+      USER: odoo
+      PASSWORD: odoo
+    volumes:
+      - odoo-data:/var/lib/odoo
+      # Mount only the addon. /mnt/extra-addons is on the image's addons_path,
+      # so pos_musqet is auto-discovered as a direct child.
+      - ./pos_musqet:/mnt/extra-addons/pos_musqet
+
+volumes:
+  odoo-db:
+  odoo-data:

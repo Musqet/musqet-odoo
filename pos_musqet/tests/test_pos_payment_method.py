@@ -87,7 +87,7 @@ class TestMusqetProxyAccess(TransactionCase):
         self.cashier = self.env['res.users'].create({
             'name': 'Musqet Cashier',
             'login': 'musqet_cashier',
-            'groups_id': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
+            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
         })
         self.method = self.env['pos.payment.method'].create({
             'name': 'Musqet Terminal',
@@ -197,7 +197,7 @@ class TestMusqetLatestStatus(TransactionCase):
         self.cashier = self.env['res.users'].create({
             'name': 'Musqet Cashier',
             'login': 'musqet_cashier_status',
-            'groups_id': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
+            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
         })
         self.method = self.env['pos.payment.method'].create({
             'name': 'Musqet Terminal',
@@ -261,7 +261,7 @@ class TestMusqetCreateRefund(TransactionCase):
         self.cashier = self.env['res.users'].create({
             'name': 'Musqet Cashier',
             'login': 'musqet_cashier_refund',
-            'groups_id': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
+            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
         })
         self.method = self.env['pos.payment.method'].create({
             'name': 'Musqet Terminal',
