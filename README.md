@@ -27,8 +27,15 @@ curl -fsSL https://raw.githubusercontent.com/Musqet/musqet-odoo/main/install.sh 
   | bash -s -- --addons-path /opt/odoo/extra-addons --db live --restart "sudo systemctl restart odoo"
 ```
 
-Run `install.sh --help` for all options (`--ref` to pin a release, `--source` for a
-local checkout, `--upgrade`, etc.). Or do it by hand:
+For production, **pin a release** with `--ref <tag>` rather than installing `main`, so
+a rebuild can't silently pull different code. For all options (`--source` for a local
+checkout, `--upgrade`, etc.), append `--help` to the pipe:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Musqet/musqet-odoo/main/install.sh | bash -s -- --help
+```
+
+Or do it by hand:
 
 1. Put `pos_musqet/`'s parent directory (`musqet-odoo/`) on your Odoo `addons_path` and
    restart Odoo.

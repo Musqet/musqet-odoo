@@ -38,6 +38,7 @@
 #   install.sh --source . --addons-path /mnt/extra-addons           # from a local checkout
 #
 set -euo pipefail
+umask 022   # ensure placed files are not group/world-writable regardless of caller
 
 REPO_URL="https://github.com/Musqet/musqet-odoo.git"
 REF="main"
@@ -91,6 +92,11 @@ done
 
 [[ -n "$ADDONS_PATH" ]] || { err "missing required --addons-path DIR"; usage 1; }
 
+# --upgrade and any `-- <extra odoo args>` are only meaningful with --db; don't let
+# them silently no-op.
+[[ "$ACTION" == "-u" && -z "$DB" ]] && die "--upgrade requires --db NAME"
+[[ ${#EXTRA_ARGS[@]} -eq 0 || -n "$DB" ]] || err "warning: ignoring extra args after '--' (only used with --db)"
+
 # Obtain the source tree (local checkout or a fresh clone).
 CLEANUP=""
 trap '[[ -n "$CLEANUP" ]] && rm -rf "$CLEANUP"' EXIT
@@ -107,8 +113,11 @@ elif command -v git >/dev/null 2>&1; then
 else
   # No git (e.g. the stock odoo:19 image) — download a tarball with curl/wget instead.
   # Works for GitHub repos and any --ref (branch, tag, or commit SHA).
-  slug="$(printf '%s' "$REPO_URL" | sed -E 's#^https?://github\.com/##; s#\.git$##')"
+  # Validate the github.com prefix BEFORE stripping .git, else a non-GitHub repo
+  # ending in .git (e.g. gitlab.com/foo/bar.git) would slip past the guard.
+  slug="$(printf '%s' "$REPO_URL" | sed -E 's#^https?://github\.com/##')"
   [[ "$slug" != "$REPO_URL" ]] || die "git not found and --repo is not a github.com URL — install git or use --source DIR"
+  slug="${slug%.git}"
   url="https://codeload.github.com/$slug/tar.gz/$REF"
   TMP="$(mktemp -d)"; CLEANUP="$TMP"
   info "Downloading $url (no git)"
@@ -121,17 +130,21 @@ else
   fi
   command -v tar >/dev/null 2>&1 || die "tar is required to extract the download"
   mkdir -p "$TMP/repo"
-  tar -xzf "$TMP/src.tgz" -C "$TMP/repo" --strip-components=1 || die "failed to extract archive"
+  tar -xzf "$TMP/src.tgz" -C "$TMP/repo" --strip-components=1 --no-same-owner || die "failed to extract archive"
   SRC="$TMP/repo"
 fi
 
 [[ -f "$SRC/$MODULE/__manifest__.py" ]] || die "$MODULE/__manifest__.py not found in source — wrong --repo/--ref?"
 
-# Place the addon (idempotent: a clean copy replaces any existing one).
+# Place the addon. Stage a full copy first, then swap — so a failed copy (disk full,
+# permissions) can never leave an existing install deleted-but-not-replaced.
 mkdir -p "$ADDONS_PATH"
 DEST="$ADDONS_PATH/$MODULE"
+STAGE="$DEST.musqet-tmp"
+rm -rf "$STAGE"
+cp -R "$SRC/$MODULE" "$STAGE"
 [[ -e "$DEST" ]] && { info "Refreshing existing $DEST"; rm -rf "$DEST"; }
-cp -R "$SRC/$MODULE" "$DEST"
+mv "$STAGE" "$DEST"
 info "Placed $MODULE at $DEST"
 
 # Optionally install/upgrade into a database.
