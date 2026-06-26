@@ -32,6 +32,20 @@ automatically.
 `pos_musqet` is not on the Odoo App Store — install it by dropping the module into
 your Odoo addons path.
 
+> **Quick path — `install.sh`.** The repo ships an install script that does steps 1–4
+> below for you (fetch from GitHub → place on the addons path → optionally install into
+> a database → optionally restart):
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/Musqet/musqet-odoo/main/install.sh \
+>   | bash -s -- --addons-path /opt/odoo/extra-addons --db <your_db> \
+>     --restart "sudo systemctl restart odoo"
+> ```
+>
+> It needs `git` **or** `curl`/`wget` (no git required). Run with `--help` for options
+> like `--ref <tag>` to pin a release or `--source <dir>` for a local checkout. The
+> manual steps below are the same thing done by hand.
+
 1. **Get the module onto the server.** Clone (or download) this repo so that the
    `pos_musqet/` directory sits in a directory that is on your Odoo `addons_path`:
 
