@@ -96,7 +96,7 @@ your Odoo addons path.
 
    | Field | What to enter | Notes |
    |---|---|---|
-   | **Musqet API Key** | The Bearer token Musqet issued for this merchant | Stored on the backend only, **never** sent to the browser. Visible to ERP managers only. |
+   | **Musqet API Key** | The Bearer token Musqet issued for this merchant | Must carry the scopes **`TERMINAL_SALES_WRITE`**, **`TERMINAL_SALES_READ`**, **`DEVICES_READ`** (create/poll sales + resolve the terminal by serial). Stored on the backend only, **never** sent to the browser. Visible to ERP managers only. |
    | **Musqet API URL** | Production base URL from Musqet (default: `https://api.musqet.tech/api/v1`) | Locked to the `musqet.tech` domain. Visible to ERP managers only. |
    | **Musqet Terminal Serial** | The serial number of the physical terminal bound to this method | One serial per payment method / register — see section 8. |
 
@@ -207,7 +207,8 @@ Before going live, request the following from Musqet and confirm each item:
 
 - [ ] **Production API base URL** (confirm it's `https://api.musqet.tech/api/v1` or the
       value Musqet gives you).
-- [ ] **Test API key** for the merchant account.
+- [ ] **API key** for the merchant account, with the scopes
+      **`TERMINAL_SALES_WRITE`**, **`TERMINAL_SALES_READ`**, and **`DEVICES_READ`**.
 - [ ] **Test terminal serial** for a physical/sandbox terminal.
 - [ ] **Settlement option chosen** (Voltage LND *keep sats*, or Solidi *auto-exchange
       to GBP*) — and that it's configured on the Musqet side.
