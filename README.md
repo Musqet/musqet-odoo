@@ -31,6 +31,19 @@ most common setup mistake.
 See **[pos_musqet/docs/INSTALL.md](pos_musqet/docs/INSTALL.md)** for the complete
 install, configuration, webhook, accounting, and merchant-onboarding guide.
 
+## Testing it yourself
+
+A throwaway **Odoo 19 + Postgres** Docker stack is included so you can install the
+addon and run its tests without setting up Odoo locally:
+
+```bash
+docker compose run --rm odoo \
+  odoo -d test -i pos_musqet --test-enable --test-tags=/pos_musqet --stop-after-init   # run the addon's tests
+docker compose up -d                                            # UI at http://localhost:8069
+```
+
+See **[docs/DEV.md](docs/DEV.md)** for the full contributor/testing guide.
+
 ## Compatibility
 
 - Odoo **19.0** (Community or Enterprise) with the Point of Sale module.
