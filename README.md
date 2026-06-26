@@ -44,6 +44,13 @@ docker compose up -d                                            # UI at http://l
 
 See **[docs/DEV.md](docs/DEV.md)** for the full contributor/testing guide.
 
+## Deploying a permanent demo instance
+
+To host a durable test/demo instance (e.g. `odoo.musqet.dev`) on a VPS with Coolify —
+TLS, generated secrets, persistent volumes, locked-down single database — use the
+hardened **[`docker-compose.coolify.yml`](docker-compose.coolify.yml)** and follow
+**[docs/DEPLOY-coolify.md](docs/DEPLOY-coolify.md)**.
+
 ## Compatibility
 
 - Odoo **19.0** (Community or Enterprise) with the Point of Sale module.

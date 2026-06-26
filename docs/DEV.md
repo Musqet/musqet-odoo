@@ -9,6 +9,11 @@ touching their own machine's Python/Postgres setup.
 > [`../pos_musqet/docs/INSTALL.md`](../pos_musqet/docs/INSTALL.md). This file is for
 > contributors and testers only.
 
+> **Two compose files, two jobs.** This guide uses `docker-compose.yml` — the local,
+> throwaway dev stack. To deploy a *permanent* test/demo instance on a VPS, use the
+> hardened `docker-compose.coolify.yml` and [`DEPLOY-coolify.md`](DEPLOY-coolify.md)
+> instead.
+
 ## Prerequisites
 
 - **Docker** with Compose v2 (`docker compose`, not the old `docker-compose`).
