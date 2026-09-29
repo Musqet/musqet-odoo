@@ -2,13 +2,26 @@
 import hashlib
 import hmac
 import json
+import os
 import time
 from unittest.mock import MagicMock, patch
 
-from odoo.addons.pos_musqet.models import pos_payment_method
+from cryptography.fernet import Fernet
+
+from odoo.addons.pos_musqet.models import musqet_crypto, pos_payment_method
 from odoo.exceptions import AccessDenied, ValidationError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
+
+# The secrets are encrypted at rest with a key from the environment, so every suite that
+# stores a secret patches one in for its duration (see _use_test_encryption_key).
+_TEST_FERNET_KEY = Fernet.generate_key().decode()
+
+
+def _use_test_encryption_key(test):
+    patcher = patch.dict(os.environ, {musqet_crypto.ENV_KEY: _TEST_FERNET_KEY})
+    patcher.start()
+    test.addCleanup(patcher.stop)
 
 
 @tagged('post_install', '-at_install')
@@ -84,6 +97,7 @@ class TestMusqetProxyAccess(TransactionCase):
 
     def setUp(self):
         super().setUp()
+        _use_test_encryption_key(self)
         self.cashier = self.env['res.users'].create({
             'name': 'Musqet Cashier',
             'login': 'musqet_cashier',
@@ -133,6 +147,7 @@ class TestMusqetWebhookVerification(TransactionCase):
 
     def setUp(self):
         super().setUp()
+        _use_test_encryption_key(self)
         self.method = self.env['pos.payment.method'].create({
             'name': 'Musqet Terminal',
             'use_payment_terminal': 'musqet',
@@ -194,6 +209,7 @@ class TestMusqetLatestStatus(TransactionCase):
 
     def setUp(self):
         super().setUp()
+        _use_test_encryption_key(self)
         self.cashier = self.env['res.users'].create({
             'name': 'Musqet Cashier',
             'login': 'musqet_cashier_status',
@@ -258,6 +274,7 @@ class TestMusqetCreateRefund(TransactionCase):
 
     def setUp(self):
         super().setUp()
+        _use_test_encryption_key(self)
         self.cashier = self.env['res.users'].create({
             'name': 'Musqet Cashier',
             'login': 'musqet_cashier_refund',
@@ -447,3 +464,85 @@ class TestMusqetCreateRefund(TransactionCase):
         public = self.env.ref('base.public_user')
         with self.assertRaises(AccessDenied):
             self.method.with_user(public).musqet_create_refund({'amountInCents': 500}, 123)
+
+
+@tagged('post_install', '-at_install')
+class TestMusqetSecretEncryption(TransactionCase):
+    """The API key and webhook secret are stored as Fernet ciphertext, never plaintext.
+
+    Guards the database-only-leak defence: the stored column holds ciphertext, the plaintext
+    field round-trips through the key in the environment, and the plaintext has no column.
+    """
+
+    def setUp(self):
+        super().setUp()
+        _use_test_encryption_key(self)
+        self.method = self.env['pos.payment.method'].create({
+            'name': 'Musqet Terminal',
+            'use_payment_terminal': 'musqet',
+            'musqet_base_url': 'https://api.musqet.tech/api/v1',
+            'musqet_api_key': 'secret-token',
+            'musqet_terminal_serial': 'MSQ-ENC-001',
+        })
+
+    def _stored_row(self):
+        self.env.flush_all()
+        self.env.cr.execute(
+            'SELECT musqet_api_key_encrypted, musqet_webhook_secret_encrypted '
+            'FROM pos_payment_method WHERE id = %s', (self.method.id,))
+        return self.env.cr.fetchone()
+
+    def test_api_key_stored_as_ciphertext(self):
+        stored_key, _ = self._stored_row()
+        self.assertTrue(stored_key)
+        self.assertNotIn('secret-token', stored_key)
+        self.assertEqual(Fernet(_TEST_FERNET_KEY).decrypt(stored_key.encode()), b'secret-token')
+
+    def test_plaintext_fields_have_no_column(self):
+        for name in ('musqet_api_key', 'musqet_webhook_secret'):
+            self.assertFalse(self.method._fields[name].store, name)
+            self.env.cr.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'pos_payment_method' AND column_name = %s", (name,))
+            self.assertFalse(self.env.cr.fetchone(), name)
+
+    def test_api_key_round_trips_and_reaches_the_header(self):
+        self.method.invalidate_recordset()
+        self.assertEqual(self.method.sudo().musqet_api_key, 'secret-token')
+        self.assertEqual(self.method._musqet_headers()['Authorization'], 'Bearer secret-token')
+
+    def test_webhook_secret_round_trips(self):
+        self.method.musqet_webhook_secret = 'whsec-xyz'
+        _, stored_secret = self._stored_row()
+        self.assertTrue(stored_secret)
+        self.assertNotIn('whsec-xyz', stored_secret)
+        self.method.invalidate_recordset()
+        self.assertEqual(self.method.musqet_webhook_secret, 'whsec-xyz')
+
+    def test_writing_one_secret_leaves_the_other_intact(self):
+        stored_key, _ = self._stored_row()
+        self.method.musqet_webhook_secret = 'whsec-xyz'
+        self.assertEqual(self._stored_row()[0], stored_key)
+
+    def test_empty_secret_is_not_encrypted(self):
+        self.method.musqet_api_key = False
+        self.assertFalse(self._stored_row()[0])
+
+    def test_write_without_key_raises(self):
+        with patch.dict(os.environ):
+            os.environ.pop(musqet_crypto.ENV_KEY, None)
+            with self.assertRaises(musqet_crypto.MusqetEncryptionKeyMissing):
+                self.method.musqet_api_key = 'x'
+
+    def test_read_with_wrong_key_degrades_to_empty(self):
+        # A mis-provisioned box must not crash on every read: decrypt logs and yields False.
+        self.method.invalidate_recordset()
+        with patch.dict(os.environ, {musqet_crypto.ENV_KEY: Fernet.generate_key().decode()}), \
+                self.assertLogs(musqet_crypto.__name__, level='ERROR'):
+            self.assertFalse(self.method.musqet_api_key)
+
+    def test_read_without_key_degrades_to_empty(self):
+        self.method.invalidate_recordset()
+        with patch.dict(os.environ), self.assertLogs(musqet_crypto.__name__, level='ERROR'):
+            os.environ.pop(musqet_crypto.ENV_KEY, None)
+            self.assertFalse(self.method.musqet_api_key)
