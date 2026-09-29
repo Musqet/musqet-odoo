@@ -37,8 +37,11 @@ curl -fsSL https://raw.githubusercontent.com/Musqet/musqet-odoo/main/install.sh 
 
 Or do it by hand:
 
-1. Put `pos_musqet/`'s parent directory (`musqet-odoo/`) on your Odoo `addons_path` and
-   restart Odoo.
+1. Put `pos_musqet/`'s parent directory (`musqet-odoo/`) on your Odoo `addons_path`, set
+   **`MUSQET_FIELD_ENCRYPTION_KEY`** in the Odoo environment (the API key and webhook
+   secret are encrypted at rest with it; see
+   [INSTALL.md §2.1](pos_musqet/docs/INSTALL.md#21-set-the-secret-encryption-key-required)),
+   and restart Odoo.
 2. **Apps → Update Apps List**, then install **POS Musqet**.
 3. **Point of Sale → Configuration → Payment Methods**: new method, *Use a Payment
    Terminal* = **Musqet**, fill in **Musqet API Key**, **Musqet API URL**, **Musqet

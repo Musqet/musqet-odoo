@@ -14,6 +14,8 @@ from odoo import fields, models, api, _
 from odoo.exceptions import ValidationError, AccessDenied
 from odoo.tools import consteq
 
+from .musqet_crypto import decrypt_secret, encrypt_secret
+
 _logger = logging.getLogger(__name__)
 
 DEFAULT_MUSQET_BASE_URL = 'https://api.musqet.tech/api/v1'
@@ -39,12 +41,20 @@ class PosPaymentMethod(models.Model):
     # groups= controls ORM/UI visibility, not storage. The key is read server-side via
     # self.sudo().musqet_api_key and is intentionally excluded from _load_pos_data_fields
     # so it is never loaded into POS JS.
+    # Encrypted at rest: `*_encrypted` holds a Fernet ciphertext (key in the environment, never
+    # the DB), and the plaintext field is non-stored, decrypting on read and encrypting on
+    # write, so the read sites and the form view are unchanged. groups= is kept on both so a
+    # non-manager cannot read either through the ORM. See models/musqet_crypto.py.
+    musqet_api_key_encrypted = fields.Char(copy=False, groups='base.group_erp_manager')
     musqet_api_key = fields.Char(
         string="Musqet API Key",
         help="Bearer token used by Odoo to authenticate to the Musqet terminal API. "
-             "Stored on the backend only and never exposed to the POS frontend.",
+             "Stored encrypted on the backend only and never exposed to the POS frontend.",
         copy=False,
+        store=False,
         groups='base.group_erp_manager',
+        compute='_compute_musqet_api_key',
+        inverse='_inverse_musqet_api_key',
     )
     # Restricted to ERP managers like the key: it's the destination the bearer token is
     # sent to (an SSRF sink), so configuring it needs the same privilege as the token.
@@ -63,12 +73,18 @@ class PosPaymentMethod(models.Model):
     )
     # Webhook (#6) — only used on publicly-reachable deployments. The pilot is behind NAT
     # and settles via polling, so these stay unset there and the push path simply never fires.
+    # Encrypted at rest, same scheme as musqet_api_key.
+    musqet_webhook_secret_encrypted = fields.Char(copy=False, groups='base.group_erp_manager')
     musqet_webhook_secret = fields.Char(
         string="Musqet Webhook Signing Secret",
         help="Shared secret used to verify the HMAC signature of inbound Musqet webhooks. "
-             "Only needed for publicly-reachable deployments; the pilot settles via polling.",
+             "Stored encrypted. Only needed for publicly-reachable deployments; the pilot "
+             "settles via polling.",
         copy=False,
+        store=False,
         groups='base.group_erp_manager',
+        compute='_compute_musqet_webhook_secret',
+        inverse='_inverse_musqet_webhook_secret',
     )
     # Buffer for the latest asynchronous webhook result, read by the POS frontend after a
     # MUSQET_LATEST_RESPONSE notification (mirrors pos_adyen.adyen_latest_response). Restricted
@@ -88,6 +104,28 @@ class PosPaymentMethod(models.Model):
         # get_base_url() forbids a multi-record recordset, so resolve it per record.
         for payment_method in self:
             payment_method.musqet_webhook_url = '%s/musqet/webhook' % payment_method.get_base_url()
+
+    # One compute per secret (not a shared one) so writing one secret never re-derives or
+    # re-encrypts the other.
+    @api.depends('musqet_api_key_encrypted')
+    def _compute_musqet_api_key(self):
+        for payment_method in self:
+            payment_method.musqet_api_key = decrypt_secret(payment_method.musqet_api_key_encrypted)
+
+    def _inverse_musqet_api_key(self):
+        for payment_method in self:
+            payment_method.musqet_api_key_encrypted = encrypt_secret(payment_method.musqet_api_key)
+
+    @api.depends('musqet_webhook_secret_encrypted')
+    def _compute_musqet_webhook_secret(self):
+        for payment_method in self:
+            payment_method.musqet_webhook_secret = decrypt_secret(
+                payment_method.musqet_webhook_secret_encrypted)
+
+    def _inverse_musqet_webhook_secret(self):
+        for payment_method in self:
+            payment_method.musqet_webhook_secret_encrypted = encrypt_secret(
+                payment_method.musqet_webhook_secret)
 
     @api.model
     def _load_pos_data_fields(self, config):

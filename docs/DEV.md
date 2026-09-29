@@ -48,6 +48,19 @@ safe; to start from an empty DB first, see **Teardown** below.
 
 ## 2. Bring up the UI for a live smoke test
 
+The Musqet API key and webhook secret are encrypted at rest with
+`MUSQET_FIELD_ENCRYPTION_KEY` ([`INSTALL.md` §2.1](../pos_musqet/docs/INSTALL.md)), which
+the compose file passes through from your shell. Export a throwaway key first, or saving
+the API key in the UI fails:
+
+```bash
+export MUSQET_FIELD_ENCRYPTION_KEY="$(docker compose run --rm --no-deps odoo \
+  python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())' | tail -1 | tr -d '\r')"
+```
+
+Keep the same key for the life of the database; a different key makes the stored
+secrets unreadable (re-enter them to recover).
+
 ```bash
 docker compose up -d            # start in the background
 docker compose logs -f odoo     # watch startup (Ctrl-C to stop tailing)
