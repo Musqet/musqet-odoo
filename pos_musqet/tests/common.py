@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 from cryptography.fernet import Fernet
 
 from odoo.addons.pos_musqet.models import musqet_crypto
+from odoo.tests.common import TransactionCase
+from odoo.tools import SQL
 from odoo.tools.misc import file_path
 
 # The secrets are encrypted at rest with a key from the environment, so every suite that
@@ -103,3 +105,50 @@ def reset_decrypt_failure_log(test):
     """Start and end the test with no decrypt failures recorded as already logged."""
     musqet_crypto.reset_reported_failures()
     test.addCleanup(musqet_crypto.reset_reported_failures)
+
+
+class MusqetPosRecordsCase(TransactionCase):
+    """Real POS payments of a paid order on two Musqet methods and a plain one, with one
+    refund record ('refund-1', 500 minor units) of that order."""
+
+    def setUp(self):
+        super().setUp()
+        self.method = create_musqet_method(self, 'MSQ-LINK-001')
+        self.plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
+        self.second = create_musqet_method(self, 'MSQ-LINK-002')
+        config = self.env['pos.config'].create({
+            'name': 'Musqet Link POS',
+            'payment_method_ids': [(6, 0, (self.method | self.plain | self.second).ids)]})
+        self.session = self.env['pos.session'].create({'config_id': config.id, 'user_id': self.env.uid})
+        self.order = self._order()
+        self._record_refund('refund-1', amount_minor=500)
+
+    def _order(self, state='paid'):
+        # Paid by default: the settle check skips the lines of an order not yet paid.
+        return self.env['pos.order'].create({
+            'session_id': self.session.id, 'amount_total': 0, 'amount_tax': 0,
+            'amount_paid': 0, 'amount_return': 0, 'state': state,
+        })
+
+    def _row_version(self, record):
+        self.env.cr.execute(
+            SQL('SELECT xmin::text FROM %s WHERE id = %s', SQL.identifier(record._table), record.id))
+        return self.env.cr.fetchone()[0]
+
+    def _record_sale(self, sale_id, **values):
+        """A sale record as Odoo makes it: sent for self.order (unless ``reference`` says)."""
+        return record_sale(self.env, self.method, sale_id, **{'reference': self.order.uuid, **values})
+
+    def _record_refund(self, sale_id, **values):
+        """A refund record as Odoo makes it: sent for self.order (unless ``reference`` says)."""
+        return record_refund(self.env, self.method, sale_id, **{'reference': self.order.uuid, **values})
+
+    def _original(self, sale_id, amount_minor=1000):
+        """A synced card sale payment of 10.00 and the server's done record of that sale."""
+        self._record_sale(sale_id, amount_minor=amount_minor)
+        return self._payment(amount=10.0, transaction_id=sale_id, musqet_rail='card')
+
+    def _payment(self, **vals):
+        return self.env['pos.payment'].create({
+            'pos_order_id': self.order.id, 'payment_method_id': self.method.id,
+            'amount': -5.0, **vals})

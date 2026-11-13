@@ -2,6 +2,7 @@
 import logging
 
 from odoo import api, fields, models
+from odoo.tools import SQL
 
 from .musqet_common import (
     MUSQET_RAIL_SELECTION,
@@ -78,6 +79,49 @@ class PosMusqetSale(models.Model):
         if amount is None or currency is None:
             return None
         return {'amount_minor': amount, 'currency': currency, 'rail': parse_rail(response.get('rail'))}
+
+    @api.model
+    def _musqet_resolve_sale(self, payment):
+        """The done sale record of ``payment``'s (method, saleId) in its company, or nothing.
+
+        A record still waiting on Musqet (_musqet_needs_status_read: its result never read
+        back, say the POS closed mid-sale, or settled without a rail) is read from Musqet
+        first, with the method that made the sale. One that can't be read stays as it is and
+        can't be refunded.
+        """
+        sale = self.sudo().search([
+            ('company_id', '=', payment.company_id.id),
+            ('payment_method_id', '=', payment.payment_method_id.id),
+            ('sale_id', '=', payment.transaction_id),
+        ])
+        if sale and sale._musqet_needs_status_read():
+            sale.payment_method_id.musqet_get_sale(sale.sale_id)
+        return sale.filtered(lambda record: record.state == 'done')
+
+    def _musqet_claim_for_refund(self):
+        """Make refunds of this sale decide one after the other, each seeing the last.
+
+        Every refund decision updates the sale records with this sale's saleId in its
+        company (to the same values), the same key the cap counts refunds by, so two
+        refunds of one sale still meet even through two methods' records of it. A second
+        decision on the same sale waits for the first transaction to end. If the first one
+        committed, the update fails with a serialisation error: Odoo runs a request in
+        REPEATABLE READ, so its snapshot may predate the first refund's record. Odoo then
+        retries the whole request with a fresh snapshot that includes the record. A lock alone
+        would not do: the waiting transaction would keep its old snapshot. The retry is safe
+        only while nothing has been sent, which is why musqet_create_refund flushes every
+        pending write before it sends the refund.
+
+        The row lock lasts until commit, so it spans the call to Musqet (up to
+        MUSQET_TIMEOUT). Only the server writes sale records, so nothing else waits on it but
+        another refund of the sale, a status read of it, or a check of its payment lines
+        (pos.payment._musqet_lock_records). The refund's own check of the original line
+        (pos.payment.method._musqet_settled_original) takes the same lock a little earlier,
+        after its calls to Musqet, and also holds the line's row if it changed its flag, so a
+        session close touching the line waits too.
+        """
+        self.ensure_one()
+        self._musqet_lock(SQL('company_id = %s AND sale_id = %s', self.company_id.id, self.sale_id))
 
     @api.model
     def _musqet_record_synced_sales(self):
