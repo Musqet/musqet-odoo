@@ -53,11 +53,12 @@ class PosPayment(models.Model):
         }
         to_link = defaultdict(lambda: self.browse())
         for payment in payments:
-            original = original_by_refund.get((payment.payment_method_id.id, payment.transaction_id))
-            if original and payment.musqet_refund_of != original:
-                to_link[original] |= payment
-        for original, linked in to_link.items():
+            original_sale_id = original_by_refund.get(
+                (payment.payment_method_id.id, payment.transaction_id))
+            if original_sale_id and payment.musqet_refund_of != original_sale_id:
+                to_link[original_sale_id] |= payment
+        for original_sale_id, linked in to_link.items():
             # This write re-enters write(), which finds every link already right and writes
             # nothing more. (No context flag: an RPC caller sets the context, and could set
             # it to keep a forged link.)
-            linked.sudo().write({'musqet_refund_of': original})
+            linked.sudo().write({'musqet_refund_of': original_sale_id})

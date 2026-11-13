@@ -216,7 +216,8 @@ and make your **company currency match it** (and keep each POS on the company cu
    Odoo records every refund Musqet accepts, straight away. So the refunds of one sale
    can never add up to more than the sale, even before the refund orders sync, and the
    same refund order can't be refunded twice. A refund that fails at the terminal stops
-   counting once Musqet reports it as failed.
+   counting once Musqet reports it as failed. One refund order takes one Musqet refund of
+   a given sale: to refund more of that sale later, make a new refund order.
 
 ---
 

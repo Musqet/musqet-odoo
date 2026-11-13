@@ -41,6 +41,18 @@ def create_musqet_method(test, serial, **overrides):
     })
 
 
+def record_refund(env, method, sale_id, original_sale_id='sale-orig-1', amount_minor=1, **overrides):
+    """Create a pos.musqet.refund of ``original_sale_id`` on ``method`` (in its company)."""
+    return env['pos.musqet.refund'].create({
+        'company_id': method.company_id.id,
+        'payment_method_id': method.id,
+        'original_sale_id': original_sale_id,
+        'sale_id': sale_id,
+        'amount_minor': amount_minor,
+        **overrides,
+    })
+
+
 def load_migration(version, name):
     """Load a migration script, e.g. load_migration('19.0.1.1.0', 'pre-migration')."""
     # The directory name has dots and the file a hyphen, so it can't be imported by name.
