@@ -194,6 +194,15 @@ class PosPaymentMethod(models.Model):
         """
         return self._musqet_business_company().sudo().currency_id.name
 
+    def _musqet_requested_currency(self, payload):
+        """Return the business currency if the payload's currency is it (or is omitted), else None.
+
+        The caller never picks the currency: amountInCents is read in it, so a different one
+        would charge a different value from the one the POS records.
+        """
+        currency = self._musqet_business_currency()
+        return currency if payload.get('currency', currency) == currency else None
+
     def _musqet_check_terminal_request(self, payload):
         """Shared opening checks for a sale or refund: access, payload shape, serial.
 
@@ -303,10 +312,8 @@ class PosPaymentMethod(models.Model):
         mode = payload.get('mode', MUSQET_DEFAULT_SALE_MODE)
         if mode not in MUSQET_SALE_MODES:
             return {'error': {'message': _("The payment mode is invalid.")}}
-        # The caller must not pick the currency: a sale of 1250 in a currency with a
-        # different minor unit would charge a different value from the one the POS records.
-        currency = self._musqet_business_currency()
-        if payload.get('currency', currency) != currency:
+        currency = self._musqet_requested_currency(payload)
+        if not currency:
             return {'error': {'message': _("The sale currency does not match the company currency.")}}
         reference = payload.get('reference')
         if reference is not None and not self._musqet_valid_reference(reference):
@@ -372,8 +379,9 @@ class PosPaymentMethod(models.Model):
         ``original_payment_id`` (the Odoo id of the original pos.payment, supplied by the POS)
         is UNTRUSTED, like the rest of the payload. We re-read that payment server-side and
         refuse the refund unless it is a card-settled Musqet payment of this company whose
-        captured amount covers the request. type, mode, serial and currency are set on the
-        server; reference is required and validated; only known keys are forwarded — so a
+        captured amount covers the request. type, mode and serial are set on the server; the
+        currency must be the company currency; reference is required and validated; only known
+        keys are forwarded — so a
         tampered payload (mode:"any", type:"sale", a foreign serial/amount, extra keys) cannot
         widen the action. Returns the create response or a clean ``{error}``.
 
@@ -407,12 +415,11 @@ class PosPaymentMethod(models.Model):
         if original.payment_method_id.use_payment_terminal != 'musqet' or original.musqet_rail != 'card':
             return {'error': {'message': _(
                 "Only card payments taken on a Musqet terminal can be refunded automatically.")}}
-        # Like a sale, a refund is made in the company currency; an omitted currency means
-        # that one, as on a sale. The cap below compares minor units, so the original must be
-        # in that currency too, or the exponents could differ and the over-refund guard would
-        # compare mismatched scales.
-        currency = self._musqet_business_currency()
-        if payload.get('currency', currency) != currency:
+        # Like a sale, a refund is made in the company currency. The cap below compares minor
+        # units, so the original must be in that currency too, or the exponents could differ
+        # and the over-refund guard would compare mismatched scales.
+        currency = self._musqet_requested_currency(payload)
+        if not currency:
             return {'error': {'message': _("The refund currency does not match the company currency.")}}
         if original.currency_id.name != currency:
             return {'error': {'message': _("The refund currency does not match the original payment.")}}

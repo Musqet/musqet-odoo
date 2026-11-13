@@ -462,9 +462,9 @@ class TestMusqetCreateRefund(TransactionCase):
         return refund
 
     def _call_refund(self, payload, original, original_payment_id=123, prior_refunds=None):
-        # Default the request currency to the stub's so the currency-equality guard passes
-        # unless a test deliberately overrides it.
-        payload = {'currency': self.currency, 'reference': 'REFUND-ORDER-1', **payload}
+        # No default currency: an omitted one means the company currency, so most tests take
+        # that path. Tests that send a currency do so deliberately.
+        payload = {'reference': 'REFUND-ORDER-1', **payload}
         fake = MagicMock()
         fake.status_code = 200
         fake.json.return_value = {'saleId': 'refund-1', 'status': 'PENDING'}
@@ -496,7 +496,7 @@ class TestMusqetCreateRefund(TransactionCase):
             'type': 'sale',
             'mode': 'any',
             'serial': 'MSQ-EVIL-999',
-            'currency': self.currency,   # must match the original; mismatch is tested separately
+            'currency': self.currency,   # must be the company currency; mismatch tested separately
             'extra': 'smuggled',
         }
         result, mock_request = self._call_refund(payload, original)
@@ -505,16 +505,15 @@ class TestMusqetCreateRefund(TransactionCase):
         self.assertEqual(sent['type'], 'refund')         # forced — not the payload's "sale"
         self.assertEqual(sent['mode'], 'card')           # forced — not the payload's "any"
         self.assertEqual(sent['serial'], 'MSQ-RF-001')   # this method's serial, not the payload's
-        self.assertEqual(sent['currency'], self.currency)  # the original's currency, from the record
+        self.assertEqual(sent['currency'], self.currency)  # the company currency
         self.assertNotIn('extra', sent)
 
     def test_rejects_currency_mismatch(self):
-        # The over-refund cap compares minor units, so a request in a different currency than
-        # the original could compare mismatched scales — reject before forwarding.
+        # A refund requested in any currency but the company's is refused before forwarding.
         original = self._stub_original(rail='card', amount=10.0)   # company currency
         result, mock_request = self._call_refund(
             {'amountInCents': 500, 'currency': self.other_currency}, original)
-        self.assertIn('error', result)
+        self.assertIn('company currency', result['error']['message'])
         mock_request.assert_not_called()
 
     def test_rejects_refund_of_a_lightning_sale(self):
@@ -624,11 +623,12 @@ class TestMusqetCreateRefund(TransactionCase):
         self.assertEqual(mock_request.mock_calls[0].kwargs['json']['currency'], self.currency)
 
     def test_rejects_an_original_not_in_the_company_currency(self):
+        # The over-refund cap compares minor units, so an original in another currency could
+        # compare mismatched scales: refused even when the request itself is fine.
         original = self._stub_original(amount=10.0)
         original.currency_id.name = self.other_currency
-        result, mock_request = self._call_refund(
-            {'amountInCents': 500, 'currency': self.other_currency}, original)
-        self.assertIn('error', result)
+        result, mock_request = self._call_refund({'amountInCents': 500}, original)
+        self.assertIn('original payment', result['error']['message'])
         mock_request.assert_not_called()
 
     def test_rejects_when_no_serial_is_configured(self):
