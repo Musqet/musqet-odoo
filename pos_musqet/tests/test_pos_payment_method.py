@@ -307,7 +307,8 @@ class TestMusqetLatestStatus(TransactionCase):
         fake.status_code = 200
         fake.json.return_value = {'saleId': 'new', 'status': 'PENDING'}
         with patch.object(pos_payment_method.requests, 'request', return_value=fake):
-            self.method.with_user(self.cashier).musqet_create_sale({'amountInCents': 500})
+            self.method.with_user(self.cashier).musqet_create_sale(
+                {'amountInCents': 500, 'reference': 'Order-T'})
         self.assertFalse(self.method.musqet_latest_response)
 
 
@@ -331,6 +332,8 @@ class TestMusqetCreateSale(TransactionCase):
     def _call_sale(self, payload):
         # A new saleId per call (sale-1, sale-2, ...), as Musqet gives: each sale is recorded.
         self.sales_sent += 1
+        if isinstance(payload, dict):
+            payload = {'reference': 'Order-T', **payload}
         fake = musqet_response('sale-%d' % self.sales_sent)
         with patch.object(pos_payment_method.requests, 'request', return_value=fake) as mock_request:
             result = self.method.with_user(self.cashier).musqet_create_sale(payload)
@@ -347,7 +350,8 @@ class TestMusqetCreateSale(TransactionCase):
             return musqet_response('sale-1')
 
         with patch.object(pos_payment_method.requests, 'request', side_effect=fake_request):
-            result = self.method.with_user(self.cashier).musqet_create_sale({'amountInCents': 500})
+            result = self.method.with_user(self.cashier).musqet_create_sale(
+                {'amountInCents': 500, 'reference': 'Order-T'})
         self.assertNotIn('error', result)
         self.assertEqual(dirty_at_post, [])
 
@@ -453,6 +457,11 @@ class TestMusqetCreateSale(TransactionCase):
                 result, mock_request = self._call_sale({'amountInCents': 500, 'currency': currency})
                 self.assertIn('company currency', result['error']['message'])
                 mock_request.assert_not_called()
+
+    def test_rejects_a_sale_without_a_reference(self):
+        result, mock_request = self._call_sale({'amountInCents': 500, 'reference': None})
+        self.assertIn('reference', result['error']['message'])
+        mock_request.assert_not_called()
 
     def test_rejects_an_invalid_reference(self):
         for reference in ({'nested': 'object'}, '', 'x' * (MUSQET_REFERENCE_MAX_LENGTH + 1), 42):
@@ -1350,7 +1359,7 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
             'payment_method_ids': [(6, 0, (self.method | self.plain | self.second).ids)]})
         self.session = self.env['pos.session'].create({'config_id': config.id, 'user_id': self.env.uid})
         self.order = self._order()
-        record_refund(self.env, self.method, 'refund-1', amount_minor=500)
+        self._record_refund('refund-1', amount_minor=500)
 
     def _order(self, state='paid'):
         # Paid by default: the settle check skips the lines of an order not yet paid.
@@ -1364,9 +1373,17 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
             SQL('SELECT xmin::text FROM %s WHERE id = %s', SQL.identifier(record._table), record.id))
         return self.env.cr.fetchone()[0]
 
+    def _record_sale(self, sale_id, **values):
+        """A sale record as Odoo makes it: sent for self.order (unless ``reference`` says)."""
+        return record_sale(self.env, self.method, sale_id, **{'reference': self.order.uuid, **values})
+
+    def _record_refund(self, sale_id, **values):
+        """A refund record as Odoo makes it: sent for self.order (unless ``reference`` says)."""
+        return record_refund(self.env, self.method, sale_id, **{'reference': self.order.uuid, **values})
+
     def _original(self, sale_id, amount_minor=1000):
         """A synced card sale payment of 10.00 and the server's done record of that sale."""
-        record_sale(self.env, self.method, sale_id, amount_minor=amount_minor)
+        self._record_sale(sale_id, amount_minor=amount_minor)
         return self._payment(amount=10.0, transaction_id=sale_id, musqet_rail='card')
 
     def _payment(self, **vals):
@@ -1482,6 +1499,18 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         (older | newer)._musqet_check_settles()
         self.assertEqual({older.musqet_settle_check, newer.musqet_settle_check}, {'unverified'})
 
+    def test_upgrade_clears_the_reference_of_a_shared_refund(self):
+        # The 19.0.1.2.0 backfill named one order for a refund saleId several payments
+        # carried; 19.0.1.3.0 clears it. A refund carried by one payment keeps its reference.
+        shared = self._record_refund('refund-shared', state='done')
+        single = self._record_refund('refund-single', state='done')
+        self._payment(transaction_id='refund-shared')
+        self._payment(pos_order_id=self._order().id, transaction_id='refund-shared')
+        self._payment(transaction_id='refund-single')
+        load_migration('19.0.1.3.0', 'post-migration').migrate(self.env.cr, '19.0.1.2.0')
+        self.assertFalse(shared.reference)
+        self.assertEqual(single.reference, self.order.uuid)
+
     def test_sale_backfill_skips_an_amount_too_large_to_store(self):
         self._payment(amount=30000000.0, transaction_id='sale-huge')
         logger = 'odoo.addons.pos_musqet.models.pos_musqet_record'
@@ -1502,7 +1531,7 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
     def test_refunds_a_sale_whose_result_was_never_read(self):
         # The POS closed before reading the sale's result: its record is pending and its line
         # Not verified. The refund reads the sale from Musqet, which settles both.
-        record_sale(self.env, self.method, 'sale-unread', state='pending')
+        self._record_sale('sale-unread', state='pending')
         line = self._payment(amount=10.0, transaction_id='sale-unread')
         self.assertEqual(line.musqet_settle_check, 'unverified')
         currency = self.method.company_id.currency_id.name
@@ -1611,9 +1640,11 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         self.assertNotIn('error', result)
 
     def test_neither_line_of_a_copied_sale_can_be_refunded(self):
-        # Two paid lines claiming one sale (a duplicated sync, or a copy): both are Not
-        # verified, so a refund naming either is refused until the extra line is gone.
-        genuine = self._original('sale-orig-dup')
+        # Two paid lines claiming a sale whose record names no order (the upgrade made it from
+        # lines sharing the saleId): both are Not verified, so a refund naming either is
+        # refused until the extra line is gone.
+        record_sale(self.env, self.method, 'sale-orig-dup')
+        genuine = self._payment(amount=10.0, transaction_id='sale-orig-dup')
         twin = self._payment(pos_order_id=self._order().id, amount=10.0,
                              transaction_id='sale-orig-dup')
         for line in (genuine, twin):
@@ -1665,14 +1696,14 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
     # -- Settle check on synced payments (musqet_settle_check) --------------------
 
     def test_a_sale_line_musqet_confirmed_is_verified(self):
-        record_sale(self.env, self.method, 'sale-ok', amount_minor=1000)
+        self._record_sale('sale-ok', amount_minor=1000)
         payment = self._payment(amount=10.0, transaction_id='sale-ok')
         self.assertEqual(payment.musqet_settle_check, 'verified')
 
     def test_a_sale_line_without_a_matching_settle_is_not_verified(self):
-        record_sale(self.env, self.method, 'sale-pending', state='pending')
-        record_sale(self.env, self.method, 'sale-999', amount_minor=999)
-        record_sale(self.env, self.method, 'sale-eur', currency='XTS')
+        self._record_sale('sale-pending', state='pending')
+        self._record_sale('sale-999', amount_minor=999)
+        self._record_sale('sale-eur', currency='XTS')
         record_sale(self.env, self.second, 'sale-second')
         for transaction_id in (False, 'sale-unknown', 'sale-pending', 'sale-999', 'sale-eur',
                                'sale-second'):
@@ -1687,7 +1718,7 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
 
     def test_a_line_is_verified_once_musqet_reports_it_complete(self):
         # A sale and a refund (refund-1, pending, from setUp) both settle from a status read.
-        record_sale(self.env, self.method, 'sale-late', state='pending')
+        self._record_sale('sale-late', state='pending')
         sale_line = self._payment(amount=10.0, transaction_id='sale-late')
         refund_line = self._payment(transaction_id='refund-1')
         self.assertEqual(sale_line.musqet_settle_check, 'unverified')
@@ -1701,8 +1732,8 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         self.assertEqual(refund_line.musqet_settle_check, 'verified')
 
     def test_a_refund_line_is_checked_against_its_refund_record(self):
-        record_refund(self.env, self.method, 'refund-ok', amount_minor=500, state='done')
-        record_refund(self.env, self.method, 'refund-600', amount_minor=600, state='done')
+        self._record_refund('refund-ok', amount_minor=500, state='done')
+        self._record_refund('refund-600', amount_minor=600, state='done')
         self.assertEqual(self._payment(transaction_id='refund-ok').musqet_settle_check, 'verified')
         self.assertEqual(
             self._payment(transaction_id='refund-600').musqet_settle_check, 'unverified')
@@ -1720,9 +1751,11 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         self.assertEqual(payment.musqet_settle_check, 'unverified')
 
     def test_a_copied_sale_id_leaves_every_line_unverified(self):
-        # One Musqet sale vouches for one paid line: a second line claiming it, on another
-        # order, makes both Not verified until it is gone.
-        genuine = self._original('sale-copied')
+        # A record that names no order (the upgrade made it from lines sharing the saleId)
+        # vouches for one paid line only: a second line claiming it makes both Not verified
+        # until it is gone.
+        record_sale(self.env, self.method, 'sale-copied')
+        genuine = self._payment(amount=10.0, transaction_id='sale-copied')
         self.assertEqual(genuine.musqet_settle_check, 'verified')
         copy = self._payment(pos_order_id=self._order().id, amount=10.0, transaction_id='sale-copied')
         self.assertEqual((genuine.musqet_settle_check, copy.musqet_settle_check),
@@ -1758,7 +1791,7 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         self.assertEqual(genuine.musqet_settle_check, 'verified')
 
     def test_editing_a_verified_line_checks_it_again(self):
-        record_sale(self.env, self.method, 'sale-edit', amount_minor=1000)
+        self._record_sale('sale-edit', amount_minor=1000)
         payment = self._payment(amount=10.0, transaction_id='sale-edit')
         payment.amount = 20.0
         self.assertEqual(payment.musqet_settle_check, 'unverified')

@@ -1,9 +1,11 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 import logging
 
+from collections import Counter
+
 from odoo import api, fields, models
 
-from .musqet_common import MUSQET_TERMINAL, minor_units, parse_minor_amount
+from .musqet_common import MUSQET_TERMINAL, minor_units, parse_minor_amount, sale_key_domain
 
 _logger = logging.getLogger(__name__)
 
@@ -58,6 +60,26 @@ class PosMusqetRefund(models.Model):
         """A refund settles at the amount Musqet reports refunded (the sale partner shape)."""
         amount = parse_minor_amount(response.get('amountInCents'))
         return None if amount is None else {'amount_minor': amount}
+
+    @api.model
+    def _musqet_forget_shared_references(self):
+        """Clear the reference of each refund record whose (method, saleId) several payments carry.
+
+        For the upgrade to 19.0.1.3.0 (see its post-migration); safe to run again. The
+        19.0.1.2.0 backfill took the reference of whichever payment came first, so for a
+        saleId several payments shared it named one order arbitrarily, and the settle check
+        would take that order's line as the genuine one. With no reference, none of them is
+        Verified, as for a record the backfill makes now (_musqet_record_unrecorded). The
+        duplicate check still knows the refund by its synced payments' order references.
+        """
+        refunds = self.sudo().search([('reference', '!=', False)])
+        payments = self.env['pos.payment'].sudo().search(sale_key_domain(
+            'transaction_id', refunds.mapped('sale_id'), refunds.payment_method_id))
+        carried = Counter((payment.payment_method_id.id, payment.transaction_id) for payment in payments)
+        shared = refunds.filtered(
+            lambda refund: carried[(refund.payment_method_id.id, refund.sale_id)] > 1)
+        shared.write({'reference': False})
+        _logger.info("pos_musqet: cleared the order reference of %d shared refund(s)", len(shared))
 
     @api.model
     def _musqet_record_synced_refunds(self):

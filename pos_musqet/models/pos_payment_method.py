@@ -452,8 +452,8 @@ class PosPaymentMethod(models.Model):
         payload as-is would let a caller start a refund here and skip every check in
         musqet_create_refund. Instead, rebuild the request from known keys only: ``type``
         is forced to "sale", ``serial`` comes from this method's own record, ``currency``
-        must be the company currency, and the remaining fields are checked before they are
-        sent. The caller still chooses which payment method record this runs on; scoping
+        must be the company currency, ``reference`` is required, and the remaining fields are
+        checked before they are sent. The caller still chooses which payment method record this runs on; scoping
         that to the cashier's own POS is a separate check.
         """
         error = self._musqet_check_terminal_request(payload)
@@ -468,8 +468,11 @@ class PosPaymentMethod(models.Model):
         currency = self._musqet_requested_currency(payload)
         if not currency:
             return {'error': {'message': _("The sale currency does not match the company currency.")}}
+        # The reference is required: it names the order the sale is for, which the settle
+        # check holds a synced line to (pos.payment._musqet_settle_value). The POS always
+        # sends one.
         reference = payload.get('reference')
-        if reference is not None and not self._musqet_valid_reference(reference):
+        if not self._musqet_valid_reference(reference):
             return {'error': {'message': _("The sale reference is invalid.")}}
         # The optional fields go first so the server-set fields after them always win, even
         # if the helper's allow-list ever grows.
@@ -480,9 +483,8 @@ class PosPaymentMethod(models.Model):
             'mode': mode,
             'amountInCents': amount,
             'currency': currency,
+            'reference': reference,
         }
-        if reference is not None:
-            outgoing['reference'] = reference
         # Drop any buffered webhook result from a previous sale so a late notification for
         # it can't be mistaken for this one (mirrors pos_adyen). Written with sudo() because
         # the field is ERP-manager-restricted but a plain cashier drives the terminal.
@@ -618,9 +620,9 @@ class PosPaymentMethod(models.Model):
         refunds of one sale still meet even through two methods' records of it. A second
         decision on the same sale waits for the first transaction to end. If the first one
         committed, the update fails with a serialisation error: Odoo runs a request in
-        REPEATABLE READ, so its snapshot may predate the first refund's record. Odoo then retries the whole request with a fresh snapshot that
-        includes the record. A lock alone would not do: the waiting transaction would keep its
-        old snapshot. The retry is safe only while nothing has been sent, which is why
+        REPEATABLE READ, so its snapshot may predate the first refund's record. Odoo then
+        retries the whole request with a fresh snapshot that includes the record. A lock alone
+        would not do: the waiting transaction would keep its old snapshot. The retry is safe only while nothing has been sent, which is why
         musqet_create_refund flushes every pending write before it sends the refund.
 
         The row lock lasts until commit, so it spans the call to Musqet (up to
@@ -665,7 +667,8 @@ class PosPaymentMethod(models.Model):
         record's own key; a payment of another method that shares the saleId does not.
 
         A refund is known by the reference it was sent with and by both forms of its synced
-        order's reference (a record backfilled at the upgrade holds only one of them). A
+        order's reference (a record backfilled at the upgrade holds at most one of them: none
+        if several payments shared its saleId). A
         reference of a pending refund maps to 'pending' even if a done one shares it.
         """
         state_by_key = {
