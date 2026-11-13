@@ -545,12 +545,12 @@ class PosPaymentMethod(models.Model):
         return fields_out
 
     def _musqet_card_only_error(self):
-        return {'error': {'message': _(
-            "Only card payments taken on a Musqet terminal can be refunded automatically.")}}
+        return self._musqet_error(_(
+            "Only card payments taken on a Musqet terminal can be refunded automatically."))
 
     def _musqet_not_confirmed_error(self):
-        return {'error': {'message': _(
-            "Musqet has not confirmed this sale, so it cannot be refunded here.")}}
+        return self._musqet_error(_(
+            "Musqet has not confirmed this sale, so it cannot be refunded here."))
 
     def _musqet_refundable_payment(self, original_payment_id):
         """Find the claimed original payment and check it may name a sale to refund here.
@@ -708,7 +708,7 @@ class PosPaymentMethod(models.Model):
                         note(reference, state)
         return states
 
-    def _musqet_refund_refusal(self, original, amount, reference):
+    def _musqet_refund_refusal(self, original, *, amount, reference):
         """Return an ``{error}`` refusing a refund over the cap or repeating one, else None.
 
         Must run after _musqet_claim_original_sale, so it sees every earlier refund's record.
@@ -842,7 +842,7 @@ class PosPaymentMethod(models.Model):
         if error:
             return error
         self._musqet_claim_original_sale(original)
-        error = self._musqet_refund_refusal(original, amount, reference)
+        error = self._musqet_refund_refusal(original, amount=amount, reference=reference)
         if error:
             return error
         # FORCE the refund-defining fields server-side: mode card (the terminal can't reverse
@@ -871,7 +871,7 @@ class PosPaymentMethod(models.Model):
         if isinstance(response, dict) and 'error' not in response and not reply_is_for(sale_id, response):
             _logger.warning("Musqet replied about sale %r to a read of sale %r",
                             response.get('saleId'), sale_id)
-            return {'error': {'message': _("Musqet replied about a different sale.")}}
+            return self._musqet_error(_("Musqet replied about a different sale."))
         return response
 
     def _musqet_sync_records(self, sale_id, response):

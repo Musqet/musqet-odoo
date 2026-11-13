@@ -55,7 +55,11 @@ class PosMusqetRefund(models.Model):
         self.filtered(lambda refund: refund.state == 'pending').sudo().write({'state': 'failed'})
 
     def _musqet_done_vals(self, response):
-        """A refund settles at the amount Musqet reports refunded (the sale partner shape)."""
+        """A refund settles at the amount Musqet reports refunded.
+
+        A refund's status reply has the same shape as a sale's, the response shape of
+        Musqet's partner API (Musqet/musqet#2094).
+        """
         amount = parse_minor_amount(response.get('amountInCents'))
         return None if amount is None else {'amount_minor': amount}
 
