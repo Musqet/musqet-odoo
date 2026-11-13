@@ -115,10 +115,10 @@ class PosMusqetSale(models.Model):
         The row lock lasts until commit, so it spans the call to Musqet (up to
         MUSQET_TIMEOUT, in models/pos_payment_method.py). Only the server writes sale
         records, so nothing else waits on it but another refund of the sale, a status read of
-        it, or a check of its payment lines (pos.payment._musqet_lock_records). The refund's own check of the original line
-        (pos.payment.method._musqet_settled_original) takes the same lock a little earlier,
-        after its calls to Musqet, and also holds the line's row if it changed its flag, so a
-        session close touching the line waits too.
+        it, or a check of its payment lines (pos.payment._musqet_lock_records). The refund's
+        own check of the original line (pos.payment.method._musqet_settled_original) takes the
+        same lock a little earlier, after its calls to Musqet, and also holds the line's row if
+        it changed its flag, so a session close touching the line waits too.
         """
         self.ensure_one()
         self._musqet_lock(SQL('company_id = %s AND sale_id = %s', self.company_id.id, self.sale_id))

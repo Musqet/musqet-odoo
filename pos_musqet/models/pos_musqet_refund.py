@@ -95,7 +95,7 @@ class PosMusqetRefund(models.Model):
             refund.payment_method_id.musqet_get_sale(refund.sale_id)
 
     @api.model
-    def _musqet_refusal(self, original, *, amount, reference):
+    def _musqet_refusal_message(self, original, *, amount, reference):
         """Return why a refund of ``amount`` over the cap or repeating one is refused, else None.
 
         ``original`` is the pos.musqet.sale being refunded. Must run after

@@ -645,7 +645,7 @@ class PosPaymentMethod(models.Model):
         from Musqet first, so one that failed stops counting. A synced Musqet refund payment with
         no record still counts, through its musqet_refund_of. The duplicate key is the order
         reference, so a refund order carries at most one Musqet refund of a given sale. The cap
-        and the duplicate check are pos.musqet.refund._musqet_refusal.
+        and the duplicate check are pos.musqet.refund._musqet_refusal_message.
 
         Not covered: a refund Musqet accepted but whose response never reached Odoo (a
         timeout), or whose record Odoo failed to save. Neither has a record, and until its
@@ -682,7 +682,7 @@ class PosPaymentMethod(models.Model):
         if error:
             return error
         original._musqet_claim_for_refund()
-        refusal = self.env['pos.musqet.refund']._musqet_refusal(
+        refusal = self.env['pos.musqet.refund']._musqet_refusal_message(
             original, amount=amount, reference=reference)
         if refusal:
             return self._musqet_error(refusal)
