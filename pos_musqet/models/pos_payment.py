@@ -41,8 +41,9 @@ class PosPayment(models.Model):
     # Whether Musqet confirmed this Musqet payment line. The POS marks an order paid on the
     # browser's word, so the server checks each synced line against its own records: a sale
     # line against the done pos.musqet.sale with its saleId (amount and currency Musqet
-    # captured), a refund line against the done pos.musqet.refund (amount), and only one paid
-    # line may claim each. Empty on a line of another method, and on a line of an order not
+    # captured), a refund line against the done pos.musqet.refund (amount), and it must be the
+    # line of the order Odoo sent it for (or, for an upgrade record with no order, the only
+    # line carrying it). Empty on a line of another method, and on a line of an order not
     # yet paid. A line synced before 19.0.1.3.0 starts empty, and is checked once it, its
     # order's state or a line sharing its saleId changes.
     musqet_settle_check = fields.Selection(
@@ -113,8 +114,8 @@ class PosPayment(models.Model):
         command for (the record's reference), alone on it; a saleId copied onto another
         order's line leaves the copy Not verified. A record with no reference (made by the
         upgrade from lines sharing a saleId) vouches for a line only if no other line, of any
-        order state, carries its claim. Logs each Musqet line that becomes Not verified, so it can be checked by
-        hand.
+        order state, carries its claim. Logs each Musqet line that becomes Not verified, so it
+        can be checked by hand.
         """
         own_lines = self._musqet_lines()
         # Lock first, so a line of the same sale synced at the same time is counted below.

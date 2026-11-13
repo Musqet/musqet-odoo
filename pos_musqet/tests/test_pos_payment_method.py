@@ -1508,12 +1508,17 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         # Carried by one line: kept.
         single = self._record_refund('refund-single', state='done')
         self._payment(transaction_id='refund-single')
-        # The genuine line's order is unpaid, a copy is on a paid order: kept, so the copy
-        # stays Not verified rather than becoming the sole claimant of a record with no order.
-        unpaid = self._order(state='draft')
-        kept = self._record_refund('refund-kept', state='done', reference=unpaid.uuid)
-        self._payment(pos_order_id=unpaid.id, transaction_id='refund-kept')
-        copy = self._payment(pos_order_id=self._order().id, transaction_id='refund-kept')
+        # The genuine line's order is unpaid and a copy is on a paid one; the old backfill
+        # guessed either order. Cleared both ways, so the copy is never Verified.
+        guesses = {}
+        for guess in ('unpaid', 'paid'):
+            unpaid, paid = self._order(state='draft'), self._order()
+            guessed_order = unpaid if guess == 'unpaid' else paid
+            refund = self._record_refund(
+                'refund-%s' % guess, state='done', reference=guessed_order.uuid)
+            self._payment(pos_order_id=unpaid.id, transaction_id=refund.sale_id)
+            copy = self._payment(pos_order_id=paid.id, transaction_id=refund.sale_id)
+            guesses[guess] = (refund, copy)
         # Sent for a refund order that never synced, with copies on two paid orders: not a
         # backfill guess (no sharer's order), and the duplicate check knows that refund only
         # by this reference, so it is kept.
@@ -1523,11 +1528,14 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         load_migration('19.0.1.3.0', 'post-migration').migrate(self.env.cr, '19.0.1.2.0')
         self.assertFalse(shared.reference)
         self.assertEqual(single.reference, self.order.uuid)
-        self.assertEqual(kept.reference, unpaid.uuid)
         self.assertEqual(sent.reference, 'R-UNSYNCED')
-        (lines | copy)._musqet_check_settles()
+        lines._musqet_check_settles()
         self.assertEqual(set(lines.mapped('musqet_settle_check')), {'unverified'})
-        self.assertEqual(copy.musqet_settle_check, 'unverified')
+        for guess, (refund, copy) in guesses.items():
+            with self.subTest(guess=guess):
+                self.assertFalse(refund.reference)
+                copy._musqet_check_settles()
+                self.assertEqual(copy.musqet_settle_check, 'unverified')
 
     def test_a_backfilled_refund_with_its_genuine_line_unpaid_verifies_no_copy(self):
         # Upgrading from 19.0.1.1.0: the genuine refund line is on an unpaid order and a copy

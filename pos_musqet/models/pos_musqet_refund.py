@@ -61,27 +61,30 @@ class PosMusqetRefund(models.Model):
 
     @api.model
     def _musqet_forget_shared_references(self):
-        """Clear the reference of each refund record that several paid refund lines claim.
+        """Clear the reference of each refund record that several linked refund lines carry.
 
         For the upgrade to 19.0.1.3.0 (see its post-migration). The 19.0.1.2.0 backfill took
         the reference of an arbitrary one of the linked payments, so for a saleId several of
         them shared, it named one of their orders arbitrarily, and the settle check would take
-        that order's line as the genuine one. A record is cleared only when at least two paid,
-        linked refund lines claim it and its reference is one of their orders: with no
+        that order's line as the genuine one (even a copy on a paid order, with the genuine
+        line on an unpaid one). A record is cleared when at least two linked refund lines, of
+        any order state, carry it and its reference is one of their orders. With no
         reference, none of those lines is Verified (the settle check then needs a line no
-        other line carries), so clearing never makes a line Verified. A record whose other sharers are on
-        unpaid orders keeps its reference. The duplicate check still knows a cleared refund
-        by its synced payments' order references.
+        other line carries), so clearing never makes a line Verified. A reference that names
+        none of their orders is no guess of that backfill, and is kept: the duplicate check
+        may know that refund only by it. The duplicate check still knows a cleared refund by
+        its synced payments' order references.
         """
         refunds = self.sudo().search([('reference', '!=', False), ('state', '=', 'done')])
         payments = self.env['pos.payment'].sudo().search(sale_key_domain(
             'transaction_id', refunds.mapped('sale_id'), refunds.payment_method_id,
         ) + [('musqet_refund_of', '!=', False)])
-        # Paid refund lines, by their claim, as the settle check counts them.
-        claimants = payments._musqet_claimants(paid_only=True)
+        # Linked refund lines of every order state, by their claim: the lines the old backfill
+        # chose among.
+        carriers = payments._musqet_claimants(paid_only=False)
 
         def has_guessed_reference(refund):
-            lines = claimants[(refund.payment_method_id.id, refund.sale_id, False)]
+            lines = carriers[(refund.payment_method_id.id, refund.sale_id, False)]
             return len(lines) > 1 and any(
                 refund.reference in line._musqet_order_references() for line in lines)
 
