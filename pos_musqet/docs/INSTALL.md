@@ -185,9 +185,9 @@ Security notes (already enforced by the addon):
 
 Keep this simple for V1:
 
-- **Book everything in your POS/store currency to one journal.** Configure the Musqet
+- **Book everything in your company currency to one journal.** Configure the Musqet
   payment method with a single standard payment **journal** (the normal Odoo payment
-  method setup). Card and Lightning sales both post to that one journal in your store
+  method setup). Card and Lightning sales both post to that one journal in your company
   currency. There is **no** separate sats ledger and **no** exchange-rate field in
   Odoo.
 - **my.musqet is the source of truth for the Bitcoin-vs-pounds split.** The Musqet
@@ -215,8 +215,8 @@ Before going live, request the following from Musqet and confirm each item:
 - [ ] **Test terminal serial** for a physical/sandbox terminal.
 - [ ] **Settlement option chosen** (Voltage LND *keep sats*, or Solidi *auto-exchange
       to GBP*) — and that it's configured on the Musqet side.
-- [ ] **Terminal/business currency** at Musqet, and that your **POS/company currency
-      matches it** (see §3.1).
+- [ ] **Business currency** at Musqet, and that your **company currency matches it**
+      (each POS must use the company currency; see §3.1).
 - [ ] Sample `metadata` shapes (card + bitcoin) so you know what the terminal returns.
 - [ ] **Terminal API is deployed** for your environment (the Musqet-side terminal API
       work, tracked separately) — confirm the create/poll/cancel endpoints are live

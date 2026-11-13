@@ -409,11 +409,12 @@ class PosPaymentMethod(models.Model):
         ``original_payment_id`` (the Odoo id of the original pos.payment, supplied by the POS)
         is UNTRUSTED, like the rest of the payload. We re-read that payment server-side and
         refuse the refund unless it is a card-settled Musqet payment of this company, in the
-        company currency, whose captured amount covers the request. type, mode and serial are set on the server; the
-        currency must be the company currency; reference is required and validated; only
-        known keys are forwarded. So a tampered payload (mode:"any", type:"sale", a foreign
-        serial/amount, extra keys) cannot widen the action. Returns the create response or a
-        clean ``{error}``.
+        company currency, whose captured amount covers the request.
+
+        type, mode and serial are set on the server; the currency must be the company
+        currency; reference is required and validated; only known keys are forwarded. So a
+        tampered payload (mode:"any", type:"sale", a foreign serial/amount, extra keys)
+        cannot widen the action. Returns the create response or a clean ``{error}``.
 
         Cumulative-refund accounting and idempotency/dedup (issue #9): the request is capped
         against the REMAINING refundable amount (captured minus refunds already settled against
