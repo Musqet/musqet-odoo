@@ -213,6 +213,11 @@ and make your **company currency match it** (and keep each POS on the company cu
    Lightning-settled original shows a *manual refund* message and makes **no** API
    call (Lightning can't be reversed on the device).
 
+   Odoo records every refund Musqet accepts, straight away. So the refunds of one sale
+   can never add up to more than the sale, even before the refund orders sync, and the
+   same refund order can't be refunded twice. A refund that fails at the terminal stops
+   counting once Musqet reports it as failed.
+
 ---
 
 ## 5. Webhook (optional — public-HTTPS deployments only)

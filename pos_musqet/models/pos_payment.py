@@ -1,5 +1,5 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
-from odoo import fields, models
+from odoo import api, fields, models
 
 
 class PosPayment(models.Model):
@@ -15,8 +15,42 @@ class PosPayment(models.Model):
     # and serializes back on sync with no extra wiring, matching pos_razorpay/pos_pine_labs.
     musqet_rail = fields.Char(string="Musqet Rail", copy=False)
     # On a refund payment line, the Musqet saleId of the original card sale this refund
-    # reverses (set in the POS frontend on a refund order). The Musqet API keeps no
-    # sale↔refund linkage of its own (Musqet/musqet#2094), so this is where the link lives:
-    # the create-refund backend guard reads the original payment by id, and cumulative-refund
-    # accounting (#9) will reconcile refunds to their original sale through this field.
+    # reverses. The Musqet API keeps no sale↔refund linkage of its own (Musqet/musqet#2094).
+    # The POS sets it when a refund settles, and the server sets it from its own refund
+    # record (pos.musqet.refund) whenever the line's saleId has one, which also covers a
+    # refund settled after a page refresh, when the POS no longer knows the original. The
+    # over-refund cap reads the refund records; this field is the link on the payment.
     musqet_refund_of = fields.Char(string="Musqet Refund Of", copy=False)
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        payments = super().create(vals_list)
+        payments._musqet_link_recorded_refunds()
+        return payments
+
+    def write(self, vals):
+        result = super().write(vals)
+        if {'transaction_id', 'payment_method_id', 'musqet_refund_of'} & vals.keys():
+            self._musqet_link_recorded_refunds()
+        return result
+
+    def _musqet_link_recorded_refunds(self):
+        """Set musqet_refund_of from the server's refund record, over what the POS sent."""
+        payments = self.filtered(
+            lambda payment: payment.transaction_id
+            and payment.payment_method_id.use_payment_terminal == 'musqet')
+        if not payments:
+            return
+        refunds = self.env['pos.musqet.refund'].sudo().search([
+            ('sale_id', 'in', payments.mapped('transaction_id')),
+            ('payment_method_id', 'in', payments.payment_method_id.ids),
+        ])
+        original_by_refund = {
+            (refund.payment_method_id.id, refund.sale_id): refund.original_sale_id
+            for refund in refunds
+        }
+        for payment in payments:
+            original = original_by_refund.get((payment.payment_method_id.id, payment.transaction_id))
+            # The write re-enters write(), which then finds the link already set and stops.
+            if original and payment.musqet_refund_of != original:
+                payment.sudo().musqet_refund_of = original
