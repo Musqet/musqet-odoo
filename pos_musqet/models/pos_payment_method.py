@@ -231,7 +231,11 @@ class PosPaymentMethod(models.Model):
         """
         if not url:
             return None
-        parsed = urllib.parse.urlparse(url)
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except ValueError:
+            # e.g. an unclosed IPv6 bracket ("https://[::1").
+            return _("The Musqet API URL is not valid.")
         if parsed.scheme != 'https':
             return _("The Musqet API URL must use https://.")
         host = (parsed.hostname or '').lower()

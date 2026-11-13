@@ -124,8 +124,8 @@ that is intended, and is what keeps a copied database from exposing them.
   key (for example, after a typo), the stored secrets are unreadable: re-enter both
   secrets under the new key, as described under "Rotating the key" below. Then edit
   the method as usual.
-- **If the key is lost, the stored secrets cannot be recovered.** Re-enter the API key
-  and webhook secret on the payment method under a new key.
+- **If the key is lost, the stored secrets cannot be recovered.** Set a new key, then
+  re-enter both secrets as described under "Rotating the key" below.
 - **Rotating the key** means setting the new key and then re-entering **both** secrets
   on every Musqet payment method, including a webhook secret you don't use. A secret
   left under the old key stays unreadable and logs an error. Because it already shows

@@ -101,6 +101,8 @@ class TestMusqetBaseUrl(TransactionCase):
         self.assertIn('IP address', error('https://169.254.169.254/'))
         self.assertIn('internal address', error('https://localhost/'))
         self.assertIn(pos_payment_method.MUSQET_ALLOWED_HOST, error('https://musqet.tech.evil.example/'))
+        # urlparse raises on this; the check must still return a message, not raise.
+        self.assertIn('not valid', error('https://[::1'))
 
     def test_request_rechecks_a_base_url_written_behind_the_orm(self):
         # A direct database write skips the save-time constraint; the bearer token must
