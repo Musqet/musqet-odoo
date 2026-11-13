@@ -219,7 +219,7 @@ export class PaymentMusqet extends PaymentInterface {
         // decimal_places is the currency's minor-unit exponent (2 for USD/EUR, 0 for JPY);
         // fall back to 2 so a malformed currency can never yield NaN cents (a wrong charge).
         const decimals = Number.isInteger(currency.decimal_places) ? currency.decimal_places : 2;
-        // Integer minor units of the business currency (§4.1) — yields cents/sen without
+        // Integer minor units of the company currency (§4.1) — yields cents/sen without
         // assuming two decimals. Math.round absorbs binary-float drift.
         return Math.round(amount * Math.pow(10, decimals));
     }

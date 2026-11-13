@@ -178,7 +178,7 @@ class PosPaymentMethod(models.Model):
         if any(method.use_payment_terminal != 'musqet' for method in self):
             raise AccessDenied()
 
-    def _musqet_business_company(self):
+    def _musqet_company(self):
         """The company a Musqet request acts for: the method's own, else the active one.
 
         The fallback means a method with no company can't act for an arbitrary company.
@@ -186,21 +186,21 @@ class PosPaymentMethod(models.Model):
         self.ensure_one()
         return self.company_id or self.env.company
 
-    def _musqet_business_currency(self):
+    def _musqet_company_currency(self):
         """The currency code every Musqet sale and refund is made in: the company currency.
 
         amountInCents is read in this currency, so it must never come from the caller.
         sudo(): a cashier may lack read access on res.currency; this is a fixed lookup.
         """
-        return self._musqet_business_company().sudo().currency_id.name
+        return self._musqet_company().sudo().currency_id.name
 
     def _musqet_requested_currency(self, payload):
-        """Return the business currency if the payload's currency is it (or is omitted), else None.
+        """Return the company currency if the payload's currency is it (or is omitted), else None.
 
         The caller never picks the currency: amountInCents is read in it, so a different one
         would charge a different value from the one the POS records.
         """
-        currency = self._musqet_business_currency()
+        currency = self._musqet_company_currency()
         return currency if payload.get('currency', currency) == currency else None
 
     def _musqet_check_terminal_request(self, payload):
@@ -291,7 +291,7 @@ class PosPaymentMethod(models.Model):
 
         ``payload`` is built by the POS (§4.1: amountInCents, mode, shouldPrint, language,
         reference, currency); amountInCents must already be integer minor units of the
-        business currency. Returns ``{saleId, status, ...}`` or ``{error}``.
+        company currency. Returns ``{saleId, status, ...}`` or ``{error}``.
 
         The payload is UNTRUSTED: any POS user can call this method over RPC with whatever
         they like. The Musqet API accepts ``type`` on this same endpoint, so forwarding the
@@ -385,7 +385,7 @@ class PosPaymentMethod(models.Model):
             return None, {'error': {'message': _("The original payment to refund could not be found.")}}
         # Same company as the method driving the refund (defence-in-depth over the API's own
         # merchant scoping).
-        if original.company_id != self._musqet_business_company():
+        if original.company_id != self._musqet_company():
             return None, {'error': {'message': _("This payment cannot be refunded here.")}}
         # Card-settled Musqet sale only: the terminal can't reverse Lightning and the API
         # won't refuse the attempt for us (Musqet/musqet#2094).

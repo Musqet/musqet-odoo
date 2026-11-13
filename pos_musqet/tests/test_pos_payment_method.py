@@ -211,6 +211,22 @@ class TestMusqetLatestStatus(TransactionCase):
             'musqet_terminal_serial': 'MSQ-WH-002',
         })
 
+    def test_read_and_cancel_paths_deny_a_non_musqet_payment_method(self):
+        # _musqet_check_access also refuses a method that isn't a Musqet one, on every proxy
+        # call, not just create sale/refund. No request may go out for such a method.
+        plain = self.env['pos.payment.method'].create({'name': 'Plain Method'}).with_user(self.cashier)
+        calls = {
+            'musqet_get_latest_status': lambda: plain.musqet_get_latest_status(),
+            'musqet_get_sale': lambda: plain.musqet_get_sale('sale-1'),
+            'musqet_cancel_sale': lambda: plain.musqet_cancel_sale('sale-1'),
+        }
+        for name, call in calls.items():
+            with self.subTest(method=name), \
+                 patch.object(pos_payment_method.requests, 'request') as mock_request:
+                with self.assertRaises(AccessDenied):
+                    call()
+                mock_request.assert_not_called()
+
     def test_returns_false_when_nothing_buffered(self):
         self.assertFalse(self.method.with_user(self.cashier).musqet_get_latest_status())
 
