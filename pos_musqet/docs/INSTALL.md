@@ -87,6 +87,78 @@ your Odoo addons path.
 
 ---
 
+### 2.1 Set the secret-encryption key (required)
+
+The Musqet API key and webhook signing secret are stored **encrypted** in Odoo's
+database. The encryption key comes from the environment of the Odoo process and is
+never stored in the database or in git.
+
+1. **Generate a key once** (on any machine with Python and `cryptography`, such as the
+   Odoo host):
+
+   ```bash
+   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+
+2. **Set it on the Odoo host** as the environment variable
+   **`MUSQET_FIELD_ENCRYPTION_KEY`** (for example a Coolify environment variable, an
+   `Environment=` line in the systemd unit, or the container's environment). Keep a
+   copy in your secret manager and never commit it.
+3. **Restart Odoo** so the process picks it up.
+
+The same key must be present whenever Odoo reads or writes a Musqet secret, and during
+any upgrade of the addon. Every Odoo host running `pos_musqet` against the same
+database needs the same key.
+
+**Use a different key in every environment.** Never give a staging or development host
+the production key. A production dump restored elsewhere should show empty secrets;
+that is intended, and is what keeps a copied database from exposing them.
+
+- **Without the key, or with an invalid one**, saving an API key or webhook secret
+  fails with an error naming `MUSQET_FIELD_ENCRYPTION_KEY`. Stored secrets read as
+  empty: Musqet calls fail with a message saying the API key cannot be read, and
+  webhooks are rejected. Each Odoo worker logs the error once per secret and cause,
+  and again if the secret recovers and then fails later.
+- **A broken key also blocks editing the payment method**, because the required API
+  key field reads as empty. Set a valid key first. Unless you restored the original
+  key (for example, after a typo), the stored secrets are unreadable: re-enter both
+  secrets under the new key, as described under "Rotating the key" below. Then edit
+  the method as usual.
+- **If the key is lost, the stored secrets cannot be recovered.** Set a new key, then
+  re-enter both secrets as described under "Rotating the key" below.
+- **Rotating the key** means setting the new key and then re-entering **both** secrets
+  on every Musqet payment method, including a webhook secret you don't use. A secret
+  left under the old key stays unreadable and logs an error. Because it already shows
+  as empty, saving it empty changes nothing: type a value, save, then clear it and save
+  again. There is no automatic re-encryption in this version.
+
+**Upgrading from 19.0.1.0.0.** Version 19.0.1.1.0 encrypts any secrets already stored
+in plaintext, checks each one decrypts back, and removes the plaintext columns. Set
+`MUSQET_FIELD_ENCRYPTION_KEY` **before** running the upgrade (`-u pos_musqet`). If
+secrets are stored and the key is missing or invalid, the upgrade stops and changes
+nothing.
+
+**After upgrading, rotate both secrets with Musqet** (issue a new API key and webhook
+signing secret, enter them in Odoo, and revoke the old ones). The old plaintext values
+are not gone from the database server: they stay in backups taken before the upgrade,
+and in Postgres's own data files, write-ahead log and any replicas until those are
+overwritten. Rotating is the only step that makes every one of those copies useless.
+
+**Scope of protection.** This protects the secrets if a **read-only** copy of the
+database leaks, such as a Postgres dump or a backup. It does **not** protect against:
+
+- **Write access to the database.** Someone who can change rows can make Odoo send the
+  decrypted key elsewhere. The addon re-checks the API URL before every call to limit
+  this, but treat database write access as access to the secrets.
+- **Compromise of the Odoo host.** Odoo must decrypt the secrets to use them, so the
+  key is present in the Odoo process on that machine.
+
+Keep the Odoo instance itself off the public internet or behind authentication.
+Encryption at rest is defence in depth, not a substitute for securing the host and
+the database.
+
+---
+
 ## 3. Configure the "Musqet" payment method
 
 1. Go to **Point of Sale → Configuration → Payment Methods** and create a new method
@@ -96,7 +168,7 @@ your Odoo addons path.
 
    | Field | What to enter | Notes |
    |---|---|---|
-   | **Musqet API Key** | The Bearer token Musqet issued for this merchant | Must carry the scopes **`TERMINAL_SALES_WRITE`**, **`TERMINAL_SALES_READ`**, **`DEVICES_READ`** (create/poll sales + resolve the terminal by serial). Stored on the backend only, **never** sent to the browser. Visible to ERP managers only. |
+   | **Musqet API Key** | The Bearer token Musqet issued for this merchant | Must carry the scopes **`TERMINAL_SALES_WRITE`**, **`TERMINAL_SALES_READ`**, **`DEVICES_READ`** (create/poll sales + resolve the terminal by serial). Stored encrypted on the backend only (see §2.1), **never** sent to the browser. Visible to ERP managers only. |
    | **Musqet API URL** | Production base URL from Musqet (default: `https://api.musqet.tech/api/v1`) | Locked to the `musqet.tech` domain. Visible to ERP managers only. |
    | **Musqet Terminal Serial** | The serial number of the physical terminal bound to this method | One serial per payment method / register — see section 8. |
 
@@ -213,6 +285,9 @@ Before going live, request the following from Musqet and confirm each item:
 - [ ] **API key** for the merchant account, with the scopes
       **`TERMINAL_SALES_WRITE`**, **`TERMINAL_SALES_READ`**, and **`DEVICES_READ`**.
 - [ ] **Test terminal serial** for a physical/sandbox terminal.
+- [ ] **`MUSQET_FIELD_ENCRYPTION_KEY` generated and set** on every Odoo host (one key
+      per environment; never reuse production's; see §2.1), with a copy kept in your
+      secret manager.
 - [ ] **Settlement option chosen** (Voltage LND *keep sats*, or Solidi *auto-exchange
       to GBP*) — and that it's configured on the Musqet side.
 - [ ] **Business currency** at Musqet, and that your **company currency matches it**
@@ -233,9 +308,11 @@ Then run the smoke test in section 4 with the test credentials.
   buffer is a single slot per method, which is correct for one-terminal-per-register.
   Running several physical terminals through one method on a public/multi-register
   webhook deployment is not supported in V1 (polling deployments are unaffected).
-- **API key is stored as a normal field** (visibility restricted to ERP managers, the
-  same model Odoo uses for payment-provider credentials). Use encrypted database
-  backups; an external-secrets store is a possible later hardening step.
+- **Secrets are encrypted at rest, but the key lives on the Odoo host** (see §2.1).
+  This defends against a leaked read-only copy of the database, not against write
+  access to the database or compromise of the Odoo host.
+  Visibility is also restricted to ERP managers. An external-secrets store is a
+  possible later hardening step.
 - **No automated JavaScript test harness in-repo.** The Python backend has unit tests
   (`pos_musqet/tests/`); the POS frontend logic (polling, in-flight lock, webhook/poll
   race) is verified by the live smoke test in section 4, not by automated JS tests. A

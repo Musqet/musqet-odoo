@@ -35,6 +35,10 @@ services:
       HOST: db
       USER: odoo
       PASSWORD: odoo
+      # Encrypts the Musqet API key / webhook secret at rest. Export it on the host
+      # before `docker compose up` to save secrets in the UI; the test suite patches in
+      # its own key and does not need it. See pos_musqet/docs/INSTALL.md §2.1.
+      MUSQET_FIELD_ENCRYPTION_KEY: ${MUSQET_FIELD_ENCRYPTION_KEY:-}
     volumes:
       - odoo-data:/var/lib/odoo
       # Mount only the addon. /mnt/extra-addons is on the image's addons_path,

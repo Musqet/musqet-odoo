@@ -14,6 +14,8 @@ from odoo.exceptions import AccessDenied, ValidationError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
+from .common import create_musqet_method
+
 
 @tagged('post_install', '-at_install')
 class TestMusqetBaseUrl(TransactionCase):
@@ -40,6 +42,61 @@ class TestMusqetBaseUrl(TransactionCase):
         # Non-Musqet methods carry no base URL; the constraint must skip them.
         self._check('')
         self._check(False)
+
+    def test_base_url_error_messages(self):
+        error = self.env['pos.payment.method']._musqet_base_url_error
+        self.assertIsNone(error('https://api.musqet.tech/api/v1'))
+        self.assertIsNone(error(False))
+        self.assertIn('https://', error('http://api.musqet.tech'))
+        self.assertIn('IP address', error('https://169.254.169.254/'))
+        # urllib3 keeps an IPv6 literal's brackets; the host comparison must allow for that.
+        self.assertIn('IP address', error('https://[::1]/x'))
+        self.assertIn('internal address', error('https://localhost/'))
+        self.assertIn(pos_payment_method.MUSQET_ALLOWED_HOST, error('https://musqet.tech.evil.example/'))
+        # urlparse raises on this; the check must still return a message, not raise.
+        self.assertIn('not valid', error('https://[::1'))
+        self.assertIn('not valid', error('https://api.musqet.tech:99999/'))
+
+    def test_rejects_urls_the_http_client_would_send_elsewhere(self):
+        # urlparse reads the host of these as api.musqet.tech; the HTTP client would not.
+        error = self.env['pos.payment.method']._musqet_base_url_error
+        for url in (
+            'https://evil.example\\@api.musqet.tech/api/v1',
+            'https://evil.example\\api.musqet.tech/api/v1',
+        ):
+            self.assertIn('not valid', error(url), msg=url)
+        # Past the character filter, so only the host cross-check can catch it: urllib3
+        # sends to the punycode host, which is not the host urlparse checked.
+        self.assertIn('not valid', error('https://ápi.musqet.tech/api/v1'))
+
+    def test_rejects_credentials_and_unsafe_characters(self):
+        # Both parsers agree on these hosts; they are refused by policy.
+        error = self.env['pos.payment.method']._musqet_base_url_error
+        for url in (
+            'https://user:pass@api.musqet.tech/api/v1',
+            'https://evil.example@api.musqet.tech/api/v1',
+            'https://api.musqet.tech /api/v1',
+            'https://api.musqet.tech\t/api/v1',
+            'https://api.musqet.tech/api/v1\n',
+        ):
+            self.assertIn('not valid', error(url), msg=url)
+
+    def test_request_rechecks_a_base_url_written_behind_the_orm(self):
+        # A direct database write skips the save-time constraint; the bearer token must
+        # still never go to an off-domain host.
+        method = create_musqet_method(self, 'MSQ-URL-001')
+        self.env.flush_all()
+        for url, expected in (
+            ('https://attacker.example/api', pos_payment_method.MUSQET_ALLOWED_HOST),
+            ('https://attacker.example\\@api.musqet.tech/api', 'not valid'),
+        ):
+            self.env.cr.execute(
+                'UPDATE pos_payment_method SET musqet_base_url = %s WHERE id = %s', (url, method.id))
+            method.invalidate_recordset()
+            with patch.object(pos_payment_method.requests, 'request') as mock_request:
+                result = method.musqet_get_sale('sale-123')
+            mock_request.assert_not_called()
+            self.assertIn(expected, result['error']['message'], msg=url)
 
     def test_rejects_non_https(self):
         with self.assertRaises(ValidationError):
@@ -93,13 +150,7 @@ class TestMusqetProxyAccess(TransactionCase):
             'login': 'musqet_cashier',
             'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
         })
-        self.method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': 'MSQ-TEST-001',
-        })
+        self.method = create_musqet_method(self, 'MSQ-TEST-001')
 
     def _fake_response(self, status_code=200, json_body=None):
         response = MagicMock()
@@ -152,14 +203,7 @@ class TestMusqetWebhookVerification(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        self.method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': 'MSQ-WH-001',
-            'musqet_webhook_secret': self.SECRET,
-        })
+        self.method = create_musqet_method(self, 'MSQ-WH-001', musqet_webhook_secret=self.SECRET)
 
     def _sign(self, raw_body, timestamp, secret=None):
         if isinstance(raw_body, str):
@@ -218,13 +262,7 @@ class TestMusqetLatestStatus(TransactionCase):
             'login': 'musqet_cashier_status',
             'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
         })
-        self.method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': 'MSQ-WH-002',
-        })
+        self.method = create_musqet_method(self, 'MSQ-WH-002')
 
     def test_denies_a_non_musqet_payment_method_and_keeps_its_buffer(self):
         # The method check guards the buffer itself: a refused read must not consume it.
@@ -288,13 +326,7 @@ class TestMusqetCreateSale(TransactionCase):
             'login': 'musqet_cashier_sale',
             'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
         })
-        self.method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': 'MSQ-SALE-001',
-        })
+        self.method = create_musqet_method(self, 'MSQ-SALE-001')
         self.currency = self.method.company_id.currency_id.name
 
     def _call_sale(self, payload):
@@ -457,13 +489,7 @@ class TestMusqetCreateRefund(TransactionCase):
             'login': 'musqet_cashier_refund',
             'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
         })
-        self.method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': 'MSQ-RF-001',
-        })
+        self.method = create_musqet_method(self, 'MSQ-RF-001')
         self.currency = self.method.company_id.currency_id.name
         self.other_currency = 'EUR' if self.currency != 'EUR' else 'USD'
 

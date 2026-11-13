@@ -9,10 +9,20 @@ import time
 import urllib.parse
 
 import requests
+from urllib3.util import parse_url
 
 from odoo import fields, models, api, _
-from odoo.exceptions import ValidationError, AccessDenied
+from odoo.exceptions import AccessDenied, UserError, ValidationError
 from odoo.tools import consteq
+
+from .musqet_crypto import (
+    ENV_KEY,
+    MusqetEncryptionKeyUnavailable,
+    decrypt_secret,
+    encrypt_secret,
+    encrypted_field_name,
+    secret_label,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -44,15 +54,28 @@ class PosPaymentMethod(models.Model):
         return super()._get_payment_terminal_selection() + [('musqet', 'Musqet')]
 
     # Musqet
-    # groups= controls ORM/UI visibility, not storage. The key is read server-side via
-    # self.sudo().musqet_api_key and is intentionally excluded from _load_pos_data_fields
-    # so it is never loaded into POS JS.
+    # Secrets are encrypted at rest: `*_encrypted` holds a Fernet ciphertext (key in the
+    # environment, never the DB), and the plaintext field is non-stored, decrypting on read
+    # and encrypting on write, so the read sites and the form view are unchanged. See
+    # models/musqet_crypto.py. groups= (on both fields) controls ORM/UI visibility, not
+    # storage: a non-manager cannot read either, and the proxy reads the key server-side
+    # via sudo(). The key is excluded from _load_pos_data_fields, so it never reaches POS JS.
+    musqet_api_key_encrypted = fields.Char(
+        string="Musqet API Key (ciphertext)",
+        help="Encrypted form of the Musqet API key. Set the key through the API Key field; "
+             "never edit this value by hand.",
+        copy=False,
+        groups='base.group_erp_manager',
+    )
     musqet_api_key = fields.Char(
         string="Musqet API Key",
         help="Bearer token used by Odoo to authenticate to the Musqet terminal API. "
-             "Stored on the backend only and never exposed to the POS frontend.",
+             "Stored encrypted on the backend only and never exposed to the POS frontend.",
         copy=False,
+        store=False,
         groups='base.group_erp_manager',
+        compute='_compute_musqet_api_key',
+        inverse='_inverse_musqet_api_key',
     )
     # Restricted to ERP managers like the key: it's the destination the bearer token is
     # sent to (an SSRF sink), so configuring it needs the same privilege as the token.
@@ -71,12 +94,24 @@ class PosPaymentMethod(models.Model):
     )
     # Webhook (#6) — only used on publicly-reachable deployments. The pilot is behind NAT
     # and settles via polling, so these stay unset there and the push path simply never fires.
+    # Encrypted at rest, same scheme as musqet_api_key.
+    musqet_webhook_secret_encrypted = fields.Char(
+        string="Musqet Webhook Signing Secret (ciphertext)",
+        help="Encrypted form of the webhook signing secret. Set the secret through the "
+             "Webhook Signing Secret field; never edit this value by hand.",
+        copy=False,
+        groups='base.group_erp_manager',
+    )
     musqet_webhook_secret = fields.Char(
         string="Musqet Webhook Signing Secret",
         help="Shared secret used to verify the HMAC signature of inbound Musqet webhooks. "
-             "Only needed for publicly-reachable deployments; the pilot settles via polling.",
+             "Stored encrypted. Only needed for publicly-reachable deployments; the pilot "
+             "settles via polling.",
         copy=False,
+        store=False,
         groups='base.group_erp_manager',
+        compute='_compute_musqet_webhook_secret',
+        inverse='_inverse_musqet_webhook_secret',
     )
     # Buffer for the latest asynchronous webhook result, read by the POS frontend after a
     # MUSQET_LATEST_RESPONSE notification (mirrors pos_adyen.adyen_latest_response). Restricted
@@ -96,6 +131,56 @@ class PosPaymentMethod(models.Model):
         # get_base_url() forbids a multi-record recordset, so resolve it per record.
         for payment_method in self:
             payment_method.musqet_webhook_url = '%s/musqet/webhook' % payment_method.get_base_url()
+
+    # One compute per secret (not a shared one) so writing one secret never re-derives or
+    # re-encrypts the other.
+    @api.depends('musqet_api_key_encrypted')
+    def _compute_musqet_api_key(self):
+        self._musqet_decrypt_into('musqet_api_key')
+
+    def _inverse_musqet_api_key(self):
+        self._musqet_encrypt_from('musqet_api_key')
+
+    @api.depends('musqet_webhook_secret_encrypted')
+    def _compute_musqet_webhook_secret(self):
+        self._musqet_decrypt_into('musqet_webhook_secret')
+
+    def _inverse_musqet_webhook_secret(self):
+        self._musqet_encrypt_from('musqet_webhook_secret')
+
+    def _musqet_secret_label(self, field_name):
+        """The label this record's secret is bound to, or None if it was never saved.
+
+        Uses the saved id (_origin), not self.id: a form onchange computes on an in-memory
+        copy whose NewId would not match the label the secret was written under.
+        """
+        record_id = self._origin.id
+        return secret_label(self._name, record_id, field_name) if record_id else None
+
+    def _musqet_decrypt_into(self, field_name):
+        for payment_method in self:
+            label = payment_method._musqet_secret_label(field_name)
+            if not label:
+                # A record that was never saved has no stored secret to read.
+                payment_method[field_name] = False
+                continue
+            payment_method[field_name] = decrypt_secret(
+                payment_method[encrypted_field_name(field_name)], label)
+
+    def _musqet_encrypt_from(self, field_name):
+        for payment_method in self:
+            label = payment_method._musqet_secret_label(field_name)
+            if not label and payment_method[field_name]:
+                # Odoo runs inverses on saved records only; never bind a secret to no id.
+                raise UserError(_("Save the payment method before setting its Musqet secrets."))
+            try:
+                ciphertext = encrypt_secret(payment_method[field_name], label)
+            except MusqetEncryptionKeyUnavailable:
+                raise UserError(_(
+                    "The Musqet secret cannot be saved: the encryption key %(variable)s is "
+                    "not set, or is not valid, on the Odoo host. See \"Set the "
+                    "secret-encryption key\" in the install guide.", variable=ENV_KEY)) from None
+            payment_method[encrypted_field_name(field_name)] = ciphertext
 
     @api.model
     def _load_pos_data_fields(self, config):
@@ -130,35 +215,70 @@ class PosPaymentMethod(models.Model):
 
     @api.constrains('musqet_base_url')
     def _check_musqet_base_url(self):
-        # This URL is the base for server-side calls that carry the bearer token, so a
-        # bad value is an SSRF / credential-leak sink. Reject anything that isn't an
-        # https:// Musqet domain (no IP literals, no loopback/link-local/internal hosts).
         for payment_method in self:
-            url = payment_method.musqet_base_url
-            if not url:
-                continue
+            error = self._musqet_base_url_error(payment_method.musqet_base_url)
+            if error:
+                raise ValidationError(error)
+
+    @api.model
+    def _musqet_base_url_error(self, url):
+        """Return why a Musqet API URL is not allowed, or None if it is (or is unset).
+
+        This URL is the base for server-side calls that carry the bearer token, so a bad
+        value is an SSRF / credential-leak sink. Reject anything that isn't an https://
+        Musqet domain (no IP literals, no loopback/link-local/internal hosts). Checked on
+        save and again before every request, since a direct database write skips the ORM
+        constraint.
+        """
+        if not url:
+            return None
+        parsed = self._musqet_parse_base_url(url)
+        if not parsed:
+            return _("The Musqet API URL is not valid.")
+        if parsed.scheme != 'https':
+            return _("The Musqet API URL must use https://.")
+        host = (parsed.hostname or '').lower()
+        if not host:
+            return _("The Musqet API URL must include a host.")
+        # Reject IP-literal hosts outright: covers the cloud metadata endpoint
+        # (169.254.169.254) and any private/loopback/link-local address.
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            return _("The Musqet API URL must be a domain name, not an IP address.")
+        # Reject obvious internal hostnames as a defence-in-depth layer.
+        if host == 'localhost' or host.endswith(('.local', '.internal', '.lan', '.localdomain')):
+            return _("The Musqet API URL must point to a public Musqet host, not an internal address.")
+        # Lock to the Musqet domain (or a subdomain of it).
+        if host != MUSQET_ALLOWED_HOST and not host.endswith('.' + MUSQET_ALLOWED_HOST):
+            return _("The Musqet API URL must be on the %(domain)s domain.", domain=MUSQET_ALLOWED_HOST)
+        return None
+
+    @api.model
+    def _musqet_parse_base_url(self, url):
+        """Parse a Musqet API URL, or return None if it can't be read one way only.
+
+        urlparse (used by the checks) and urllib3 (used by requests to send the token) split
+        some URLs differently: urllib3 also ends the host at a backslash, so
+        "https://evil.example\\@api.musqet.tech" reads as api.musqet.tech to urlparse but is
+        sent to evil.example. Refuse the characters behind such splits (and so credentials),
+        and require both parsers to read the same host.
+        """
+        if any(char in '\\@' or char.isspace() or not char.isprintable() for char in url):
+            return None
+        try:
             parsed = urllib.parse.urlparse(url)
-            if parsed.scheme != 'https':
-                raise ValidationError(_("The Musqet API URL must use https://."))
-            host = (parsed.hostname or '').lower()
-            if not host:
-                raise ValidationError(_("The Musqet API URL must include a host."))
-            # Reject IP-literal hosts outright — covers the cloud metadata endpoint
-            # (169.254.169.254) and any private/loopback/link-local address.
-            try:
-                ipaddress.ip_address(host)
-            except ValueError:
-                pass
-            else:
-                raise ValidationError(_("The Musqet API URL must be a domain name, not an IP address."))
-            # Reject obvious internal hostnames as a defence-in-depth layer.
-            if host == 'localhost' or host.endswith(('.local', '.internal', '.lan', '.localdomain')):
-                raise ValidationError(_(
-                    "The Musqet API URL must point to a public Musqet host, not an internal address."))
-            # Lock to the Musqet domain (or a subdomain of it).
-            if host != MUSQET_ALLOWED_HOST and not host.endswith('.' + MUSQET_ALLOWED_HOST):
-                raise ValidationError(_(
-                    "The Musqet API URL must be on the %(domain)s domain.", domain=MUSQET_ALLOWED_HOST))
+            parsed.port  # noqa: B018 -- read to raise on a non-numeric or out-of-range port
+            requests_host = parse_url(url).host or ''
+        except ValueError:
+            # e.g. an unclosed IPv6 bracket ("https://[::1") or a bad port.
+            return None
+        # urllib3 keeps an IPv6 literal's brackets; urlparse drops them.
+        if requests_host.strip('[]').lower() != (parsed.hostname or '').lower():
+            return None
+        return parsed
 
     # -- Backend proxy --------------------------------------------------------
     # These methods hold the Bearer key and make the Musqet HTTPS calls server-side:
@@ -217,31 +337,60 @@ class PosPaymentMethod(models.Model):
             return {'error': {'message': _("No Musqet terminal serial is configured.")}}
         return None
 
-    def _musqet_headers(self):
-        # The key is read with sudo() because the field is restricted to ERP managers;
-        # it lives only in this header and is never logged.
-        return {'Authorization': 'Bearer %s' % (self.sudo().musqet_api_key or '')}
+    def _musqet_headers(self, api_key):
+        # The key lives only in this header and is never logged.
+        return {'Authorization': 'Bearer %s' % api_key}
 
     def _musqet_url(self, base_url, path):
         return base_url.rstrip('/') + '/' + path.lstrip('/')
+
+    @api.model
+    def _musqet_error(self, message):
+        """Build the ``{error}`` dict for a failure that carries only a message."""
+        return {'error': {'message': message}}
+
+    def _musqet_request_target(self):
+        """Return ``(base_url, api_key, None)`` for a request, or ``(None, None, {error})``.
+
+        Checks the configuration a request needs, so _musqet_request only sends and reads.
+        """
+        # Read with sudo() because the fields are restricted to ERP managers, but
+        # _musqet_check_access intentionally lets a plain POS cashier drive the terminal:
+        # a cashier isn't an ERP manager, so an un-sudo'd read would fail.
+        payment_method_sudo = self.sudo()
+        base_url = payment_method_sudo.musqet_base_url
+        if not base_url:
+            return None, None, self._musqet_error(_("No Musqet API URL is configured."))
+        # Checked again here, not only on save: a direct database write skips the ORM
+        # constraint, and this URL receives the bearer token.
+        url_error = self._musqet_base_url_error(base_url)
+        if url_error:
+            return None, None, self._musqet_error(url_error)
+        # Never send an empty bearer token: say why there is no key instead of relaying
+        # the API's authentication error.
+        api_key = payment_method_sudo.musqet_api_key
+        if not api_key:
+            if payment_method_sudo.musqet_api_key_encrypted:
+                # Shown to the cashier, so no cause or host detail: the server log names
+                # the secret and why it failed.
+                return None, None, self._musqet_error(_(
+                    "The Musqet API key cannot be read. Ask an administrator to check the "
+                    "Musqet encryption key and API key."))
+            return None, None, self._musqet_error(_("No Musqet API key is configured."))
+        return base_url, api_key, None
 
     def _musqet_request(self, method, path, payload=None):
         """Make one server-side call to the Musqet API.
 
         Returns the parsed JSON body on success, or a clean ``{'error': {...}}`` dict on
-        a transport failure or non-2xx response — never raises the raw error, and never
-        puts the API key in a log line.
+        a configuration problem, a transport failure or a non-2xx response: never raises
+        the raw error, and never puts the API key in a log line.
         """
         self.ensure_one()
         self._musqet_check_access()
-        # Read with sudo() because the field is restricted to ERP managers (like the key),
-        # but _musqet_check_access intentionally lets a plain POS cashier drive the
-        # terminal — a cashier isn't an ERP manager, so an un-sudo'd read would fail.
-        base_url = self.sudo().musqet_base_url
-        if not base_url:
-            # Keep the "always return {error}" contract: rstrip on a falsy field would
-            # otherwise raise a raw AttributeError before the try block below.
-            return {'error': {'message': _("No Musqet API URL is configured.")}}
+        base_url, api_key, error = self._musqet_request_target()
+        if error:
+            return error
         url = self._musqet_url(base_url, path)
         _logger.info("Musqet %s %s by user #%d", method, path, self.env.uid)
         if payload is not None:
@@ -249,7 +398,7 @@ class PosPaymentMethod(models.Model):
         try:
             response = requests.request(
                 method, url,
-                headers=self._musqet_headers(),
+                headers=self._musqet_headers(api_key),
                 json=payload if payload is not None else None,
                 timeout=MUSQET_TIMEOUT,
                 # The base URL is statically validated (https, no IP/internal hosts, locked
@@ -562,8 +711,7 @@ class PosPaymentMethod(models.Model):
         parsed body could change it and break the signature.
         """
         self.ensure_one()
-        secret = self.sudo().musqet_webhook_secret
-        if not secret or not signature_header:
+        if not signature_header:
             return False
         # Parse "t=<ts>,v1=<hmac>" into a dict, tolerant of surrounding spaces.
         parts = {}
@@ -581,6 +729,11 @@ class PosPaymentMethod(models.Model):
         except (TypeError, ValueError):
             return False
         if age > MUSQET_WEBHOOK_TOLERANCE:
+            return False
+        # Skip the decrypt for malformed or stale headers. This is not a guard: a well-formed,
+        # fresh header with a bogus signature still reaches the decrypt.
+        secret = self.sudo().musqet_webhook_secret
+        if not secret:
             return False
         # Recompute over the raw bytes: b"<ts>." + body. Built from bytes so the body is
         # never re-encoded (which could change it and fail an otherwise-valid signature).
