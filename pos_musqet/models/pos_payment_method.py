@@ -500,7 +500,8 @@ class PosPaymentMethod(models.Model):
         """Record a sale Musqet accepted, so its settle can be checked against Musqet's word.
 
         Pending until Musqet says otherwise: the create reply is normally PENDING, and a
-        status read or a signed webhook settles it (_musqet_sync_records). If saving fails
+        status read settles it (_musqet_sync_records), polled or triggered by a signed
+        webhook. If saving fails
         (logged), the sale can't be refunded here and its synced payment is Not verified.
         """
         self.env['pos.musqet.sale']._musqet_record_accepted(response, {
@@ -870,13 +871,12 @@ class PosPaymentMethod(models.Model):
     def _musqet_sync_records(self, sale_id, response):
         """Settle this method's recorded sale and refund ``sale_id`` as ``response`` reports.
 
-        ``response`` must be Musqet's own word: a status read, or a webhook whose signature
-        was verified, and about this sale. The reply carries its saleId (the partner sale
-        shape, Musqet/musqet#2094, is the same for both); one naming another saleId changes
+        ``response`` must be Musqet's own word about this sale: the reply to a status read of
+        it (musqet_get_sale; a signed webhook only triggers one). The reply carries its saleId
+        (the partner sale shape, Musqet/musqet#2094); one naming another saleId changes
         nothing. A status read is already about ``sale_id`` by its URL, so a reply without a
-        saleId is taken as about it; the webhook passes the reply's own saleId as
-        ``sale_id``, so its match is exact. An {error} response has no status, so it leaves
-        the records as they were.
+        saleId is taken as about it. An {error} response has no status, so it leaves the
+        records as they were.
         """
         if not isinstance(response, dict) or not sale_id:
             return

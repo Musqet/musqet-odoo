@@ -51,18 +51,23 @@ class MusqetController(http.Controller):
             _logger.warning("Musqet webhook: signature verification failed for %s", serial)
             return self._ack()
 
-        # Settle the server's record of the sale or refund from Musqet's signed word, then
-        # buffer the verified result and ping every open session that can show it. The
-        # frontend pulls the buffer and settles the pending line idempotently (a poll may
-        # have already settled it — see payment_musqet.js _finishSale).
-        # In a savepoint, and never raised: the reply must stay [accepted] whatever happens.
-        # A record left pending here is read back from Musqet the next time a refund of the
-        # sale resolves it; until then its synced line shows Not verified.
+        # Settle the server's record of the sale or refund, then buffer the verified result
+        # and ping every open session that can show it. The frontend pulls the buffer and
+        # settles the pending line idempotently (a poll may have already settled it — see
+        # payment_musqet.js _finishSale).
+        # The webhook is only the trigger: the record settles from a status read of the sale
+        # from Musqet's API (musqet_get_sale), never from the body, so the webhook secret alone
+        # (leaked, say) can't set a sale's captured amount or rail. In a savepoint, and never
+        # raised: the reply must stay [accepted] whatever happens. A record left pending here
+        # is read back from Musqet the next time a refund of the sale resolves it; until then
+        # its synced line shows Not verified.
+        sale_id = sale.get('saleId')
         try:
             with request.env.cr.savepoint():
-                method_sudo._musqet_sync_records(sale.get('saleId'), sale)
+                if isinstance(sale_id, str):
+                    method_sudo.musqet_get_sale(sale_id)
         except Exception:
-            _logger.exception("Musqet webhook: could not settle sale %r", sale.get('saleId'))
+            _logger.exception("Musqet webhook: could not settle sale %r", sale_id)
         method_sudo.musqet_latest_response = json.dumps(sale)
         sessions = request.env['pos.session'].sudo().search(
             [('payment_method_ids', 'in', method_sudo.id), ('state', '=', 'opened')])

@@ -22,7 +22,8 @@ class PosMusqetSale(models.Model):
 
     The POS marks an order paid on the browser's word, so the server keeps its own record of
     each sale: created when Musqet accepts the sale (musqet_create_sale), and settled from
-    Musqet's own replies, the status read (musqet_get_sale) or a signed webhook. A done
+    Musqet's own replies to a status read (musqet_get_sale), polled by the POS or triggered
+    by a signed webhook. A done
     record holds the amount Musqet captured, the currency and the rail it reports. The
     over-refund cap and the rail check read it instead of the synced payment line, and each
     synced Musqet payment line is checked against it (pos.payment.musqet_settle_check).

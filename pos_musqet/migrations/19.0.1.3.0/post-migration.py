@@ -4,8 +4,8 @@
 Runs after the ORM has created pos.musqet.sale. Each Musqet sale payment of a paid order
 already synced gets a done sale record from its own amount, currency and rail, so it can still
 be refunded: a refund reads the sale record, not the payment. The upgrade checks no payment:
-musqet_settle_check starts empty, until the line, its order's state or a line sharing its
-saleId changes (see pos.payment.musqet_settle_check).
+musqet_settle_check starts empty, until the line, its order's state or reference, or a line
+sharing its saleId changes (see pos.payment.musqet_settle_check).
 
 It also clears the order references the 19.0.1.2.0 upgrade guessed for refunds several linked
 refund lines carry, whatever their orders' state (see

@@ -224,13 +224,13 @@ and make your **company currency match it** (and keep each POS on the company cu
    Musqet sale id on another order's line is Not verified, and if Odoo can't tell which
    line is the genuine one (two on the same order, or sales recorded by the upgrade from
    lines that already shared an id), none of them is. Lines of an order not yet paid are
-   left blank. To find the Not verified
-   ones, filter **Point of Sale → Orders → Payments** by **Musqet: Not Verified**, and
-   check each in the Musqet app. The server log also names each one. A Not verified sale
-   line can't be refunded through the terminal: if a copy has blocked a genuine sale's
-   refund, delete the copy (or correct its Musqet sale id) and try again. Payment lines synced before this check
-   existed start blank, and are checked once the line, its order's state or another line
-   with the same Musqet sale changes.
+   left blank. To find the Not verified ones, filter **Point of Sale → Orders →
+   Payments** by **Musqet: Not Verified**, and check each in the Musqet app. The server
+   log also names each one. A Not verified sale line can't be refunded through the
+   terminal: if a copy has blocked a genuine sale's refund, delete the copy (or correct
+   its Musqet sale id) and try again. Payment lines synced before this check existed
+   start blank, and are checked once the line, its order's state or reference, or
+   another line with the same Musqet sale changes.
 5. **Refund test:** from the order, create a Refund and pay it with Musqet. A
    card-settled original refunds back to the card through the terminal. A
    Lightning-settled original shows a *manual refund* message and makes **no** API
@@ -286,6 +286,10 @@ Security notes (already enforced by the addon):
   HMAC-SHA256 over `"<ts>.<rawbody>"`) using a constant-time compare; timestamps more
   than **±300s** from now are rejected to blunt replay.
 - The route always returns `200` so it can't be used as a signature oracle.
+- Odoo's own record of the sale is never settled from the webhook body: a verified
+  webhook makes Odoo read the sale back from Musqet's API, and the record takes the
+  amount and rail from that reply. A leaked signing secret alone can't change what a
+  refund is capped at.
 - Webhook and polling are mutually idempotent: whichever lands first settles the sale,
   the other is ignored.
 - The webhook route does an unauthenticated indexed lookup *before* HMAC verification.

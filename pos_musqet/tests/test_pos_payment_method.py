@@ -646,7 +646,7 @@ class TestMusqetSaleRecords(TransactionCase):
 
 @tagged('post_install', '-at_install')
 class TestMusqetWebhookRoute(HttpCase):
-    """A signed webhook settles the server's record of the sale, as a status read does."""
+    """A signed webhook triggers a status read of the sale, and the record settles from that."""
 
     SECRET = 'whsec_route_0123456789'
 
@@ -655,27 +655,42 @@ class TestMusqetWebhookRoute(HttpCase):
         self.method = create_musqet_method(self, 'MSQ-WHR-001', musqet_webhook_secret=self.SECRET)
         self.sale = record_sale(self.env, self.method, 'sale-wh', state='pending', rail=False)
 
-    def _post(self, body, secret=None):
+    def _post(self, body, secret=None, read=None):
+        """Post ``body`` signed; a status read it triggers gets ``read`` (by default, the
+        sale complete at 9.00 on card). Returns the response and the stubbed API calls."""
         raw = json.dumps(body).encode()
         timestamp = str(int(time.time()))
         digest = hmac.new((secret or self.SECRET).encode(), timestamp.encode() + b'.' + raw,
                           hashlib.sha256).hexdigest()
-        response = self.url_open('/musqet/webhook', data=raw, headers={
-            'Content-Type': 'application/json',
-            'x-webhook-signature': 't=%s,v1=%s' % (timestamp, digest),
-        })
+        read = read or musqet_response(
+            body['data']['saleId'], 'COMPLETE', amountInCents=900, currency=self.sale.currency,
+            rail='card')
+        with patch.object(pos_payment_method.requests, 'request', return_value=read) as mock_request:
+            response = self.url_open('/musqet/webhook', data=raw, headers={
+                'Content-Type': 'application/json',
+                'x-webhook-signature': 't=%s,v1=%s' % (timestamp, digest),
+            })
         self.sale.invalidate_recordset()
-        return response
+        return response, mock_request
 
     def _body(self):
+        # What the body claims never settles anything: only the status read does.
         return {'data': {
-            'saleId': 'sale-wh', 'status': 'COMPLETE', 'amountInCents': 1000,
+            'saleId': 'sale-wh', 'status': 'COMPLETE', 'amountInCents': 99999,
             'currency': self.sale.currency, 'rail': 'card', 'serial': 'MSQ-WHR-001',
         }}
 
-    def test_a_signed_webhook_settles_the_sale(self):
-        self._post(self._body())
-        self.assertEqual((self.sale.state, self.sale.rail), ('done', 'card'))
+    def test_a_signed_webhook_settles_the_sale_from_a_status_read(self):
+        _, mock_request = self._post(self._body())
+        self.assertEqual([call.args[:2] for call in mock_request.mock_calls if call.args], [
+            ('GET', 'https://api.musqet.tech/api/v1/terminal/sales/sale-wh')])
+        self.assertEqual((self.sale.state, self.sale.amount_minor, self.sale.rail),
+                         ('done', 900, 'card'))
+
+    def test_the_body_alone_settles_nothing(self):
+        # Musqet still reports the sale in progress: the body's COMPLETE changes nothing.
+        self._post(self._body(), read=musqet_response('sale-wh', 'PROCESSING'))
+        self.assertEqual(self.sale.state, 'pending')
 
     def test_a_signed_webhook_settles_a_refund(self):
         refund = record_refund(self.env, self.method, 'refund-wh')
@@ -683,21 +698,22 @@ class TestMusqetWebhookRoute(HttpCase):
         body['data']['saleId'] = 'refund-wh'
         self._post(body)
         refund.invalidate_recordset()
-        self.assertEqual(refund.state, 'done')
+        self.assertEqual((refund.state, refund.amount_minor), ('done', 900))
 
-    def test_a_non_string_sale_id_changes_nothing(self):
+    def test_a_non_string_sale_id_reads_nothing(self):
         sale = record_sale(self.env, self.method, '123', state='pending')
         body = self._body()
         body['data']['saleId'] = 123
-        self._post(body)
+        _, mock_request = self._post(body, read=musqet_response('123', 'COMPLETE'))
+        mock_request.assert_not_called()
         sale.invalidate_recordset()
         self.assertEqual(sale.state, 'pending')
 
     def test_a_failed_settle_still_buffers_the_result(self):
         Method = type(self.env['pos.payment.method'])
-        with patch.object(Method, '_musqet_sync_records', side_effect=Exception('boom')), \
+        with patch.object(Method, 'musqet_get_sale', side_effect=Exception('boom')), \
              mute_logger('odoo.addons.pos_musqet.controllers.main'):
-            response = self._post(self._body())
+            response, _ = self._post(self._body())
         # Answered as normal (no error), and the result was still buffered.
         self.assertEqual(response.status_code, 200)
         self.assertNotIn('error', response.json())
@@ -705,8 +721,9 @@ class TestMusqetWebhookRoute(HttpCase):
         self.assertEqual(json.loads(self.method.musqet_latest_response)['saleId'], 'sale-wh')
         self.assertEqual(self.sale.state, 'pending')
 
-    def test_an_unsigned_webhook_changes_nothing(self):
-        self._post(self._body(), secret='whsec_wrong')
+    def test_an_unsigned_webhook_reads_nothing(self):
+        _, mock_request = self._post(self._body(), secret='whsec_wrong')
+        mock_request.assert_not_called()
         self.assertEqual(self.sale.state, 'pending')
 
 
@@ -1482,10 +1499,17 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
             self.assertNotEqual(self._row_version(sale), before)
 
     def test_changing_the_order_reference_checks_its_lines_again(self):
-        line = self._original('sale-renamed')
-        self.assertEqual(line.musqet_settle_check, 'verified')
-        self.order.uuid = 'renamed-order'
-        self.assertEqual(line.musqet_settle_check, 'unverified')
+        # Either form of the reference the sale was sent with.
+        for field in ('uuid', 'pos_reference'):
+            with self.subTest(field=field):
+                order = self._order()
+                order.pos_reference = 'Order 00001-001-%s' % field
+                self._record_sale('sale-renamed-%s' % field, reference=order[field])
+                line = self._payment(pos_order_id=order.id, amount=10.0,
+                                     transaction_id='sale-renamed-%s' % field)
+                self.assertEqual(line.musqet_settle_check, 'verified')
+                order[field] = 'renamed-%s' % field
+                self.assertEqual(line.musqet_settle_check, 'unverified')
 
     def test_a_sole_line_on_another_order_is_not_verified(self):
         # The sale was sent for another order (which never synced): a line on this one, even

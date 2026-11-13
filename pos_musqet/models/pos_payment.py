@@ -45,7 +45,7 @@ class PosPayment(models.Model):
     # line of the order Odoo sent it for (or, for an upgrade record with no order, the only
     # line carrying it). Empty on a line of another method, and on a line of an order not
     # yet paid. A line synced before 19.0.1.3.0 starts empty, and is checked once it, its
-    # order's state or a line sharing its saleId changes.
+    # order's state or reference, or a line sharing its saleId changes.
     musqet_settle_check = fields.Selection(
         [('verified', "Verified"), ('unverified', "Not verified")],
         string="Musqet Check", copy=False, readonly=True,
