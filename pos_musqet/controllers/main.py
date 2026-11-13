@@ -5,6 +5,8 @@ import logging
 from odoo import http
 from odoo.http import request
 
+from ..models.musqet_common import reply_is_for
+
 _logger = logging.getLogger(__name__)
 
 
@@ -73,7 +75,7 @@ class MusqetController(http.Controller):
                     reply = method_sudo.musqet_get_sale(sale_id)
         except Exception:
             _logger.exception("Musqet webhook: could not settle sale %r", sale_id)
-        if not method_sudo._musqet_reply_is_for(sale_id, reply):
+        if not reply_is_for(sale_id, reply):
             return self._ack()
         # Buffer Musqet's reply and ping every open session that can show it. The frontend
         # pulls the buffer and settles the pending line idempotently (a poll may have already

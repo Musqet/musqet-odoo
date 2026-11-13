@@ -55,6 +55,16 @@ def parse_iso_currency(value):
     return None
 
 
+def reply_is_for(sale_id, reply):
+    """Whether ``reply`` is Musqet's reply about ``sale_id``: a dict with no error that names
+    no other saleId (a status read is about its URL's sale, so one that names none is taken
+    as about it)."""
+    if not isinstance(reply, dict) or 'error' in reply:
+        return False
+    echoed = reply.get('saleId')
+    return echoed is None or echoed == str(sale_id)
+
+
 def sale_key_domain(sale_field, sale_ids, methods):
     """The domain of the rows with one of ``sale_ids`` in ``sale_field``, on one of ``methods``.
 

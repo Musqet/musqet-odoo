@@ -15,7 +15,7 @@ from odoo import fields, models, api, _
 from odoo.exceptions import AccessDenied, UserError, ValidationError
 from odoo.tools import SQL, consteq
 
-from .musqet_common import MUSQET_TERMINAL, minor_units, parse_minor_amount
+from .musqet_common import MUSQET_TERMINAL, minor_units, parse_minor_amount, reply_is_for
 from .musqet_crypto import (
     ENV_KEY,
     MusqetEncryptionKeyUnavailable,
@@ -510,7 +510,7 @@ class PosPaymentMethod(models.Model):
             'reference': reference,
             'amount_minor': amount,
             'currency': currency,
-        }, "reference %s, %s minor units" % (reference, amount))
+        }, "reference %r, %s minor units" % (reference, amount))
 
     @api.model
     def _musqet_valid_reference(self, reference):
@@ -564,7 +564,7 @@ class PosPaymentMethod(models.Model):
         if payment.payment_method_id.use_payment_terminal != MUSQET_TERMINAL or not payment.transaction_id:
             return None, self._musqet_card_only_error()
         # A paid sale line only. (The settle check refuses any other line too; this saves
-        # reading a pending sale from Musqet for nothing.)
+        # reading the sale from Musqet for nothing.)
         if not payment._musqet_is_sale_line() or not payment._musqet_order_is_paid():
             return None, self._musqet_not_confirmed_error()
         return payment, None
@@ -766,7 +766,7 @@ class PosPaymentMethod(models.Model):
             'original_sale_id': original.sale_id,
             'reference': reference,
             'amount_minor': amount,
-        }, "reference %s, %s minor units, of sale %s" % (reference, amount, original.sale_id))
+        }, "reference %r, %s minor units, of sale %r" % (reference, amount, original.sale_id))
 
     def musqet_create_refund(self, payload, original_payment_id):
         """POST /terminal/sales with type:"refund" — refund a card-settled Musqet sale.
@@ -863,11 +863,17 @@ class PosPaymentMethod(models.Model):
         Returns the partner sale shape (``{saleId, reference, status, amountInCents,
         currency, rail, ...}``, Musqet/musqet#2094) or ``{error}``. Also settles this
         method's recorded sale or refund with this saleId as Musqet reports
-        (_musqet_sync_records), which the settle check and the over-refund cap rely on.
+        (_musqet_sync_records), which the settle check and the over-refund cap rely on. A
+        reply about another sale settles nothing and reaches the POS as an ``{error}``, so
+        the till never settles a line on it either.
         """
         response = self._musqet_request(
             'GET', '/terminal/sales/%s' % urllib.parse.quote(str(sale_id), safe=''))
         self._musqet_sync_records(sale_id, response)
+        if isinstance(response, dict) and 'error' not in response and not reply_is_for(sale_id, response):
+            _logger.warning("Musqet replied about sale %r to a read of sale %r",
+                            response.get('saleId'), sale_id)
+            return {'error': {'message': _("Musqet replied about a different sale.")}}
         return response
 
     def _musqet_sync_records(self, sale_id, response):
@@ -875,25 +881,13 @@ class PosPaymentMethod(models.Model):
 
         ``response`` must be Musqet's own word about this sale: the reply to a status read of
         it (musqet_get_sale; a signed webhook only triggers one). The reply carries its saleId
-        (the partner sale shape, Musqet/musqet#2094); one naming another saleId changes
-        nothing. A status read is already about ``sale_id`` by its URL, so a reply without a
-        saleId is taken as about it. An {error} response has no status, so it leaves the
-        records as they were.
+        (the partner sale shape, Musqet/musqet#2094). Only a reply reply_is_for accepts is
+        applied.
         """
-        if not sale_id or not self._musqet_reply_is_for(sale_id, response):
+        if not sale_id or not reply_is_for(sale_id, response):
             return
         for records in self._musqet_records_of(sale_id):
             records._musqet_apply_response(response)
-
-    @staticmethod
-    def _musqet_reply_is_for(sale_id, reply):
-        """Whether ``reply`` is Musqet's reply about ``sale_id``: a dict with no error that
-        names no other saleId (a status read is about its URL's sale, so one that names none
-        is taken as about it)."""
-        if not isinstance(reply, dict) or 'error' in reply:
-            return False
-        echoed = reply.get('saleId')
-        return echoed is None or echoed == str(sale_id)
 
     def musqet_cancel_sale(self, sale_id):
         """POST /terminal/sales/:id/cancel — request cancellation of an in-flight sale.

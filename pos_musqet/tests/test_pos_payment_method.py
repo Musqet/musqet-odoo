@@ -505,11 +505,11 @@ class TestMusqetSaleRecords(TransactionCase):
         self.complete = {'status': 'COMPLETE', 'amountInCents': 1250, 'currency': self.currency,
                          'rail': 'card'}
 
-    def _start_sale(self, status_code=200, status='PENDING'):
+    def _start_sale(self, status_code=200, status='PENDING', reference='Order-1'):
         fake = musqet_response('sale-1', status, status_code=status_code)
         with patch.object(pos_payment_method.requests, 'request', return_value=fake):
             return self.method.with_user(self.cashier).musqet_create_sale(
-                {'amountInCents': 1250, 'reference': 'Order-1'})
+                {'amountInCents': 1250, 'reference': reference})
 
     def _poll(self, body, status_code=200, method=None, omit_sale_id=False):
         # ``body`` may name another saleId, as a reply about another sale would.
@@ -518,7 +518,7 @@ class TestMusqetSaleRecords(TransactionCase):
         if omit_sale_id:
             del fake.json.return_value['saleId']
         with patch.object(pos_payment_method.requests, 'request', return_value=fake):
-            (method or self.method).with_user(self.cashier).musqet_get_sale('sale-1')
+            return (method or self.method).with_user(self.cashier).musqet_get_sale('sale-1')
 
     def _sale(self):
         return self.env['pos.musqet.sale'].search([('sale_id', '=', 'sale-1')])
@@ -540,9 +540,12 @@ class TestMusqetSaleRecords(TransactionCase):
         self.assertEqual(self._sale().state, 'failed')
 
     def test_a_reply_about_another_sale_changes_nothing(self):
+        # Neither the record nor the till: the POS gets an error, not a COMPLETE to settle on.
         self._start_sale()
-        self._poll({**self.complete, 'saleId': 'sale-2'})
+        with self.assertLogs('odoo.addons.pos_musqet.models.pos_payment_method', 'WARNING'):
+            result = self._poll({**self.complete, 'saleId': 'sale-2'})
         self.assertEqual(self._sale().state, 'pending')
+        self.assertIn('different sale', result['error']['message'])
 
     def test_settles_from_a_status_read_whose_reply_has_no_sale_id(self):
         # The read is about sale-1 by its URL.
@@ -631,6 +634,15 @@ class TestMusqetSaleRecords(TransactionCase):
         self.assertIn('Order-1', logs.output[0])
         self.assertIn('1250', logs.output[0])
 
+    def test_logs_the_reference_escaped(self):
+        # A reference from the till can't forge lines in the reconciliation log.
+        record_sale(self.env, self.method, 'sale-1')
+        with self.assertLogs('odoo.addons.pos_musqet.models.pos_musqet_record', 'ERROR') as logs, \
+             mute_logger('odoo.sql_db'):
+            self._start_sale(reference='Order-1\nFORGED LINE')
+        self.assertNotIn('\n', logs.records[0].getMessage())
+        self.assertIn('Order-1\\nFORGED LINE', logs.records[0].getMessage())
+
     def test_cashier_cannot_read_or_write_sale_records(self):
         self._start_sale()
         Sale = self.env['pos.musqet.sale'].with_user(self.cashier)
@@ -703,8 +715,8 @@ class TestMusqetWebhookRoute(HttpCase):
         self.assertEqual(self._buffered()['status'], 'PROCESSING')
 
     def test_a_reply_without_a_sale_id_is_buffered_with_it(self):
-        # The till matches the buffer to its line by saleId. Left out or null, as
-        # _musqet_sync_records reads it.
+        # The till matches the buffer to its line by saleId. Left out or null, both taken as
+        # this sale (reply_is_for).
         for omit in (True, False):
             with self.subTest(omit=omit):
                 self.sale.state = 'pending'
