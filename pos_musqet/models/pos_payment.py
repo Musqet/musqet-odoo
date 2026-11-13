@@ -3,8 +3,9 @@ import logging
 from collections import Counter, defaultdict
 
 from odoo import api, fields, models
+from odoo.tools import SQL
 
-from .musqet_common import MUSQET_UNCHECKED_ORDER_STATES, minor_units, sale_key_domain
+from .musqet_common import MUSQET_TERMINAL, MUSQET_UNPAID_ORDER_STATES, minor_units, sale_key_domain
 
 _logger = logging.getLogger(__name__)
 
@@ -67,9 +68,11 @@ class PosPayment(models.Model):
         if MUSQET_REFUND_LINK_FIELDS & vals.keys():
             self._musqet_link_recorded_refunds()
         if check:
-            # The check's own write of the flag comes back here too: it finds every value
-            # already right and writes nothing more. (No exemption for it: a server path
-            # writing POS values under sudo must not keep a forged flag either.)
+            # The check's own write of the flag comes back here too and checks again. That
+            # nested check may write other lines' flags first (when the outer one writes more
+            # than one value), but every pass computes the same values, so it ends with all
+            # of them right. (No exemption for the check's own write: a server path writing
+            # POS values under sudo must not keep a forged flag either.)
             (self | previous)._musqet_check_settles()
         return result
 
@@ -83,7 +86,7 @@ class PosPayment(models.Model):
         """These payments that are Musqet lines with a saleId."""
         return self.filtered(
             lambda payment: payment.transaction_id
-            and payment.payment_method_id.use_payment_terminal == 'musqet')
+            and payment.payment_method_id.use_payment_terminal == MUSQET_TERMINAL)
 
     def _musqet_lines_sharing_sales(self):
         """Every payment with the (method, saleId) of one of these Musqet lines, these included."""
@@ -110,6 +113,9 @@ class PosPayment(models.Model):
         verified. Logs each Musqet line that becomes Not verified, so it can be checked by
         hand.
         """
+        lines = self._musqet_lines()
+        # Lock first, so a line of the same sale synced at the same time is counted below.
+        lines.filtered(lambda line: line._musqet_is_claiming())._musqet_lock_records()
         payments = self.sudo() | self._musqet_lines_sharing_sales()
         lines = payments._musqet_lines()
         sales, refunds = lines._musqet_done_records()
@@ -128,6 +134,26 @@ class PosPayment(models.Model):
                         payment.id, payment.pos_order_id.name, payment.transaction_id, payment.amount)
             changed.write({'musqet_settle_check': value})
 
+    def _musqet_lock_records(self):
+        """Make checks of these lines' sales and refunds run one after the other.
+
+        Updates the record rows of these lines' saleIds (to the same values), as
+        pos.payment.method._musqet_claim_original_sale does for refunds: a second
+        transaction checking a line of the same sale waits, and if the first committed, its
+        update fails with a serialisation error and Odoo retries it with a snapshot that
+        holds the first line. Without this, two lines copying one saleId, synced at once,
+        could each count only itself and both end up Verified. A saleId with no record has
+        nothing to vouch for its lines, so it needs no lock.
+        """
+        if not self:
+            return
+        for table in ('pos_musqet_sale', 'pos_musqet_refund'):
+            self.env.cr.execute(SQL(
+                'UPDATE %s SET write_date = write_date'
+                ' WHERE sale_id IN %s AND payment_method_id IN %s',
+                SQL.identifier(table), tuple(self.mapped('transaction_id')),
+                tuple(self.payment_method_id.ids)))
+
     def _musqet_done_records(self):
         """The done sale and refund records of these Musqet lines, each by (method, saleId)."""
         sales, refunds = {}, {}
@@ -140,23 +166,27 @@ class PosPayment(models.Model):
 
     def _musqet_is_claiming(self):
         """Whether this Musqet line is checked and claims its sale: its order is paid."""
-        return self.pos_order_id.state not in MUSQET_UNCHECKED_ORDER_STATES
+        return self.pos_order_id.state not in MUSQET_UNPAID_ORDER_STATES
+
+    def _musqet_is_sale_line(self):
+        """Whether this line takes money (a sale), rather than gives it back (a refund)."""
+        return minor_units(self.amount, self.currency_id) > 0
 
     def _musqet_claim_key(self):
         """The sale or refund this line claims: (method, saleId, whether it is a sale)."""
-        return (self.payment_method_id.id, self.transaction_id, self.amount > 0)
+        return (self.payment_method_id.id, self.transaction_id, self._musqet_is_sale_line())
 
     def _musqet_settle_value(self, sales, refunds, claims):
         """This payment's musqet_settle_check, given the done records by (method, saleId) and
         how many paid lines claim each sale or refund."""
         self.ensure_one()
-        if self.payment_method_id.use_payment_terminal != 'musqet' or not self._musqet_is_claiming():
+        if self.payment_method_id.use_payment_terminal != MUSQET_TERMINAL or not self._musqet_is_claiming():
             return False
         if claims[self._musqet_claim_key()] > 1:
             return 'unverified'
         key = (self.payment_method_id.id, self.transaction_id)
         amount = minor_units(self.amount, self.currency_id)
-        if amount > 0:
+        if self._musqet_is_sale_line():
             sale = sales.get(key)
             verified = sale and sale.amount_minor == amount and sale.currency == self.currency_id.name
         else:

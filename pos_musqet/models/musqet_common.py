@@ -1,6 +1,9 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 """Constants and helpers shared by the Musqet models."""
 
+# The use_payment_terminal value of a Musqet payment method.
+MUSQET_TERMINAL = 'musqet'
+
 # The Musqet sale statuses (a refund uses the same ones) that end a sale. Same lists as
 # SUCCESS_STATUS and FAILURE_STATUSES in static/src/app/payment_musqet.js.
 MUSQET_SUCCESS_STATUS = 'COMPLETE'
@@ -11,8 +14,8 @@ MUSQET_RAIL_SELECTION = [('card', "Card"), ('bitcoin', "Bitcoin")]
 MUSQET_RAILS = tuple(rail for rail, _label in MUSQET_RAIL_SELECTION)
 
 # The states of an order not paid (yet): its Musqet lines vouch for nothing, so they are not
-# checked, and the upgrade records no sale from them.
-MUSQET_UNCHECKED_ORDER_STATES = ('draft', 'cancel')
+# checked, can't be refunded through the terminal, and the upgrade records no sale from them.
+MUSQET_UNPAID_ORDER_STATES = ('draft', 'cancel')
 
 
 def minor_units(amount, currency):

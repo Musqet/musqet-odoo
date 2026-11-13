@@ -8,7 +8,8 @@ from .musqet_common import (
     MUSQET_RAIL_SELECTION,
     MUSQET_RAILS,
     MUSQET_SUCCESS_STATUS,
-    MUSQET_UNCHECKED_ORDER_STATES,
+    MUSQET_TERMINAL,
+    MUSQET_UNPAID_ORDER_STATES,
     minor_units,
     parse_iso_currency,
     parse_minor_amount,
@@ -35,7 +36,7 @@ class PosMusqetSale(models.Model):
     _inherit = ['pos.musqet.record']
     _description = 'Musqet Sale'
 
-    sale_id = fields.Char(string="Musqet Sale", index=True, help="The Musqet saleId of the sale.")
+    sale_id = fields.Char(string="Musqet Sale", help="The Musqet saleId of the sale.")
     amount_minor = fields.Integer(
         help="The amount in minor units of the currency (cents): the amount requested while "
              "pending, the amount Musqet captured once done.")
@@ -94,10 +95,10 @@ class PosMusqetSale(models.Model):
         """
         payments = self.env['pos.payment'].sudo().search([
             ('amount', '>', 0),
-            ('pos_order_id.state', 'not in', MUSQET_UNCHECKED_ORDER_STATES),
+            ('pos_order_id.state', 'not in', MUSQET_UNPAID_ORDER_STATES),
             ('musqet_refund_of', '=', False),
             ('transaction_id', '!=', False),
-            ('payment_method_id.use_payment_terminal', '=', 'musqet'),
+            ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
         ], order='id')
         count = self._musqet_record_unrecorded(payments, lambda payment: {
             'amount_minor': minor_units(payment.amount, payment.currency_id),

@@ -1,5 +1,11 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
+import logging
+
 from odoo import api, fields, models
+
+from .musqet_common import sale_key_domain
+
+_logger = logging.getLogger(__name__)
 
 
 class PosMusqetRecord(models.AbstractModel):
@@ -16,12 +22,37 @@ class PosMusqetRecord(models.AbstractModel):
     company_id = fields.Many2one('res.company', required=True, readonly=True, index=True)
     payment_method_id = fields.Many2one(
         'pos.payment.method', required=True, readonly=True, ondelete='restrict')
-    sale_id = fields.Char(required=True, readonly=True, help="The Musqet saleId.")
+    sale_id = fields.Char(required=True, readonly=True, index=True, help="The Musqet saleId.")
     reference = fields.Char(readonly=True, help="The order reference sent to Musqet.")
     amount_minor = fields.Integer(string="Amount (minor units)", required=True, readonly=True)
     state = fields.Selection(
         [('pending', "Pending"), ('done', "Done"), ('failed', "Failed")],
         required=True, default='pending', readonly=True)
+
+    def _musqet_apply_response(self, response):
+        """Settle these records as Musqet's ``response`` (its own word about them) says."""
+        raise NotImplementedError
+
+    @api.model
+    def _musqet_record_accepted(self, response, vals, details):
+        """Record a sale or refund Musqet accepted (its create ``response``), with ``vals``.
+
+        An {error} response carries no saleId, so nothing is recorded for it. Runs in a
+        savepoint, and never raises: Musqet already has the command, so the POS must still
+        get the saleId to poll it, and failing the request would leave the terminal armed
+        with a command Odoo knows nothing about. A failure is logged with ``details``, enough
+        to reconcile it by hand.
+        """
+        sale_id = response.get('saleId') if isinstance(response, dict) else None
+        if not sale_id:
+            return
+        try:
+            with self.env.cr.savepoint():
+                self.sudo().create({'sale_id': str(sale_id), **vals})._musqet_apply_response(response)
+        except Exception:
+            _logger.exception(
+                "Musqet accepted %s %s (%s) but Odoo could not record it",
+                self._description.lower(), sale_id, details)
 
     @api.model
     def _musqet_record_unrecorded(self, payments, vals_for):
@@ -32,7 +63,8 @@ class PosMusqetRecord(models.AbstractModel):
         """
         recorded = {
             (record.payment_method_id.id, record.sale_id)
-            for record in self.sudo().search([('sale_id', 'in', payments.mapped('transaction_id'))])
+            for record in self.sudo().search(sale_key_domain(
+                'sale_id', payments.mapped('transaction_id'), payments.payment_method_id))
         }
         vals_list = []
         for payment in payments:
