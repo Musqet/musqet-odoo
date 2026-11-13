@@ -123,7 +123,6 @@ class TestMusqetProxyAccess(TransactionCase):
         # ...and redirects are not followed (SSRF guard).
         self.assertFalse(called_kwargs['allow_redirects'])
 
-
     def test_get_and_cancel_deny_a_non_musqet_payment_method(self):
         # _musqet_check_access also refuses a method that isn't a Musqet one: no request may go
         # out for it.
