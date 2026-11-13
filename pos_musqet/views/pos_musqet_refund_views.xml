@@ -28,7 +28,7 @@
                 <header>
                     <button name="action_musqet_mark_failed" type="object" string="Mark as Failed"
                             invisible="state != 'pending'"
-                            confirm="Only do this once the Musqet app shows this refund did not go through. It then stops counting against the original sale."/>
+                            confirm="Only do this once the Musqet app shows this refund did not go through. It then stops counting against the original sale, and this cannot be undone."/>
                     <field name="state" widget="statusbar"/>
                 </header>
                 <sheet>

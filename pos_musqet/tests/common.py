@@ -41,6 +41,15 @@ def create_musqet_method(test, serial, **overrides):
     })
 
 
+def make_pos_user(env, login, group='point_of_sale.group_pos_user', **values):
+    """Create a user in a POS group (a cashier by default) and nothing else."""
+    return env['res.users'].create({
+        'name': login, 'login': login,
+        'group_ids': [(6, 0, [env.ref(group).id])],
+        **values,
+    })
+
+
 def musqet_response(sale_id, status='PENDING', status_code=200):
     """A stubbed Musqet API response carrying a sale's id and status."""
     response = MagicMock(status_code=status_code)

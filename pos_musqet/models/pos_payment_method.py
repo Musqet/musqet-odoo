@@ -569,6 +569,10 @@ class PosPaymentMethod(models.Model):
         includes the record. A lock alone would not do: the waiting transaction would keep its
         old snapshot. The retry is safe only while nothing has been sent, which is why
         musqet_create_refund flushes every pending write before it sends the refund.
+
+        The row lock lasts until commit, so it spans the call to Musqet (up to
+        MUSQET_TIMEOUT): anything else writing those payment rows, such as a session close,
+        waits that long or is retried.
         """
         self.env.cr.execute(SQL(
             'UPDATE pos_payment SET write_date = write_date'
@@ -613,11 +617,15 @@ class PosPaymentMethod(models.Model):
     def _musqet_refund_reference_states(self, refunds, original):
         """Map each order reference the recorded ``refunds`` are known by to their state.
 
+        A synced payment belongs to a refund when it has the refund's (method, saleId), the
+        record's own key; a payment of another method that shares the saleId does not.
+
         A refund is known by the reference it was sent with and by both forms of its synced
         order's reference (a record backfilled at the upgrade holds only one of them). A
         reference of a pending refund maps to 'pending' even if a done one shares it.
         """
-        state_by_sale = {refund.sale_id: refund.state for refund in refunds}
+        state_by_key = {
+            (refund.payment_method_id.id, refund.sale_id): refund.state for refund in refunds}
         states = {}
 
         def note(reference, state):
@@ -628,11 +636,14 @@ class PosPaymentMethod(models.Model):
             note(refund.reference, refund.state)
         if refunds:
             for payment in self.env['pos.payment'].sudo().search([
-                ('transaction_id', 'in', list(state_by_sale)),
+                ('transaction_id', 'in', refunds.mapped('sale_id')),
+                ('payment_method_id', 'in', refunds.payment_method_id.ids),
                 ('company_id', '=', original.company_id.id),
             ]):
-                for reference in self._musqet_order_references(payment):
-                    note(reference, state_by_sale[payment.transaction_id])
+                state = state_by_key.get((payment.payment_method_id.id, payment.transaction_id))
+                if state:
+                    for reference in self._musqet_order_references(payment):
+                        note(reference, state)
         return states
 
     def _musqet_refund_refusal(self, original, amount, reference):

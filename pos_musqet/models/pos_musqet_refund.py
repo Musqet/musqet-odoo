@@ -30,7 +30,9 @@ class PosMusqetRefund(models.Model):
     cumulative limit (Musqet/musqet#2094), so the over-refund cap and the duplicate check
     in ``pos.payment.method.musqet_create_refund`` read these records. They are written
     only by the server (sudo), never from the browser, and exist as soon as Musqet accepts
-    the refund, before the refund order reaches Odoo. The upgrade to 19.0.1.2.0 also
+    the refund, before the refund order reaches Odoo (except in the cases the "Not covered"
+    paragraph of musqet_create_refund names). A POS manager can mark a pending one failed
+    (action_musqet_mark_failed); nothing else changes them from the browser. The upgrade to 19.0.1.2.0 also
     created done records for the refunds synced before it (_musqet_record_synced_refunds).
     """
     _name = 'pos.musqet.refund'
@@ -64,9 +66,13 @@ class PosMusqetRefund(models.Model):
         A pending refund keeps counting against its sale until Musqet reports how it ended.
         If that read can never succeed (Musqet doesn't know the saleId, or the method has
         lost its Musqet configuration), this is the way out. Only pending refunds move.
-        Reading the state needs read access, which only POS managers have
-        (ir.model.access.csv), so no one else gets as far as the write.
+
+        It can't be undone: a failed refund is never re-read, and its synced payment doesn't
+        count either, so the amount leaves the cap for good.
         """
+        # Checked here, not left to the read of `state`: a cached read checks nothing. Read
+        # access (ACL and company rule) is POS managers' only (ir.model.access.csv).
+        self.check_access('read')
         self.filtered(lambda refund: refund.state == 'pending').sudo().write({'state': 'failed'})
 
     def _musqet_apply_status(self, status):

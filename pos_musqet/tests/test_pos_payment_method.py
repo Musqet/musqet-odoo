@@ -20,6 +20,7 @@ from .common import (
     create_musqet_method,
     dirty_field_names,
     load_migration,
+    make_pos_user,
     musqet_response,
     record_refund,
 )
@@ -153,11 +154,7 @@ class TestMusqetProxyAccess(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        self.cashier = self.env['res.users'].create({
-            'name': 'Musqet Cashier',
-            'login': 'musqet_cashier',
-            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
-        })
+        self.cashier = make_pos_user(self.env, 'musqet_cashier')
         self.method = create_musqet_method(self, 'MSQ-TEST-001')
 
     def _fake_response(self, status_code=200, json_body=None):
@@ -265,11 +262,7 @@ class TestMusqetLatestStatus(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        self.cashier = self.env['res.users'].create({
-            'name': 'Musqet Cashier',
-            'login': 'musqet_cashier_status',
-            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
-        })
+        self.cashier = make_pos_user(self.env, 'musqet_cashier_status')
         self.method = create_musqet_method(self, 'MSQ-WH-002')
 
     def test_denies_a_non_musqet_payment_method_and_keeps_its_buffer(self):
@@ -329,11 +322,7 @@ class TestMusqetCreateSale(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        self.cashier = self.env['res.users'].create({
-            'name': 'Musqet Cashier',
-            'login': 'musqet_cashier_sale',
-            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
-        })
+        self.cashier = make_pos_user(self.env, 'musqet_cashier_sale')
         self.method = create_musqet_method(self, 'MSQ-SALE-001')
         self.currency = self.method.company_id.currency_id.name
 
@@ -507,11 +496,7 @@ class TestMusqetCreateRefund(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        self.cashier = self.env['res.users'].create({
-            'name': 'Musqet Cashier',
-            'login': 'musqet_cashier_refund',
-            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
-        })
+        self.cashier = make_pos_user(self.env, 'musqet_cashier_refund')
         self.method = create_musqet_method(self, 'MSQ-RF-001')
         self.currency = self.method.company_id.currency_id.name
         self.other_currency = 'EUR' if self.currency != 'EUR' else 'USD'
@@ -1117,6 +1102,20 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
                 {'amountInCents': 200, 'reference': self.order.uuid}, original.id)
         self.assertNotIn('error', result)
 
+    def test_a_payment_of_another_method_sharing_a_refund_sale_id_is_not_that_refund(self):
+        # A payment line on another order, of another method, that happens to carry a
+        # recorded refund's saleId must not make that order's refund a duplicate.
+        original = self._payment(amount=10.0, transaction_id='sale-orig-m', musqet_rail='card')
+        record_refund(self.env, self.method, 'refund-m', original_sale_id='sale-orig-m', state='done')
+        other_order = self._order()
+        self._payment(pos_order_id=other_order.id, payment_method_id=self.plain.id,
+                      transaction_id='refund-m')
+        with patch.object(pos_payment_method.requests, 'request',
+                          return_value=musqet_response('refund-new')):
+            result = self.method.musqet_create_refund(
+                {'amountInCents': 200, 'reference': other_order.uuid}, original.id)
+        self.assertNotIn('error', result)
+
     def test_refund_claims_every_row_carrying_the_original_sale(self):
         # Two rows with the original's saleId (say, a duplicated sync): a refund naming one
         # must claim the other too, or a concurrent refund naming the other wouldn't wait.
@@ -1140,12 +1139,8 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         other = self.env['res.company'].create({'name': 'Other Co'})
         plain_other = self.env['pos.payment.method'].create({'name': 'Other Method', 'company_id': other.id})
         record_refund(self.env, plain_other, 'refund-other', original_sale_id='sale-other')
-        manager = self.env['res.users'].create({
-            'name': 'Musqet Manager', 'login': 'musqet_manager',
-            'company_id': self.method.company_id.id,
-            'company_ids': [(6, 0, self.method.company_id.ids)],
-            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_manager').id])],
-        })
+        manager = make_pos_user(self.env, 'musqet_manager', group='point_of_sale.group_pos_manager', company_id=self.method.company_id.id,
+            company_ids=[(6, 0, self.method.company_id.ids)])
         seen = self.env['pos.musqet.refund'].with_user(manager).search([])
         self.assertEqual(seen.mapped('sale_id'), ['refund-1'])
 
@@ -1168,22 +1163,26 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         self.assertTrue(backfilled.reference)
 
     def test_manager_can_mark_a_stuck_pending_refund_failed(self):
-        manager = self.env['res.users'].create({
-            'name': 'Musqet Manager', 'login': 'musqet_manager_fail',
-            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_manager').id])],
-        })
+        manager = make_pos_user(self.env, 'musqet_manager_fail', group='point_of_sale.group_pos_manager')
         stuck = self.env['pos.musqet.refund'].search([('sale_id', '=', 'refund-1')])
         done = record_refund(self.env, self.method, 'refund-done', state='done')
         (stuck | done).with_user(manager).action_musqet_mark_failed()
         self.assertEqual(stuck.state, 'failed')
         self.assertEqual(done.state, 'done')
 
-    def test_cashier_cannot_mark_a_refund_failed(self):
-        cashier = self.env['res.users'].create({
-            'name': 'Musqet Cashier', 'login': 'musqet_cashier_fail',
-            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
-        })
+    def test_cashier_cannot_mark_a_refund_failed_with_its_state_cached(self):
+        cashier = make_pos_user(self.env, 'musqet_cashier_cached')
         stuck = self.env['pos.musqet.refund'].search([('sale_id', '=', 'refund-1')])
+        self.assertEqual(stuck.state, 'pending')  # now in the cache
+        with self.assertRaises(AccessError):
+            stuck.with_user(cashier).action_musqet_mark_failed()
+        self.assertEqual(stuck.state, 'pending')
+
+    def test_cashier_cannot_mark_a_refund_failed(self):
+        cashier = make_pos_user(self.env, 'musqet_cashier_fail')
+        stuck = self.env['pos.musqet.refund'].search([('sale_id', '=', 'refund-1')])
+        # As over RPC: nothing cached, so the explicit check is what's tested.
+        stuck.invalidate_recordset()
         with self.assertRaises(AccessError):
             stuck.with_user(cashier).action_musqet_mark_failed()
         self.assertEqual(stuck.state, 'pending')

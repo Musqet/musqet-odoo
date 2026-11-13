@@ -213,9 +213,9 @@ and make your **company currency match it** (and keep each POS on the company cu
    Lightning-settled original shows a *manual refund* message and makes **no** API
    call (Lightning can't be reversed on the device).
 
-   Odoo records every refund Musqet accepts, straight away. So the refunds of one sale
-   can't add up to more than the sale, even before the refund orders sync, and the same
-   refund order can't be refunded twice. A refund that fails at the terminal stops
+   Odoo records every refund Musqet accepts, straight away (except in the two cases
+   below). So the refunds of one sale can't add up to more than the sale, even before
+   the refund orders sync, and the same refund order can't be refunded twice. A refund that fails at the terminal stops
    counting once Musqet reports it as failed. One refund order takes one Musqet refund of
    a given sale: to refund more of that sale later, make a new refund order.
 
@@ -225,7 +225,8 @@ and make your **company currency match it** (and keep each POS on the company cu
 
    The records are under **Point of Sale → Orders → Musqet Refunds** (managers only). A
    refund stuck as *Pending* that Musqet shows did not go through can be marked
-   **Failed** there, so it stops counting against the sale.
+   **Failed** there, so it stops counting against the sale. This can't be undone, so
+   check the Musqet app first.
 
 ---
 
