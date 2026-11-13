@@ -240,8 +240,129 @@ class TestMusqetLatestStatus(TransactionCase):
         fake.status_code = 200
         fake.json.return_value = {'saleId': 'new', 'status': 'PENDING'}
         with patch.object(pos_payment_method.requests, 'request', return_value=fake):
-            self.method.with_user(self.cashier).musqet_create_sale({'serial': 'MSQ-WH-002'})
+            self.method.with_user(self.cashier).musqet_create_sale({'amountInCents': 500})
         self.assertFalse(self.method.musqet_latest_response)
+
+
+@tagged('post_install', '-at_install')
+class TestMusqetCreateSale(TransactionCase):
+    """musqet_create_sale rebuilds the request server-side from an untrusted payload.
+
+    Any POS user can call it over RPC, and the API accepts ``type`` on the same endpoint,
+    so the payload must never be able to turn a sale into a refund, pick another terminal,
+    or smuggle extra keys through.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.cashier = self.env['res.users'].create({
+            'name': 'Musqet Cashier',
+            'login': 'musqet_cashier_sale',
+            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
+        })
+        self.method = self.env['pos.payment.method'].create({
+            'name': 'Musqet Terminal',
+            'use_payment_terminal': 'musqet',
+            'musqet_base_url': 'https://api.musqet.tech/api/v1',
+            'musqet_api_key': 'secret-token',
+            'musqet_terminal_serial': 'MSQ-SALE-001',
+        })
+
+    def _call_sale(self, payload, method=None):
+        fake = MagicMock()
+        fake.status_code = 200
+        fake.json.return_value = {'saleId': 'sale-1', 'status': 'PENDING'}
+        with patch.object(pos_payment_method.requests, 'request', return_value=fake) as mock_request:
+            result = (method or self.method).with_user(self.cashier).musqet_create_sale(payload)
+        return result, mock_request
+
+    def test_sends_a_well_formed_sale(self):
+        payload = {
+            'amountInCents': 1250,
+            'mode': 'any',
+            'shouldPrint': True,
+            'language': 'en',
+            'reference': 'Order 00001-001-0001',
+            'currency': 'USD',
+        }
+        result, mock_request = self._call_sale(payload)
+        self.assertEqual(result, {'saleId': 'sale-1', 'status': 'PENDING'})
+        _, called_args, called_kwargs = mock_request.mock_calls[0]
+        self.assertEqual(called_args[:2], ('POST', 'https://api.musqet.tech/api/v1/terminal/sales'))
+        self.assertEqual(called_kwargs['json'], {
+            'serial': 'MSQ-SALE-001',
+            'type': 'sale',
+            'mode': 'any',
+            'amountInCents': 1250,
+            'shouldPrint': True,
+            'language': 'en',
+            'reference': 'Order 00001-001-0001',
+            'currency': 'USD',
+        })
+
+    def test_forces_type_sale_and_own_serial_and_drops_unknown_keys(self):
+        payload = {
+            'amountInCents': 99999999,
+            'type': 'refund',
+            'serial': 'MSQ-OTHER-999',
+            'extra': 'smuggled',
+        }
+        result, mock_request = self._call_sale(payload)
+        self.assertNotIn('error', result)
+        sent = mock_request.mock_calls[0].kwargs['json']
+        self.assertEqual(sent['type'], 'sale')            # never the payload's "refund"
+        self.assertEqual(sent['serial'], 'MSQ-SALE-001')  # this method's serial
+        self.assertNotIn('extra', sent)
+        self.assertEqual(sent['mode'], 'any')             # default when the payload omits it
+
+    def test_rejects_invalid_amounts(self):
+        for amount in (None, 0, -100, 12.5, '500', True, [500]):
+            with self.subTest(amount=amount):
+                result, mock_request = self._call_sale({'amountInCents': amount})
+                self.assertIn('error', result)
+                mock_request.assert_not_called()
+
+    def test_rejects_unknown_mode(self):
+        result, mock_request = self._call_sale({'amountInCents': 500, 'mode': 'refund'})
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_rejects_a_non_dict_payload(self):
+        result, mock_request = self._call_sale(['amountInCents', 500])
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_drops_optional_fields_of_the_wrong_type(self):
+        payload = {
+            'amountInCents': 500,
+            'reference': {'nested': 'object'},
+            'language': ['en'],
+            'currency': 'NOT-A-CODE',
+            'shouldPrint': 'yes',
+        }
+        result, mock_request = self._call_sale(payload)
+        self.assertNotIn('error', result)
+        sent = mock_request.mock_calls[0].kwargs['json']
+        self.assertNotIn('reference', sent)
+        self.assertNotIn('language', sent)
+        self.assertNotIn('currency', sent)
+        self.assertIs(sent['shouldPrint'], True)
+
+    def test_rejects_when_no_serial_is_configured(self):
+        self.method.musqet_terminal_serial = False
+        result, mock_request = self._call_sale({'amountInCents': 500})
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_does_not_clear_the_buffer_on_a_rejected_request(self):
+        self.method.musqet_latest_response = json.dumps({'saleId': 'live', 'status': 'PENDING'})
+        self._call_sale({'amountInCents': 0})
+        self.assertTrue(self.method.musqet_latest_response)
+
+    def test_denies_a_non_pos_user(self):
+        public = self.env.ref('base.public_user')
+        with self.assertRaises(AccessDenied):
+            self.method.with_user(public).musqet_create_sale({'amountInCents': 500})
 
 
 @tagged('post_install', '-at_install')
