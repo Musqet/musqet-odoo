@@ -53,13 +53,12 @@ class PosPaymentMethod(models.Model):
         return super()._get_payment_terminal_selection() + [('musqet', 'Musqet')]
 
     # Musqet
-    # groups= controls ORM/UI visibility, not storage. The key is read server-side via
-    # self.sudo().musqet_api_key and is intentionally excluded from _load_pos_data_fields
-    # so it is never loaded into POS JS.
-    # Encrypted at rest: `*_encrypted` holds a Fernet ciphertext (key in the environment, never
-    # the DB), and the plaintext field is non-stored, decrypting on read and encrypting on
-    # write, so the read sites and the form view are unchanged. groups= is kept on both so a
-    # non-manager cannot read either through the ORM. See models/musqet_crypto.py.
+    # Secrets are encrypted at rest: `*_encrypted` holds a Fernet ciphertext (key in the
+    # environment, never the DB), and the plaintext field is non-stored, decrypting on read
+    # and encrypting on write, so the read sites and the form view are unchanged. See
+    # models/musqet_crypto.py. groups= (on both fields) controls ORM/UI visibility, not
+    # storage: a non-manager cannot read either, and the proxy reads the key server-side
+    # via sudo(). The key is excluded from _load_pos_data_fields, so it never reaches POS JS.
     musqet_api_key_encrypted = fields.Char(
         string="Musqet API Key (ciphertext)",
         help="Encrypted form of the Musqet API key. Set the key through the API Key field; "

@@ -52,6 +52,15 @@ def _create_musqet_method(test, serial, **overrides):
     })
 
 
+def _load_pre_migration():
+    # The directory name has dots and the file a hyphen, so it can't be imported by name.
+    path = file_path('pos_musqet/migrations/19.0.1.1.0/pre-migration.py')
+    spec = importlib.util.spec_from_file_location('pos_musqet_pre_migration_19_0_1_1_0', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _reset_decrypt_failure_log(test):
     """Start and end the test with no decrypt failures recorded as already logged."""
     musqet_crypto.reset_reported_failures()
@@ -944,15 +953,6 @@ class TestMusqetSecretEncryption(TransactionCase):
         with self.assertNoLogs(musqet_crypto.__name__, level='ERROR'):
             self.assertFalse(self.method._musqet_verify_webhook('garbage', b'{}'))
             self.assertFalse(self.method._musqet_verify_webhook('t=1,v1=abc', b'{}'))
-
-
-def _load_pre_migration():
-    # The directory name has dots and the file a hyphen, so it can't be imported by name.
-    path = file_path('pos_musqet/migrations/19.0.1.1.0/pre-migration.py')
-    spec = importlib.util.spec_from_file_location('pos_musqet_pre_migration_19_0_1_1_0', path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 @tagged('post_install', '-at_install')

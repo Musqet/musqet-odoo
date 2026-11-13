@@ -120,9 +120,10 @@ that is intended, and is what keeps a copied database from exposing them.
   webhooks are rejected. Each Odoo worker logs the error once per secret and cause,
   and again if the secret recovers and then fails later.
 - **A broken key also blocks editing the payment method**, because the required API
-  key field reads as empty. Set a valid key first. If the key was replaced rather
-  than lost or mistyped, also re-enter the API key under the new key. Then edit the
-  method as usual.
+  key field reads as empty. Set a valid key first. Unless you restored the original
+  key (for example, after a typo), the stored secrets are unreadable: re-enter the API
+  key, and the webhook secret if you use one, under the new key. Then edit the method
+  as usual.
 - **If the key is lost, the stored secrets cannot be recovered.** Re-enter the API key
   and webhook secret on the payment method under a new key.
 - **Rotating the key** means setting the new key and then re-entering **both** secrets
@@ -284,8 +285,9 @@ Before going live, request the following from Musqet and confirm each item:
 - [ ] **API key** for the merchant account, with the scopes
       **`TERMINAL_SALES_WRITE`**, **`TERMINAL_SALES_READ`**, and **`DEVICES_READ`**.
 - [ ] **Test terminal serial** for a physical/sandbox terminal.
-- [ ] **`MUSQET_FIELD_ENCRYPTION_KEY` generated and set** on every Odoo host (see §2.1),
-      with a copy kept in your secret manager.
+- [ ] **`MUSQET_FIELD_ENCRYPTION_KEY` generated and set** on every Odoo host (one key
+      per environment; never reuse production's; see §2.1), with a copy kept in your
+      secret manager.
 - [ ] **Settlement option chosen** (Voltage LND *keep sats*, or Solidi *auto-exchange
       to GBP*) — and that it's configured on the Musqet side.
 - [ ] **Business currency** at Musqet, and that your **company currency matches it**
