@@ -305,7 +305,6 @@ class PosPaymentMethod(models.Model):
         error = self._musqet_check_terminal_request(payload)
         if error:
             return error
-        serial = self.musqet_terminal_serial
         amount = self._musqet_parse_amount(payload)
         if amount is None:
             return {'error': {'message': _("The sale amount is invalid.")}}
@@ -322,7 +321,7 @@ class PosPaymentMethod(models.Model):
         # if the helper's allow-list ever grows.
         outgoing = {
             **self._musqet_optional_terminal_fields(payload),
-            'serial': serial,
+            'serial': self.musqet_terminal_serial,
             'type': 'sale',
             'mode': mode,
             'amountInCents': amount,
@@ -373,7 +372,7 @@ class PosPaymentMethod(models.Model):
         """Re-read the claimed original payment and check it may be refunded here.
 
         Returns ``(original, None)`` for a card-settled Musqet payment of this company in
-        ``currency`` (the company currency), else ``(empty, {error})``. The id is UNTRUSTED:
+        ``currency`` (the company currency), else ``(None, {error})``. The id is UNTRUSTED:
         never take the browser's word for the payment. sudo() reads across the cashier's
         restrictions; these checks, not the ORM record rules, authorise the refund.
         """
@@ -383,20 +382,20 @@ class PosPaymentMethod(models.Model):
         except (TypeError, ValueError):
             original = Payment
         if not original:
-            return Payment, {'error': {'message': _("The original payment to refund could not be found.")}}
+            return None, {'error': {'message': _("The original payment to refund could not be found.")}}
         # Same company as the method driving the refund (defence-in-depth over the API's own
         # merchant scoping).
         if original.company_id != self._musqet_business_company():
-            return Payment, {'error': {'message': _("This payment cannot be refunded here.")}}
+            return None, {'error': {'message': _("This payment cannot be refunded here.")}}
         # Card-settled Musqet sale only: the terminal can't reverse Lightning and the API
         # won't refuse the attempt for us (Musqet/musqet#2094).
         if original.payment_method_id.use_payment_terminal != 'musqet' or original.musqet_rail != 'card':
-            return Payment, {'error': {'message': _(
+            return None, {'error': {'message': _(
                 "Only card payments taken on a Musqet terminal can be refunded automatically.")}}
         # The over-refund cap compares minor units, so the original must be in the refund's
         # currency, or the exponents could differ and the cap would compare mismatched scales.
         if original.currency_id.name != currency:
-            return Payment, {'error': {'message': _("The refund currency does not match the original payment.")}}
+            return None, {'error': {'message': _("The refund currency does not match the original payment.")}}
         return original, None
 
     def musqet_create_refund(self, payload, original_payment_id):
@@ -440,6 +439,10 @@ class PosPaymentMethod(models.Model):
         amount = self._musqet_parse_amount(payload)
         if amount is None:
             return {'error': {'message': _("The refund amount is invalid.")}}
+        # The reference is required: without one the duplicate check below can't run.
+        reference = payload.get('reference')
+        if not self._musqet_valid_reference(reference):
+            return {'error': {'message': _("The refund reference is invalid.")}}
         # `is not None`, not `or 2`: a zero-decimal currency (JPY) has decimal_places == 0,
         # and `0 or 2` would wrongly use 2 — computing a cap 100x too loose. Mirrors the
         # frontend's Number.isInteger() check, which also preserves 0.
@@ -481,11 +484,6 @@ class PosPaymentMethod(models.Model):
         # cases are covered by the frontend single-settle guard and the API 409.) Compare against
         # both the order's pos_reference and uuid to mirror how the reference is built caller-side
         # (order.pos_reference || order.uuid).
-        #
-        # The reference is required here: without one the duplicate check can't run.
-        reference = payload.get('reference')
-        if not self._musqet_valid_reference(reference):
-            return {'error': {'message': _("The refund reference is invalid.")}}
         if any(
             reference in (refund.pos_order_id.pos_reference, refund.pos_order_id.uuid)
             for refund in prior_refunds

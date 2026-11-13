@@ -118,10 +118,10 @@ original payment's currency. So if a POS is set to a currency other than the com
 currency, its Musqet payments are refused until they match.
 
 What the backend **cannot** check is the currency set for your business at Musqet: if
-your Odoo company is in GBP but the Musqet terminal settles in another currency, **sales
+your Odoo company is in GBP but your business at Musqet is set to another currency, **sales
 will be mischarged**.
 
-Before going live, confirm with Musqet which currency the terminal/business is set to
+Before going live, confirm with Musqet which currency your business is set to
 and make your **company currency match it** (and keep each POS on the company currency).
 
 ---
