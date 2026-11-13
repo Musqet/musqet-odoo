@@ -1019,9 +1019,10 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         super().setUp()
         self.method = create_musqet_method(self, 'MSQ-LINK-001')
         self.plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
+        self.second = create_musqet_method(self, 'MSQ-LINK-002')
         config = self.env['pos.config'].create({
             'name': 'Musqet Link POS',
-            'payment_method_ids': [(6, 0, (self.method | self.plain).ids)]})
+            'payment_method_ids': [(6, 0, (self.method | self.plain | self.second).ids)]})
         self.session = self.env['pos.session'].create({'config_id': config.id, 'user_id': self.env.uid})
         self.order = self._order()
         record_refund(self.env, self.method, 'refund-1', amount_minor=500)
@@ -1120,17 +1121,27 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
 
     def test_a_synced_refund_of_another_method_counts_beside_a_record_sharing_its_sale_id(self):
         # The record (this method, saleId X) is a different refund from a synced payment of
-        # another method that also carries saleId X: both count.
+        # another Musqet method that also carries saleId X: both count.
         original = self._payment(amount=10.0, transaction_id='sale-orig-x', musqet_rail='card')
         record_refund(self.env, self.method, 'refund-x', original_sale_id='sale-orig-x',
                       amount_minor=600, state='done')
-        self._payment(payment_method_id=self.plain.id, transaction_id='refund-x',
+        self._payment(payment_method_id=self.second.id, transaction_id='refund-x',
                       musqet_refund_of='sale-orig-x', amount=-6.0)
         with patch.object(pos_payment_method.requests, 'request') as mock_request:
             result = self.method.musqet_create_refund(
                 {'amountInCents': 1, 'reference': 'R-X'}, original.id)
         self.assertIn('exceeds', result['error']['message'])
         mock_request.assert_not_called()
+
+    def test_a_non_musqet_payment_claiming_to_refund_the_sale_does_not_count(self):
+        original = self._payment(amount=10.0, transaction_id='sale-orig-c', musqet_rail='card')
+        self._payment(payment_method_id=self.plain.id, transaction_id='cash-1',
+                      musqet_refund_of='sale-orig-c', amount=-10.0)
+        with patch.object(pos_payment_method.requests, 'request',
+                          return_value=musqet_response('refund-c')):
+            result = self.method.musqet_create_refund(
+                {'amountInCents': 1000, 'reference': 'R-C'}, original.id)
+        self.assertNotIn('error', result)
 
     def test_refund_claims_every_row_carrying_the_original_sale(self):
         # Two rows with the original's saleId (say, a duplicated sync): a refund naming one

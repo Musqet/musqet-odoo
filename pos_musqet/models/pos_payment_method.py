@@ -695,6 +695,9 @@ class PosPaymentMethod(models.Model):
             payment for payment in self.env['pos.payment'].sudo().search([
                 ('musqet_refund_of', '=', original.transaction_id),
                 ('company_id', '=', original.company_id.id),
+                # Only a Musqet refund can be a refund of a Musqet sale, as in the backfill
+                # and the link hook.
+                ('payment_method_id.use_payment_terminal', '=', 'musqet'),
             ])
             if (payment.payment_method_id.id, payment.transaction_id) not in recorded_keys
         ]

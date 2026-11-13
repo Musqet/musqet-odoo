@@ -328,6 +328,11 @@ Then run the smoke test in section 4 with the test credentials.
   access to the database or compromise of the Odoo host.
   Visibility is also restricted to ERP managers. An external-secrets store is a
   possible later hardening step.
+- **The refund cap trusts the original sale's payment as Odoo recorded it.** Refunds
+  are counted from records only the server writes, but the amount and Musqet sale id
+  they are counted against come from the original payment line, which the POS writes
+  when the sale syncs. The pilot assumes trusted cashiers; checking each settled sale
+  with Musqet before it is recorded is planned.
 - **No automated JavaScript test harness in-repo.** The Python backend has unit tests
   (`pos_musqet/tests/`); the POS frontend logic (polling, in-flight lock, webhook/poll
   race) is verified by the live smoke test in section 4, not by automated JS tests. A
