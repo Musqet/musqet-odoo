@@ -1,7 +1,6 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 import logging
-
-from collections import Counter
+from collections import defaultdict
 
 from odoo import api, fields, models
 
@@ -63,21 +62,32 @@ class PosMusqetRefund(models.Model):
 
     @api.model
     def _musqet_forget_shared_references(self):
-        """Clear the reference of each refund record whose (method, saleId) several payments carry.
+        """Clear the reference of each refund record that several paid refund lines claim.
 
-        For the upgrade to 19.0.1.3.0 (see its post-migration); safe to run again. The
-        19.0.1.2.0 backfill took the reference of whichever payment came first, so for a
-        saleId several payments shared it named one order arbitrarily, and the settle check
-        would take that order's line as the genuine one. With no reference, none of them is
-        Verified, as for a record the backfill makes now (_musqet_record_unrecorded). The
-        duplicate check still knows the refund by its synced payments' order references.
+        For the upgrade to 19.0.1.3.0 (see its post-migration). The 19.0.1.2.0 backfill took
+        the reference of whichever linked payment came first, so for a saleId several of them
+        shared, it named one of their orders arbitrarily, and the settle check would take that
+        order's line as the genuine one. A record is cleared only when at least two paid,
+        linked refund lines claim it and its reference is one of their orders: with no
+        reference, none of those lines is Verified (the settle check needs a single claimant
+        then), so clearing never makes a line Verified. A record whose other sharers are on
+        unpaid orders keeps its reference. The duplicate check still knows a cleared refund
+        by its synced payments' order references.
         """
-        refunds = self.sudo().search([('reference', '!=', False)])
+        refunds = self.sudo().search([('reference', '!=', False), ('state', '=', 'done')])
         payments = self.env['pos.payment'].sudo().search(sale_key_domain(
-            'transaction_id', refunds.mapped('sale_id'), refunds.payment_method_id))
-        carried = Counter((payment.payment_method_id.id, payment.transaction_id) for payment in payments)
-        shared = refunds.filtered(
-            lambda refund: carried[(refund.payment_method_id.id, refund.sale_id)] > 1)
+            'transaction_id', refunds.mapped('sale_id'), refunds.payment_method_id,
+        ) + [('musqet_refund_of', '!=', False)])
+        claimants = defaultdict(list)
+        for payment in payments.filtered(lambda payment: payment._musqet_order_is_paid()):
+            claimants[(payment.payment_method_id.id, payment.transaction_id)].append(payment)
+
+        def shared_and_guessed(refund):
+            lines = claimants[(refund.payment_method_id.id, refund.sale_id)]
+            return len(lines) > 1 and any(
+                refund.reference in line._musqet_order_references() for line in lines)
+
+        shared = refunds.filtered(shared_and_guessed)
         shared.write({'reference': False})
         _logger.info("pos_musqet: cleared the order reference of %d shared refund(s)", len(shared))
 

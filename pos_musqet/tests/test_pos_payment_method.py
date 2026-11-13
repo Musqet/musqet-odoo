@@ -1500,16 +1500,34 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         self.assertEqual({older.musqet_settle_check, newer.musqet_settle_check}, {'unverified'})
 
     def test_upgrade_clears_the_reference_of_a_shared_refund(self):
-        # The 19.0.1.2.0 backfill named one order for a refund saleId several payments
-        # carried; 19.0.1.3.0 clears it. A refund carried by one payment keeps its reference.
+        # The 19.0.1.2.0 backfill named one order for a refund saleId several paid lines
+        # carried; 19.0.1.3.0 clears it, and then none of those lines is Verified.
         shared = self._record_refund('refund-shared', state='done')
+        lines = self._payment(transaction_id='refund-shared') | self._payment(
+            pos_order_id=self._order().id, transaction_id='refund-shared')
+        # Carried by one line: kept.
         single = self._record_refund('refund-single', state='done')
-        self._payment(transaction_id='refund-shared')
-        self._payment(pos_order_id=self._order().id, transaction_id='refund-shared')
         self._payment(transaction_id='refund-single')
+        # The genuine line's order is unpaid, a copy is on a paid order: kept, so the copy
+        # stays Not verified rather than becoming the sole claimant of a record with no order.
+        unpaid = self._order(state='draft')
+        kept = self._record_refund('refund-kept', state='done', reference=unpaid.uuid)
+        self._payment(pos_order_id=unpaid.id, transaction_id='refund-kept')
+        copy = self._payment(pos_order_id=self._order().id, transaction_id='refund-kept')
+        # Sent for a refund order that never synced, with copies on two paid orders: not a
+        # backfill guess (no sharer's order), and the duplicate check knows that refund only
+        # by this reference, so it is kept.
+        sent = self._record_refund('refund-sent', state='done', reference='R-UNSYNCED')
+        for _copy in range(2):
+            self._payment(pos_order_id=self._order().id, transaction_id='refund-sent')
         load_migration('19.0.1.3.0', 'post-migration').migrate(self.env.cr, '19.0.1.2.0')
         self.assertFalse(shared.reference)
         self.assertEqual(single.reference, self.order.uuid)
+        self.assertEqual(kept.reference, unpaid.uuid)
+        self.assertEqual(sent.reference, 'R-UNSYNCED')
+        (lines | copy)._musqet_check_settles()
+        self.assertEqual(set(lines.mapped('musqet_settle_check')), {'unverified'})
+        self.assertEqual(copy.musqet_settle_check, 'unverified')
 
     def test_sale_backfill_skips_an_amount_too_large_to_store(self):
         self._payment(amount=30000000.0, transaction_id='sale-huge')

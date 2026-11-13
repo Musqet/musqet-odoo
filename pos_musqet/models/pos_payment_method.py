@@ -453,8 +453,8 @@ class PosPaymentMethod(models.Model):
         musqet_create_refund. Instead, rebuild the request from known keys only: ``type``
         is forced to "sale", ``serial`` comes from this method's own record, ``currency``
         must be the company currency, ``reference`` is required, and the remaining fields are
-        checked before they are sent. The caller still chooses which payment method record this runs on; scoping
-        that to the cashier's own POS is a separate check.
+        checked before they are sent. The caller still chooses which payment method record
+        this runs on; scoping that to the cashier's own POS is a separate check.
         """
         error = self._musqet_check_terminal_request(payload)
         if error:
@@ -622,8 +622,9 @@ class PosPaymentMethod(models.Model):
         committed, the update fails with a serialisation error: Odoo runs a request in
         REPEATABLE READ, so its snapshot may predate the first refund's record. Odoo then
         retries the whole request with a fresh snapshot that includes the record. A lock alone
-        would not do: the waiting transaction would keep its old snapshot. The retry is safe only while nothing has been sent, which is why
-        musqet_create_refund flushes every pending write before it sends the refund.
+        would not do: the waiting transaction would keep its old snapshot. The retry is safe
+        only while nothing has been sent, which is why musqet_create_refund flushes every
+        pending write before it sends the refund.
 
         The row lock lasts until commit, so it spans the call to Musqet (up to
         MUSQET_TIMEOUT). Only the server writes sale records, so nothing else waits on it but

@@ -13,6 +13,9 @@ MUSQET_FAILURE_STATUSES = ('ERROR', 'CANCELLED', 'CANCELLED_REMOTE', 'TIMED_OUT'
 MUSQET_RAIL_SELECTION = [('card', "Card"), ('bitcoin', "Bitcoin")]
 MUSQET_RAILS = tuple(rail for rail, _label in MUSQET_RAIL_SELECTION)
 
+# The largest amount an Integer field (a Postgres int4) can store.
+MUSQET_MAX_MINOR_AMOUNT = 2 ** 31 - 1
+
 # The states of an order not paid (yet): its Musqet lines vouch for nothing, so they are not
 # checked, can't be refunded through the terminal, and the upgrade records no sale from them.
 MUSQET_UNPAID_ORDER_STATES = ('draft', 'cancel')
@@ -27,10 +30,6 @@ def minor_units(amount, currency):
     if decimals is None:
         decimals = 2
     return int(round(amount * (10 ** decimals)))
-
-
-# The largest amount an Integer field (a Postgres int4) can store.
-MUSQET_MAX_MINOR_AMOUNT = 2 ** 31 - 1
 
 
 def parse_minor_amount(value):
