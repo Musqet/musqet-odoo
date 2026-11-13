@@ -110,19 +110,19 @@ your Odoo addons path.
 
 ### 3.1 Currency match — the most likely footgun ⚠️
 
-**The POS currency must equal the terminal/business currency configured at Musqet.**
+**The company currency must equal the business currency configured at Musqet.**
 
 Every amount must be in the **company currency**. The backend refuses a sale or refund
 in any other currency with a currency-mismatch error, and a refund must also match the
-original payment's currency. So if your POS uses a different currency from the company,
-Musqet payments are refused until they match.
+original payment's currency. So if a POS is set to a currency other than the company
+currency, its Musqet payments are refused until they match.
 
 What the backend **cannot** check is the currency set for your business at Musqet: if
 your Odoo company is in GBP but the Musqet terminal settles in another currency, **sales
 will be mischarged**.
 
 Before going live, confirm with Musqet which currency the terminal/business is set to
-and make your **POS pricelist / company currency match it**.
+and make your **company currency match it** (and keep each POS on the company currency).
 
 ---
 

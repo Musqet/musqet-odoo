@@ -6,6 +6,10 @@ import time
 from unittest.mock import MagicMock, patch
 
 from odoo.addons.pos_musqet.models import pos_payment_method
+from odoo.addons.pos_musqet.models.pos_payment_method import (
+    MUSQET_LANGUAGE_MAX_LENGTH,
+    MUSQET_REFERENCE_MAX_LENGTH,
+)
 from odoo.exceptions import AccessDenied, ValidationError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
@@ -358,12 +362,16 @@ class TestMusqetCreateSale(TransactionCase):
                 self.assertEqual(mock_request.mock_calls[0].kwargs['json']['mode'], mode)
 
     def test_accepts_a_reference_at_the_length_limit(self):
-        result, mock_request = self._call_sale({'amountInCents': 500, 'reference': 'r' * 255})
+        result, mock_request = self._call_sale({'amountInCents': 500, 'reference': 'r' * MUSQET_REFERENCE_MAX_LENGTH})
         self.assertNotIn('error', result)
-        self.assertEqual(mock_request.mock_calls[0].kwargs['json']['reference'], 'r' * 255)
+        self.assertEqual(mock_request.mock_calls[0].kwargs['json']['reference'], 'r' * MUSQET_REFERENCE_MAX_LENGTH)
 
     def test_language_length_limits(self):
-        for language, kept in (('', False), ('x' * 16, True), ('x' * 17, False)):
+        for language, kept in (
+            ('', False),
+            ('x' * MUSQET_LANGUAGE_MAX_LENGTH, True),
+            ('x' * (MUSQET_LANGUAGE_MAX_LENGTH + 1), False),
+        ):
             with self.subTest(language=language):
                 result, mock_request = self._call_sale({'amountInCents': 500, 'language': language})
                 self.assertNotIn('error', result)
@@ -378,7 +386,7 @@ class TestMusqetCreateSale(TransactionCase):
                 mock_request.assert_not_called()
 
     def test_rejects_an_invalid_reference(self):
-        for reference in ({'nested': 'object'}, '', 'x' * 256, 42):
+        for reference in ({'nested': 'object'}, '', 'x' * (MUSQET_REFERENCE_MAX_LENGTH + 1), 42):
             with self.subTest(reference=reference):
                 result, mock_request = self._call_sale({'amountInCents': 500, 'reference': reference})
                 self.assertIn('error', result)
@@ -412,11 +420,11 @@ class TestMusqetCreateRefund(TransactionCase):
 
     The Musqet API enforces neither rail correctness nor over-refund (Musqet/musqet#2094), so
     this method must: re-read the (untrusted) original payment by id, refuse anything that
-    isn't a card-settled Musqet sale of this company whose captured amount covers the request,
-    set type, mode and serial on the server, require the company currency, and require a
-    valid reference, so a tampered payload can't widen the action. The original pos.payment is stubbed (a real one
-    needs a full POS session, left to the live smoke run) so these tests exercise the
-    authorization logic directly.
+    isn't a card-settled Musqet sale of this company, in the company currency, whose captured
+    amount covers the request, set type, mode and serial on the server, require the company
+    currency, and require a valid reference, so a tampered payload can't widen the action. The
+    original pos.payment is stubbed (a real one needs a full POS session, left to the live
+    smoke run) so these tests exercise the authorization logic directly.
     """
 
     def setUp(self):
@@ -510,11 +518,12 @@ class TestMusqetCreateRefund(TransactionCase):
 
     def test_rejects_currency_mismatch(self):
         # A refund requested in any currency but the company's is refused before forwarding.
-        original = self._stub_original(rail='card', amount=10.0)   # company currency
-        result, mock_request = self._call_refund(
-            {'amountInCents': 500, 'currency': self.other_currency}, original)
-        self.assertIn('company currency', result['error']['message'])
-        mock_request.assert_not_called()
+        for currency in (self.other_currency, 'NOT-A-CODE', ['USD']):
+            with self.subTest(currency=currency):
+                result, mock_request = self._call_refund(
+                    {'amountInCents': 500, 'currency': currency}, self._stub_original())
+                self.assertIn('company currency', result['error']['message'])
+                mock_request.assert_not_called()
 
     def test_rejects_refund_of_a_lightning_sale(self):
         original = self._stub_original(rail='bitcoin', amount=10.0)
@@ -640,13 +649,13 @@ class TestMusqetCreateRefund(TransactionCase):
 
     def test_accepts_a_reference_at_the_length_limit(self):
         result, mock_request = self._call_refund(
-            {'amountInCents': 500, 'reference': 'r' * 255}, self._stub_original())
+            {'amountInCents': 500, 'reference': 'r' * MUSQET_REFERENCE_MAX_LENGTH}, self._stub_original())
         self.assertNotIn('error', result)
-        self.assertEqual(mock_request.mock_calls[0].kwargs['json']['reference'], 'r' * 255)
+        self.assertEqual(mock_request.mock_calls[0].kwargs['json']['reference'], 'r' * MUSQET_REFERENCE_MAX_LENGTH)
 
     def test_rejects_a_missing_or_invalid_reference(self):
         original = self._stub_original(amount=10.0)
-        for reference in (None, '', {'nested': 'object'}, 'x' * 256):
+        for reference in (None, '', {'nested': 'object'}, 'x' * (MUSQET_REFERENCE_MAX_LENGTH + 1)):
             with self.subTest(reference=reference):
                 result, mock_request = self._call_refund(
                     {'amountInCents': 500, 'reference': reference}, original)
