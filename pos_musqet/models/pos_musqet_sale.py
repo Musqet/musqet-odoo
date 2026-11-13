@@ -23,8 +23,8 @@ _logger = logging.getLogger(__name__)
 # is started (pos.musqet.sale._musqet_sale_to_resume). An order normally has at most one: the
 # terminal takes one command at a time.
 MUSQET_SALE_REREAD_LIMIT = 5
-# A pending sale older than this that Musqet still can't settle no longer blocks a new sale
-# of its order: Musqet times a sale out after about five minutes.
+# A pending sale older than this that Musqet answers 404 for no longer blocks a new sale of
+# its order: Musqet times a sale out after about five minutes, so it can't still be paid.
 MUSQET_SALE_STALE_AFTER = timedelta(minutes=15)
 # The first key of the advisory lock on starting a sale of an order (_musqet_try_lock_order);
 # the second is a hash of the company and order reference.
@@ -33,6 +33,12 @@ MUSQET_SALE_START_LOCK = 0x4D53
 # long: an order has a handful of payment lines.
 MUSQET_SETTLED_SALE_IDS_LIMIT = 100
 MUSQET_SALE_ID_MAX_LENGTH = 255
+
+
+def _is_not_found(reply):
+    """Whether ``reply`` (from musqet_get_sale) is Musqet's 404: it has no such sale."""
+    error = reply.get('error') if isinstance(reply, dict) else None
+    return isinstance(error, dict) and error.get('status_code') == 404
 
 
 class PosMusqetSale(models.Model):
@@ -126,14 +132,26 @@ class PosMusqetSale(models.Model):
         page refresh forgets the sale it was waiting on, yet the customer can still pay it
         on the terminal. A retry must not send a second sale for the same payment. So the
         order's open sales (_musqet_open_sales_of) are read from Musqet first if still
-        pending, then:
+        pending, newest first, then:
 
-        1. one still pending on another method, or for another amount, refuses the request:
-           it may still be paid, so it has to end first (cancel it, or let it time out);
+        1. one still pending on another method, or for another amount or currency, refuses
+           the request: it may still be paid, so it has to end first (cancel it, or let it
+           time out);
         2. one on ``method`` for this amount and ``currency`` is resumed, a pending one before
            a done one: the POS polls it, and settles the line with it once Musqet reports it
            complete;
         3. otherwise a new sale is sent, as when a done sale was for another amount.
+
+        A pending sale is left out only when this request's read of it got a definite answer
+        that Musqet no longer has it (404 NOT_FOUND) and it is older than
+        MUSQET_SALE_STALE_AFTER, so it can't still be paid on the terminal (a recent one may
+        be a sale of the business the API key belonged to before it was changed). A read
+        that fails any other way, or a sale past the read limit, still counts as pending.
+
+        ``settled_sale_ids`` are the saleIds on the order's payment lines, which the POS
+        sends. It comes from the browser, so it may only leave out a sale done after the reads
+        (one it says is on a line), never a pending one: that would switch off the refusal
+        above.
 
         Requests to start a sale of one order are decided one at a time: a second one while
         the first is still being decided (and sent) is refused. The lock lasts until the
@@ -142,20 +160,24 @@ class PosMusqetSale(models.Model):
         the lock just after (a window of milliseconds) still misses the first sale's record;
         the terminal's own 409 CONFLICT stops it on the same terminal.
         """
-        if not self._musqet_try_lock_order(method._musqet_company(), reference):
+        company = method._musqet_company()
+        if not self._musqet_try_lock_order(company, reference):
             return self.browse(), _(
                 "A Musqet payment for this order is already being started. Wait for it, then "
                 "try again.")
-        open_sales = self._musqet_open_sales_of(method._musqet_company(), reference, settled_sale_ids)
-        for sale in open_sales.filtered(lambda sale: sale.state == 'pending')[:MUSQET_SALE_REREAD_LIMIT]:
-            sale.payment_method_id.musqet_get_sale(sale.sale_id)
-        # Still pending after the read: Musqet can't be reached, or hasn't settled it. Only a
-        # recent one may still be paid; Musqet times a sale out after about five minutes, so
-        # an older one that still reads as pending is one Musqet can't be asked about (gone,
-        # or its method misconfigured), and must not block the order for good.
+        open_sales = self._musqet_open_sales_of(company, reference)
+        to_read = open_sales.filtered(lambda sale: sale.state == 'pending').sorted('id', reverse=True)
         cutoff = fields.Datetime.now() - MUSQET_SALE_STALE_AFTER
+        gone = self.browse()
+        for sale in to_read[:MUSQET_SALE_REREAD_LIMIT]:
+            reply = sale.payment_method_id.musqet_get_sale(sale.sale_id)
+            if sale.create_date < cutoff and _is_not_found(reply):
+                gone |= sale
+        # After the reads: a sale the POS has on a line may only now read as done.
+        settled = self._musqet_settled_sale_ids(settled_sale_ids)
         open_sales = open_sales.filtered(
-            lambda sale: sale.state == 'done' or (sale.state == 'pending' and sale.create_date > cutoff))
+            lambda sale: sale.state != 'failed' and not (sale.state == 'done' and sale.sale_id in settled)
+        ) - gone
 
         def is_repeat(sale):
             return (sale.payment_method_id == method and sale.amount_minor == amount
@@ -169,6 +191,11 @@ class PosMusqetSale(models.Model):
         return (pending.filtered(is_repeat) or open_sales.filtered(is_repeat))[:1], None
 
     @api.model
+    def _musqet_order_lock_key(self, company, reference):
+        """The second key of the advisory lock on starting a sale of order ``reference``."""
+        return '%s:%s' % (company.id, reference)
+
+    @api.model
     def _musqet_try_lock_order(self, company, reference):
         """Take the lock on starting a sale of order ``reference`` in ``company``, if it is free.
 
@@ -178,30 +205,30 @@ class PosMusqetSale(models.Model):
         """
         self.env.cr.execute(SQL(
             'SELECT pg_try_advisory_xact_lock(%s, hashtext(%s))',
-            MUSQET_SALE_START_LOCK, '%s:%s' % (company.id, reference)))
+            MUSQET_SALE_START_LOCK, self._musqet_order_lock_key(company, reference)))
         return self.env.cr.fetchone()[0]
 
     @api.model
-    def _musqet_open_sales_of(self, company, reference, settled_sale_ids):
+    def _musqet_settled_sale_ids(self, settled_sale_ids):
+        """The usable saleIds of ``settled_sale_ids`` (from the POS), as a set."""
+        if not isinstance(settled_sale_ids, (list, tuple)):
+            return set()
+        return {
+            sale_id for sale_id in settled_sale_ids[:MUSQET_SETTLED_SALE_IDS_LIMIT]
+            if isinstance(sale_id, str) and len(sale_id) <= MUSQET_SALE_ID_MAX_LENGTH
+        }
+
+    @api.model
+    def _musqet_open_sales_of(self, company, reference):
         """The sales of order ``reference`` in ``company`` that a new sale may repeat.
 
         Those Musqet hasn't failed, on a method that is still a Musqet one (a record of any
-        other can't be read), and not already on a payment line: neither one of
-        ``settled_sale_ids`` (the saleIds on the order's lines, which the POS sends: it comes
-        from the browser, so it can only leave sales out, never refuse more) nor a synced
-        payment with its (method, saleId).
+        other can't be read), and not on a synced payment with their (method, saleId).
         """
-        if not isinstance(settled_sale_ids, (list, tuple)):
-            settled_sale_ids = []
-        settled = [
-            sale_id for sale_id in settled_sale_ids[:MUSQET_SETTLED_SALE_IDS_LIMIT]
-            if isinstance(sale_id, str) and len(sale_id) <= MUSQET_SALE_ID_MAX_LENGTH
-        ]
         sales = self.sudo().search([
             ('company_id', '=', company.id),
             ('reference', '=', reference),
             ('state', '!=', 'failed'),
-            ('sale_id', 'not in', settled),
             ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
         ], order='id')
         on_lines = {
@@ -209,8 +236,7 @@ class PosMusqetSale(models.Model):
             for payment in self.env['pos.payment'].sudo().search(sale_key_domain(
                 'transaction_id', sales.mapped('sale_id'), sales.payment_method_id))
         } if sales else set()
-        return sales.filtered(
-            lambda sale: (sale.payment_method_id.id, sale.sale_id) not in on_lines)
+        return sales.filtered(lambda sale: (sale.payment_method_id.id, sale.sale_id) not in on_lines)
 
     def _musqet_claim_for_refund(self):
         """Make refunds of this sale decide one after the other, each seeing the last.
