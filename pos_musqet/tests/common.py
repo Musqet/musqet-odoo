@@ -74,6 +74,20 @@ def record_refund(env, method, sale_id, original_sale_id='sale-orig-1', amount_m
     })
 
 
+def record_sale(env, method, sale_id, amount_minor=1000, rail='card', state='done', **overrides):
+    """Create a pos.musqet.sale on ``method`` (in its company and currency), done by default."""
+    return env['pos.musqet.sale'].create({
+        'company_id': method.company_id.id,
+        'payment_method_id': method.id,
+        'sale_id': sale_id,
+        'amount_minor': amount_minor,
+        'currency': method.company_id.currency_id.name,
+        'rail': rail,
+        'state': state,
+        **overrides,
+    })
+
+
 def load_migration(version, name):
     """Load a migration script, e.g. load_migration('19.0.1.1.0', 'pre-migration')."""
     # The directory name has dots and the file a hyphen, so it can't be imported by name.

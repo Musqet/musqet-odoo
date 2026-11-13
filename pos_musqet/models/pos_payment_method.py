@@ -490,7 +490,35 @@ class PosPaymentMethod(models.Model):
         # Write it now, not at commit: a serialisation failure after the POST would make
         # Odoo retry the request and start the sale a second time.
         self.env.flush_all()
-        return self._musqet_request('POST', '/terminal/sales', payload=outgoing)
+        response = self._musqet_request('POST', '/terminal/sales', payload=outgoing)
+        self._musqet_record_sale(response, amount, currency, reference)
+        return response
+
+    def _musqet_record_sale(self, response, amount, currency, reference):
+        """Record a sale Musqet accepted, so its settle can be checked against Musqet's word."""
+        # An {error} response carries no saleId, so nothing is recorded for it.
+        sale_id = response.get('saleId') if isinstance(response, dict) else None
+        if not sale_id:
+            return
+        # In a savepoint, and never raised: the terminal is already taking the payment, so the
+        # POS must still get the saleId to poll it. Without a record the sale can't be refunded
+        # here, and its synced payment shows as Not verified.
+        try:
+            with self.env.cr.savepoint():
+                # Pending: Musqet has only accepted the sale. A status read or a signed
+                # webhook settles it (_musqet_sync_records).
+                self.env['pos.musqet.sale'].sudo().create({
+                    'company_id': self._musqet_company().id,
+                    'payment_method_id': self.id,
+                    'sale_id': str(sale_id),
+                    'reference': reference,
+                    'amount_minor': amount,
+                    'currency': currency,
+                })
+        except Exception:
+            _logger.exception(
+                "Musqet accepted sale %s (reference %s, %s minor units) but Odoo could not "
+                "record it", sale_id, reference, amount)
 
     @api.model
     def _musqet_parse_amount(self, payload):
@@ -526,44 +554,68 @@ class PosPaymentMethod(models.Model):
         return fields_out
 
     def _musqet_refundable_original(self, original_payment_id, currency):
-        """Re-read the claimed original payment and check it may be refunded here.
+        """Find the sale record of the claimed original payment and check it may be refunded.
 
-        Returns ``(original, None)`` for a card-settled Musqet payment of this company in
-        ``currency`` (the company currency), else ``(None, {error})``. The id is UNTRUSTED:
-        never take the browser's word for the payment. sudo() reads across the cashier's
-        restrictions; these checks, not the ORM record rules, authorise the refund.
+        Returns ``(original, None)``, where ``original`` is the pos.musqet.sale of a card sale
+        Musqet reported complete, of this company, in ``currency`` (the company currency), else
+        ``(None, {error})``. The id is UNTRUSTED: never take the browser's word for the
+        payment. The payment only names the sale (its saleId); the amount, rail and currency
+        come from the sale record, which only Musqet's own replies settle. sudo() reads across
+        the cashier's restrictions; these checks, not the ORM record rules, authorise the
+        refund.
         """
         Payment = self.env['pos.payment'].sudo()
         try:
-            original = Payment.browse(int(original_payment_id)).exists()
+            payment = Payment.browse(int(original_payment_id)).exists()
         except (TypeError, ValueError):
-            original = Payment
-        if not original:
+            payment = Payment
+        if not payment:
             return None, {'error': {'message': _("The original payment to refund could not be found.")}}
         # Same company as the method driving the refund (defence-in-depth over the API's own
         # merchant scoping).
-        if original.company_id != self._musqet_company():
+        company = self._musqet_company()
+        if payment.company_id != company:
             return None, {'error': {'message': _("This payment cannot be refunded here.")}}
+        card_only = {'error': {'message': _(
+            "Only card payments taken on a Musqet terminal can be refunded automatically.")}}
+        if payment.payment_method_id.use_payment_terminal != 'musqet' or not payment.transaction_id:
+            return None, card_only
+        original = self._musqet_settled_sale(company, payment.transaction_id)
+        if not original:
+            return None, {'error': {'message': _(
+                "Musqet has not confirmed this sale, so it cannot be refunded here.")}}
         # Card-settled Musqet sale only: the terminal can't reverse Lightning and the API
         # won't refuse the attempt for us (Musqet/musqet#2094).
-        # A settled Musqet payment always carries its saleId: the refund records key on it.
-        if (original.payment_method_id.use_payment_terminal != 'musqet'
-                or original.musqet_rail != 'card' or not original.transaction_id):
-            return None, {'error': {'message': _(
-                "Only card payments taken on a Musqet terminal can be refunded automatically.")}}
+        if original.rail != 'card':
+            return None, card_only
         # The over-refund cap compares minor units, so the original must be in the refund's
         # currency, or the exponents could differ and the cap would compare mismatched scales.
-        if original.currency_id.name != currency:
+        if original.currency != currency:
             return None, {'error': {'message': _("The refund currency does not match the original payment.")}}
         return original, None
+
+    def _musqet_settled_sale(self, company, sale_id):
+        """The done sale record of ``sale_id`` in ``company``, or an empty recordset.
+
+        A record still pending (its result never read back, say the POS closed mid-sale) is
+        read from Musqet first. One that can't be read stays pending and can't be refunded.
+        """
+        sale = self.env['pos.musqet.sale'].sudo().search([
+            ('company_id', '=', company.id),
+            ('sale_id', '=', sale_id),
+            ('state', '!=', 'failed'),
+        ], order='id', limit=1)
+        if sale.state == 'pending' and sale.payment_method_id.use_payment_terminal == 'musqet':
+            sale.payment_method_id.musqet_get_sale(sale.sale_id)
+        return sale.filtered(lambda record: record.state == 'done')
 
     def _musqet_claim_original_sale(self, original):
         """Make refunds of the original sale decide one after the other, each seeing the last.
 
-        Every refund decision updates the payment rows carrying the original's saleId (to the
-        same value), the same key the cap counts by, so two refunds naming different rows of
-        one sale still meet. A second decision on the same sale waits for the first
-        transaction to end. If the first one committed, the update fails with a serialisation
+        Every refund decision updates the original's sale record (to the same value), the
+        record the cap starts from, so two refunds naming different payment rows of one sale
+        still meet. A second decision on the same sale waits for the first transaction to
+        end. If the first one committed, the update fails with a serialisation
         error: Odoo runs a request in REPEATABLE READ, so its snapshot may predate the first
         refund's record. Odoo then retries the whole request with a fresh snapshot that
         includes the record. A lock alone would not do: the waiting transaction would keep its
@@ -571,13 +623,11 @@ class PosPaymentMethod(models.Model):
         musqet_create_refund flushes every pending write before it sends the refund.
 
         The row lock lasts until commit, so it spans the call to Musqet (up to
-        MUSQET_TIMEOUT): anything else writing those payment rows, such as a session close,
-        waits that long or is retried.
+        MUSQET_TIMEOUT). Only the server writes sale records, so nothing else waits on it but
+        another refund of the sale, or a status read of it.
         """
         self.env.cr.execute(SQL(
-            'UPDATE pos_payment SET write_date = write_date'
-            ' WHERE company_id = %s AND transaction_id = %s',
-            original.company_id.id, original.transaction_id))
+            'UPDATE pos_musqet_sale SET write_date = write_date WHERE id = %s', original.id))
 
     def _musqet_reread_pending_refunds(self, original):
         """Ask Musqet about the sale's oldest pending refunds, so failed ones stop counting.
@@ -598,10 +648,10 @@ class PosPaymentMethod(models.Model):
             refund.payment_method_id.musqet_get_sale(refund.sale_id)
 
     def _musqet_original_refunds_domain(self, original):
-        """The domain of the refund records of ``original``: its company and saleId."""
+        """The domain of the refund records of the ``original`` sale: its company and saleId."""
         return [
             ('company_id', '=', original.company_id.id),
-            ('original_sale_id', '=', original.transaction_id),
+            ('original_sale_id', '=', original.sale_id),
         ]
 
     @api.model
@@ -660,7 +710,7 @@ class PosPaymentMethod(models.Model):
         counting = all_recorded.filtered(lambda refund: refund.state != 'failed')
         # Cumulative cap: the Musqet API enforces no limit across refunds (Musqet/musqet#2094),
         # so cap against what is left after every refund already sent for this sale.
-        captured = minor_units(original.amount, original.currency_id)
+        captured = original.amount_minor
         already_refunded = sum(counting.mapped('amount_minor')) + sum(
             abs(minor_units(payment.amount, payment.currency_id))
             for payment in unrecorded_payments)
@@ -693,7 +743,7 @@ class PosPaymentMethod(models.Model):
         recorded_keys = {(refund.payment_method_id.id, refund.sale_id) for refund in recorded}
         return [
             payment for payment in self.env['pos.payment'].sudo().search([
-                ('musqet_refund_of', '=', original.transaction_id),
+                ('musqet_refund_of', '=', original.sale_id),
                 ('company_id', '=', original.company_id.id),
                 # Only a settled Musqet refund (it has a saleId) can be a refund of a Musqet
                 # sale, as in the backfill and the link hook.
@@ -718,7 +768,7 @@ class PosPaymentMethod(models.Model):
                 refund = self.env['pos.musqet.refund'].sudo().create({
                     'company_id': original.company_id.id,
                     'payment_method_id': self.id,
-                    'original_sale_id': original.transaction_id,
+                    'original_sale_id': original.sale_id,
                     'sale_id': str(sale_id),
                     'reference': reference,
                     'amount_minor': amount,
@@ -728,7 +778,7 @@ class PosPaymentMethod(models.Model):
             # Log enough to reconcile it by hand.
             _logger.exception(
                 "Musqet accepted refund %s (reference %s, %s minor units, of sale %s) but "
-                "Odoo could not record it", sale_id, reference, amount, original.transaction_id)
+                "Odoo could not record it", sale_id, reference, amount, original.sale_id)
 
     def musqet_create_refund(self, payload, original_payment_id):
         """POST /terminal/sales with type:"refund" — refund a card-settled Musqet sale.
@@ -738,8 +788,9 @@ class PosPaymentMethod(models.Model):
         THIS method — not the browser — is the authority for a refund.
 
         ``original_payment_id`` (the Odoo id of the original pos.payment, supplied by the POS)
-        is UNTRUSTED, like the rest of the payload. We re-read that payment server-side and
-        refuse the refund unless it is a card-settled Musqet payment of this company, in the
+        is UNTRUSTED, like the rest of the payload. We re-read that payment server-side for
+        its saleId only, and refuse the refund unless the server's record of that sale
+        (pos.musqet.sale) shows a card sale Musqet reported complete, of this company, in the
         company currency, whose captured amount covers the request.
 
         type, mode and serial are set on the server; the currency must be the company
@@ -815,25 +866,27 @@ class PosPaymentMethod(models.Model):
     def musqet_get_sale(self, sale_id):
         """GET /terminal/sales/:id — poll a sale's status.
 
-        Returns ``{status, updatedAt, metadata, ...}`` or ``{error}``. Also moves a recorded
-        refund with this saleId to the state Musqet reports (_musqet_sync_refund_state), which
-        the over-refund cap relies on.
+        Returns ``{status, updatedAt, metadata, ...}`` or ``{error}``. Also settles this
+        method's recorded sale or refund with this saleId as Musqet reports
+        (_musqet_sync_records), which the settle check and the over-refund cap rely on.
         """
         response = self._musqet_request(
             'GET', '/terminal/sales/%s' % urllib.parse.quote(str(sale_id), safe=''))
-        self._musqet_sync_refund_state(sale_id, response)
+        self._musqet_sync_records(sale_id, response)
         return response
 
-    def _musqet_sync_refund_state(self, sale_id, response):
-        """Move this method's recorded refund ``sale_id`` to the state ``response`` reports.
+    def _musqet_sync_records(self, sale_id, response):
+        """Settle this method's recorded sale and refund ``sale_id`` as ``response`` reports.
 
-        An {error} response has no top-level status, so it leaves the record as it was.
+        ``response`` must be Musqet's own word: a status read, or a webhook whose signature
+        was verified. An {error} response has no top-level status, so it leaves the records
+        as they were.
         """
-        if isinstance(response, dict):
-            self.env['pos.musqet.refund'].sudo().search([
-                ('payment_method_id', '=', self.id),
-                ('sale_id', '=', str(sale_id)),
-            ])._musqet_apply_status(response.get('status'))
+        if not isinstance(response, dict) or not sale_id:
+            return
+        domain = [('payment_method_id', '=', self.id), ('sale_id', '=', str(sale_id))]
+        self.env['pos.musqet.sale'].sudo().search(domain)._musqet_apply_response(response)
+        self.env['pos.musqet.refund'].sudo().search(domain)._musqet_apply_status(response.get('status'))
 
     def musqet_cancel_sale(self, sale_id):
         """POST /terminal/sales/:id/cancel — request cancellation of an in-flight sale.

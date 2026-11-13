@@ -85,6 +85,7 @@ class PosMusqetRefund(models.Model):
         pending = self.filtered(lambda refund: refund.state == 'pending')
         if status == MUSQET_SUCCESS_STATUS:
             pending.write({'state': 'done'})
+            self.env['pos.payment']._musqet_check_settles_of(pending)
         elif status in MUSQET_FAILURE_STATUSES:
             pending.write({'state': 'failed'})
 

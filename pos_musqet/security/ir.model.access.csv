@@ -1,2 +1,3 @@
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_pos_musqet_refund_manager,pos.musqet.refund manager,model_pos_musqet_refund,point_of_sale.group_pos_manager,1,0,0,0
+access_pos_musqet_sale_manager,pos.musqet.sale manager,model_pos_musqet_sale,point_of_sale.group_pos_manager,1,0,0,0

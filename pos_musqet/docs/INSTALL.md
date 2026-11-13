@@ -208,10 +208,22 @@ and make your **company currency match it** (and keep each POS on the company cu
    records the transaction. Validate the order and check the receipt:
    - A **card** sale: the terminal prints its own card slip.
    - A **Lightning** sale: the Odoo receipt shows a sats line.
+
+   Odoo keeps its own record of each sale it starts on the terminal, settled only from
+   what Musqet reports: the amount captured, the currency and the rail. These are under
+   **Point of Sale → Orders → Musqet Sales** (managers only). When the order syncs,
+   Odoo checks each Musqet payment line against that record and shows the result in the
+   order's **Payments** tab: *Verified* if Musqet reported that sale or refund complete
+   for that amount, *Not verified* if not. To find the Not verified ones, filter
+   **Point of Sale → Orders → Payments** by **Musqet: Not Verified**, and check each in
+   the Musqet app. The server log also names each one. Payment lines synced before this
+   check existed are left blank.
 5. **Refund test:** from the order, create a Refund and pay it with Musqet. A
    card-settled original refunds back to the card through the terminal. A
    Lightning-settled original shows a *manual refund* message and makes **no** API
-   call (Lightning can't be reversed on the device).
+   call (Lightning can't be reversed on the device). Odoo refunds only a sale Musqet
+   reported complete, and caps the refund at the amount Musqet captured, on the rail
+   Musqet reported, whatever the original payment line says.
 
    Odoo records every refund Musqet accepts, straight away (except in the two cases
    below). So the refunds of one sale can't add up to more than the sale, even before
@@ -328,13 +340,15 @@ Then run the smoke test in section 4 with the test credentials.
   access to the database or compromise of the Odoo host.
   Visibility is also restricted to ERP managers. An external-secrets store is a
   possible later hardening step.
-- **The refund cap trusts payment lines as the POS synced them.** Refunds made through
-  Odoo are counted from records only the server writes. Two inputs still come from
-  payment lines the POS writes: the original sale's line (amount, Musqet sale id, rail)
-  and any synced Musqet refund payment that has no record, which counts by its own
-  amount and link. The second can only tighten the cap: a bad line can block a sale's
-  refunds, never release more money. The pilot assumes trusted cashiers; checking each
-  settled sale with Musqet is planned.
+- **The POS still marks an order paid on the browser's word.** Odoo flags a Musqet
+  payment line it can't match to a sale or refund Musqet reported complete (*Not
+  verified*, see §4), but it does not refuse the order: refusing would leave a customer
+  who has paid with an order that can't be saved. Check the flagged lines in the Musqet
+  app.
+- **Sales made before the upgrade to 19.0.1.3.0 are taken as the POS synced them.** The
+  upgrade records each one from its payment line (amount, currency, rail), so it can
+  still be refunded. Refunds Odoo has no record of (see §4) still count by their synced
+  payment line, which can only tighten the cap, never release more money.
 - **No automated JavaScript test harness in-repo.** The Python backend has unit tests
   (`pos_musqet/tests/`); the POS frontend logic (polling, in-flight lock, webhook/poll
   race) is verified by the live smoke test in section 4, not by automated JS tests. A
