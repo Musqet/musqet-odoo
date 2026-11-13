@@ -474,27 +474,38 @@ class PosPaymentMethod(models.Model):
         reference = payload.get('reference')
         if not self._musqet_valid_reference(reference):
             return {'error': {'message': _("The sale reference is invalid.")}}
-        # The optional fields go first so the server-set fields after them always win, even
-        # if the helper's allow-list ever grows.
+        response = self._musqet_send_terminal_command(
+            payload, 'sale', mode, amount, currency, reference)
+        self._musqet_record_sale(response, amount, currency, reference)
+        return response
+
+    def _musqet_send_terminal_command(self, payload, kind, mode, amount, currency, reference):
+        """POST a sale or refund (``kind``) to this method's terminal; return Musqet's reply.
+
+        The request is rebuilt from known fields only: the cosmetic ones from ``payload``
+        (type-checked), then the ones the caller validated and the server sets (serial from
+        this method's record), so the server-set fields always win, even if the cosmetic
+        allow-list ever grows.
+
+        Every pending write, this method's own and the caller's, is flushed before anything
+        is sent: a serialisation failure has to surface while nothing has been sent, never
+        after, or Odoo's retry would send the sale or refund a second time.
+        """
         outgoing = {
             **self._musqet_optional_terminal_fields(payload),
             'serial': self.musqet_terminal_serial,
-            'type': 'sale',
+            'type': kind,
             'mode': mode,
             'amountInCents': amount,
             'currency': currency,
             'reference': reference,
         }
-        # Drop any buffered webhook result from a previous sale so a late notification for
+        # Drop any buffered webhook result from a previous command so a late notification for
         # it can't be mistaken for this one (mirrors pos_adyen). Written with sudo() because
         # the field is ERP-manager-restricted but a plain cashier drives the terminal.
         self.sudo().musqet_latest_response = ''
-        # Write it now, not at commit: a serialisation failure after the POST would make
-        # Odoo retry the request and start the sale a second time.
         self.env.flush_all()
-        response = self._musqet_request('POST', '/terminal/sales', payload=outgoing)
-        self._musqet_record_sale(response, amount, currency, reference)
-        return response
+        return self._musqet_request('POST', '/terminal/sales', payload=outgoing)
 
     def _musqet_record_sale(self, response, amount, currency, reference):
         """Record a sale Musqet accepted, so its settle can be checked against Musqet's word.
@@ -834,26 +845,12 @@ class PosPaymentMethod(models.Model):
         error = self._musqet_refund_refusal(original, amount, reference)
         if error:
             return error
-        # Forward only known fields and FORCE the refund-defining ones server-side. serial comes
-        # from this method's record; currency is the company currency (the payload may only
-        # repeat it).
-        # The optional fields go first so the server-set fields after them always win.
-        outgoing = {
-            **self._musqet_optional_terminal_fields(payload),
-            'serial': self.musqet_terminal_serial,
-            'type': 'refund',
-            'mode': 'card',
-            'amountInCents': amount,
-            'currency': currency,
-            'reference': reference,
-        }
-        # Drop any buffered webhook result from a previous sale (mirrors musqet_create_sale).
-        self.sudo().musqet_latest_response = ''
-        # Every pending write (this one, and refund states moved by the re-reads) must reach
-        # the database now: a serialisation failure has to surface while nothing has been
-        # sent, never after, or Odoo's retry would send the refund a second time.
-        self.env.flush_all()
-        response = self._musqet_request('POST', '/terminal/sales', payload=outgoing)
+        # FORCE the refund-defining fields server-side: mode card (the terminal can't reverse
+        # Lightning); currency is the company currency (the payload may only repeat it). The
+        # send flushes every pending write first, the refund states moved by the re-reads
+        # included.
+        response = self._musqet_send_terminal_command(
+            payload, 'refund', 'card', amount, currency, reference)
         self._musqet_record_refund(response, original, amount, reference)
         return response
 
