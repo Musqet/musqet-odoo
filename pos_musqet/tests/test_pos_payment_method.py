@@ -105,19 +105,33 @@ class TestMusqetBaseUrl(TransactionCase):
         self.assertIn('not valid', error('https://[::1'))
         self.assertIn('not valid', error('https://api.musqet.tech:99999/'))
 
+    def test_rejects_urls_the_http_client_would_send_elsewhere(self):
+        # urlparse reads the host of these as api.musqet.tech; the HTTP client would not.
+        error = self.env['pos.payment.method']._musqet_base_url_error
+        for url in (
+            'https://evil.example\\@api.musqet.tech/api/v1',
+            'https://evil.example\\api.musqet.tech/api/v1',
+            'https://user:pass@api.musqet.tech/api/v1',
+            'https://evil.example@api.musqet.tech/api/v1',
+            'https://api.musqet.tech /api/v1',
+            'https://api.musqet.tech\t/api/v1',
+            'https://api.musqet.tech/api/v1\n',
+        ):
+            self.assertIn('not valid', error(url), msg=url)
+
     def test_request_rechecks_a_base_url_written_behind_the_orm(self):
         # A direct database write skips the save-time constraint; the bearer token must
         # still never go to an off-domain host.
         method = _create_musqet_method(self, 'MSQ-URL-001')
         self.env.flush_all()
-        self.env.cr.execute(
-            'UPDATE pos_payment_method SET musqet_base_url = %s WHERE id = %s',
-            ('https://attacker.example/api', method.id))
-        method.invalidate_recordset()
-        with patch.object(pos_payment_method.requests, 'request') as mock_request:
-            result = method.musqet_get_sale('sale-123')
-        mock_request.assert_not_called()
-        self.assertIn('musqet.tech', result['error']['message'])
+        for url in ('https://attacker.example/api', 'https://attacker.example\\@api.musqet.tech/api'):
+            self.env.cr.execute(
+                'UPDATE pos_payment_method SET musqet_base_url = %s WHERE id = %s', (url, method.id))
+            method.invalidate_recordset()
+            with patch.object(pos_payment_method.requests, 'request') as mock_request:
+                result = method.musqet_get_sale('sale-123')
+            mock_request.assert_not_called()
+            self.assertIn('error', result, msg=url)
 
     def test_rejects_non_https(self):
         with self.assertRaises(ValidationError):

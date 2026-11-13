@@ -9,6 +9,7 @@ import time
 import urllib.parse
 
 import requests
+from urllib3.util import parse_url
 
 from odoo import fields, models, api, _
 from odoo.exceptions import AccessDenied, UserError, ValidationError
@@ -231,18 +232,23 @@ class PosPaymentMethod(models.Model):
         """
         if not url:
             return None
+        invalid = _("The Musqet API URL is not valid.")
+        # urlparse (used below) and urllib3 (used by requests to send the token) split some
+        # URLs differently: urllib3 also ends the host at a backslash, so
+        # "https://evil.example\@api.musqet.tech" reads as api.musqet.tech here but is sent
+        # to evil.example. Refuse the characters behind such splits, and credentials.
+        if any(char in '\\@' or char.isspace() or not char.isprintable() for char in url):
+            return invalid
         try:
             parsed = urllib.parse.urlparse(url)
+            parsed.port  # noqa: B018 -- read to raise on a non-numeric or out-of-range port
+            requests_host = (parse_url(url).host or '').lower()
         except ValueError:
-            # e.g. an unclosed IPv6 bracket ("https://[::1").
-            return _("The Musqet API URL is not valid.")
+            # e.g. an unclosed IPv6 bracket ("https://[::1") or a bad port.
+            return invalid
         if parsed.scheme != 'https':
             return _("The Musqet API URL must use https://.")
         host = (parsed.hostname or '').lower()
-        try:
-            parsed.port  # raises on a non-numeric or out-of-range port
-        except ValueError:
-            return _("The Musqet API URL is not valid.")
         if not host:
             return _("The Musqet API URL must include a host.")
         # Reject IP-literal hosts outright: covers the cloud metadata endpoint
@@ -253,6 +259,9 @@ class PosPaymentMethod(models.Model):
             pass
         else:
             return _("The Musqet API URL must be a domain name, not an IP address.")
+        # Whatever this check reads as the host must be the host requests connects to.
+        if requests_host != host:
+            return invalid
         # Reject obvious internal hostnames as a defence-in-depth layer.
         if host == 'localhost' or host.endswith(('.local', '.internal', '.lan', '.localdomain')):
             return _("The Musqet API URL must point to a public Musqet host, not an internal address.")
