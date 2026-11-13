@@ -7,8 +7,9 @@ be refunded: a refund reads the sale record, not the payment. The upgrade checks
 musqet_settle_check starts empty, until the line, its order's state or a line sharing its
 saleId changes (see pos.payment.musqet_settle_check).
 
-It also clears the order references the 19.0.1.2.0 upgrade guessed for refunds several paid
-lines share (see pos.musqet.refund._musqet_forget_shared_references).
+It also clears the order references the 19.0.1.2.0 upgrade guessed for refunds several linked
+refund lines carry, whatever their orders' state (see
+pos.musqet.refund._musqet_forget_shared_references).
 """
 from odoo import SUPERUSER_ID, api
 

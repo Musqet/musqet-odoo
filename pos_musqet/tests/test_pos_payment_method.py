@@ -1500,8 +1500,8 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         self.assertEqual({older.musqet_settle_check, newer.musqet_settle_check}, {'unverified'})
 
     def test_upgrade_clears_the_reference_of_a_shared_refund(self):
-        # The 19.0.1.2.0 backfill named one order for a refund saleId several paid lines
-        # carried; 19.0.1.3.0 clears it, and then none of those lines is Verified.
+        # The 19.0.1.2.0 backfill named one order for a refund saleId several linked lines
+        # carried, of any order state; 19.0.1.3.0 clears it, and then none of them is Verified.
         shared = self._record_refund('refund-shared', state='done')
         lines = self._payment(transaction_id='refund-shared') | self._payment(
             pos_order_id=self._order().id, transaction_id='refund-shared')
