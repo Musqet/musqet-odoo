@@ -28,6 +28,13 @@ const FAILURE_STATUSES = ["ERROR", "CANCELLED", "CANCELLED_REMOTE", "TIMED_OUT"]
 // Giving up cancels the sale on the terminal first, as the timeout does (_pollSale).
 const MAX_POLL_CONNECTION_FAILURES = 8;
 
+// Shown when Musqet can't confirm a cancel, so the sale may still be paid. A function so the
+// translation is looked up when shown, not at module load.
+const CANNOT_CANCEL_MESSAGE = () =>
+    _t(
+        "The Musqet payment could not be cancelled. Cancel it on the terminal, or wait for the customer to finish."
+    );
+
 // §4.7: at most one sale/refund in flight per physical terminal. The Musqet API itself
 // rejects a second command on the same (business, serial) with 409 CONFLICT while one is in
 // flight (Musqet/musqet#2094), and the §2 serial-uniqueness constraint stops two payment
@@ -40,11 +47,13 @@ export class PaymentMusqet extends PaymentInterface {
     setup() {
         super.setup(...arguments);
         // Per-paymentline bookkeeping, keyed by line uuid:
-        //   { cancelled, cancelRequested, saleId, created, ending, settled, resolve }
+        //   { cancelled, cancelRequested, saleId, created, ending, waitStart,
+        //     connectionFailures, settled, resolve }
         // cancelled/saleId let sendPaymentCancel()/close() stop an in-flight poll loop;
         // cancelRequested holds off settling while a cancel finds out how the sale ended;
         // created resolves to the saleId (or null) once the create round-trip returns;
         // ending is the cancel-and-read in flight (_endSale), shared by a cancel and a give-up;
+        // waitStart/connectionFailures are the poll loop's give-up counters (_pollSale);
         // settled makes the shared settler run exactly once across the poll loop and an
         // inbound webhook; resolve is the request promise both paths resolve through.
         this.pollState = {};
@@ -220,12 +229,11 @@ export class PaymentMusqet extends PaymentInterface {
             state.cancelRequested = false;
         }
         if (outcome.sale?.status !== SUCCESS_STATUS) {
-            this._showError(
-                _t(
-                    "The Musqet payment could not be cancelled. Cancel it on the terminal, or wait for the customer to finish."
-                )
-            );
+            this._showError(CANNOT_CANCEL_MESSAGE());
         }
+        // A new wait: the poll loop mustn't give up, and cancel again, straight after the
+        // cashier was told to wait.
+        state.waitStart = Date.now();
         // Keep waiting on the sale. (The core screen does this itself after a cancel button,
         // but leaves a deleted line "waitingCancel".) Not if it settled before the cancel
         // began: its status is already final.
@@ -388,11 +396,13 @@ export class PaymentMusqet extends PaymentInterface {
      * and will remove it) so a cancel — or a webhook that already settled — is observed here.
      */
     async _pollSale(saleId, line, state) {
-        const start = Date.now();
+        // When the current wait began: a cancel or give-up Musqet couldn't confirm starts a
+        // new one, so the loop doesn't cancel again straight away.
+        state.waitStart = Date.now();
         // Count consecutive failed status reads; any clean poll resets it. A sustained run
         // means we've lost contact with Odoo/the proxy (issue #8 — see
         // MAX_POLL_CONNECTION_FAILURES) and should stop rather than poll blind.
-        let connectionFailures = 0;
+        state.connectionFailures = 0;
         while (!state.cancelled && !state.settled) {
             if (state.cancelRequested) {
                 // A cancel is finding out how the sale ended; the core screen sets the line's
@@ -401,36 +411,12 @@ export class PaymentMusqet extends PaymentInterface {
                 await this._sleep(POLL_INTERVAL_MS);
                 continue;
             }
-            const timedOut = Date.now() - start >= POLL_TIMEOUT_MS;
-            if (timedOut || connectionFailures >= MAX_POLL_CONNECTION_FAILURES) {
-                // Out of time, or lost contact for several polls running (mirrors pos_adyen's
-                // _handleOdooConnectionFailure). The sale is still armed on the terminal, so
-                // cancel it before giving up: otherwise the customer could pay a sale the
-                // till has stopped waiting for, and a retry would charge them again.
-                const { sale } = await this._endSale(state);
-                if (state.cancelRequested || state.cancelled || state.settled) {
-                    // The cashier cancelled meanwhile, or a webhook settled the line: that
-                    // decides, and the loop picks it up.
-                    continue;
-                }
-                if (sale?.status === SUCCESS_STATUS) {
-                    // The customer paid before the cancel landed.
-                    this._finishSale(line, sale, state);
+            const timedOut = Date.now() - state.waitStart >= POLL_TIMEOUT_MS;
+            if (timedOut || state.connectionFailures >= MAX_POLL_CONNECTION_FAILURES) {
+                if (await this._giveUpSale(line, state, timedOut)) {
                     return;
                 }
-                // Ended, or Musqet couldn't be reached to cancel it: if the customer pays it
-                // anyway, a retry of the order resumes that sale (musqet_create_sale).
-                state.settled = true;
-                this._showError(
-                    timedOut
-                        ? this._statusErrorMessage("TIMED_OUT")
-                        : _t(
-                              "Lost connection to the Odoo server while waiting for the Musqet terminal. Please check the connection and try again."
-                          )
-                );
-                line.setPaymentStatus("retry");
-                state.resolve?.(false);
-                return;
+                continue;
             }
             // Poll first, then sleep, so a sale the terminal resolves immediately settles
             // without waiting a full interval up front.
@@ -449,7 +435,7 @@ export class PaymentMusqet extends PaymentInterface {
             // A single transient transport blip (proxy {error}) or RPC failure shouldn't kill
             // the sale — keep polling so a card payment that's still completing settles.
             if (sale && !sale.error) {
-                connectionFailures = 0;
+                state.connectionFailures = 0;
                 this._finishSale(line, sale, state);
                 if (state.settled) {
                     return;
@@ -457,7 +443,7 @@ export class PaymentMusqet extends PaymentInterface {
                 // PENDING / PROCESSING / anything unrecognised, or a cancel began during the
                 // round-trip → keep polling.
             } else {
-                connectionFailures++;
+                state.connectionFailures++;
             }
             await this._sleep(POLL_INTERVAL_MS);
         }
@@ -466,6 +452,54 @@ export class PaymentMusqet extends PaymentInterface {
             // back to "retry". The cancel path already ended the sale on the terminal.
             state.resolve?.(false);
         }
+    }
+
+    /**
+     * Stop waiting on the line's sale, out of time (``timedOut``) or after losing contact,
+     * and return whether the line was settled (else the poll loop carries on).
+     *
+     * The sale is still armed on the terminal, so it is cancelled first: otherwise the
+     * customer could pay a sale the till has stopped waiting for, and pay again by another
+     * means. The line is released only once Musqet confirms the sale ended. If the customer
+     * paid first, the line settles as paid. If Musqet can't confirm, the till keeps waiting
+     * (a new wait, so the loop doesn't cancel again at once), as a refused cashier cancel
+     * does; Musqet times the sale out in the end. Except when contact with Odoo is lost: the
+     * till can't wait on a server it can't reach, so it releases the line, warning that the
+     * sale may still be live.
+     */
+    async _giveUpSale(line, state, timedOut) {
+        const { ended, sale } = await this._endSale(state);
+        if (state.cancelRequested || state.cancelled || state.settled) {
+            // The cashier cancelled meanwhile, or a webhook settled the line: that decides,
+            // and the poll loop picks it up.
+            return false;
+        }
+        if (sale?.status === SUCCESS_STATUS) {
+            // The customer paid before the cancel landed.
+            this._finishSale(line, sale, state);
+            return true;
+        }
+        let message;
+        if (ended) {
+            message = timedOut
+                ? this._statusErrorMessage("TIMED_OUT")
+                : _t(
+                      "Lost connection to the Odoo server while waiting for the Musqet terminal. Please check the connection and try again."
+                  );
+        } else if (timedOut) {
+            this._showError(CANNOT_CANCEL_MESSAGE());
+            state.waitStart = Date.now();
+            return false;
+        } else {
+            message = _t(
+                "Lost connection to the Odoo server, and the Musqet payment could not be cancelled: it may still be live on the terminal. Cancel it there before taking another payment for this order."
+            );
+        }
+        state.settled = true;
+        this._showError(message);
+        line.setPaymentStatus("retry");
+        state.resolve?.(false);
+        return true;
     }
 
     /**

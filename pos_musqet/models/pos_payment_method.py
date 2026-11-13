@@ -722,9 +722,18 @@ class PosPaymentMethod(models.Model):
         response = self._musqet_request(
             'GET', '/terminal/sales/%s' % urllib.parse.quote(str(sale_id), safe=''))
         self._musqet_sync_records(sale_id, response)
+        return self._musqet_reply_about(sale_id, response, 'read')
+
+    def _musqet_reply_about(self, sale_id, response, action):
+        """``response`` for the POS, if it is about ``sale_id``; else an ``{error}``.
+
+        A reply naming another saleId (to a ``action`` of ``sale_id``: 'read' or 'cancel')
+        settles nothing (_musqet_sync_records), and must not reach the till either, which
+        would settle or release a line on it.
+        """
         if isinstance(response, dict) and 'error' not in response and not reply_is_for(sale_id, response):
-            _logger.warning("Musqet replied about sale %r to a read of sale %r",
-                            response.get('saleId'), sale_id)
+            _logger.warning("Musqet replied about sale %r to a %s of sale %r",
+                            response.get('saleId'), action, sale_id)
             return self._musqet_error(_("Musqet replied about a different sale."))
         return response
 
@@ -732,9 +741,9 @@ class PosPaymentMethod(models.Model):
         """Settle this method's recorded sale and refund ``sale_id`` as ``response`` reports.
 
         ``response`` must be Musqet's own word about this sale: the reply to a status read of
-        it (musqet_get_sale; a signed webhook only triggers one), or to a cancel of it. The reply carries its saleId
-        (the partner sale shape, Musqet/musqet#2094). Only a reply reply_is_for accepts is
-        applied.
+        it (musqet_get_sale; a signed webhook only triggers one), or to a cancel of it
+        (musqet_cancel_sale). The reply carries its saleId (the partner sale shape,
+        Musqet/musqet#2094). Only a reply reply_is_for accepts is applied.
         """
         if not sale_id or not reply_is_for(sale_id, response):
             return
@@ -759,7 +768,7 @@ class PosPaymentMethod(models.Model):
         response = self._musqet_request(
             'POST', '/terminal/sales/%s/cancel' % urllib.parse.quote(str(sale_id), safe=''))
         self._musqet_sync_records(sale_id, response)
-        return response
+        return self._musqet_reply_about(sale_id, response, 'cancel')
 
     # -- Webhook (async push) -------------------------------------------------
     # Used only on publicly-reachable deployments. The public controller verifies the HMAC,
