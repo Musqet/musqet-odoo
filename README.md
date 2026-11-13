@@ -48,8 +48,8 @@ Or do it by hand:
    Terminal Serial**, and add it to your POS.
 4. Open a POS session and ring a test sale on the Musqet method.
 
-⚠️ **Make your POS/company currency match the terminal's currency at Musqet** — the
-most common setup mistake.
+⚠️ **Make your company currency match your business currency at Musqet**, and keep
+each POS on the company currency. This is the most common setup mistake.
 
 ## Full documentation
 
