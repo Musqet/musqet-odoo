@@ -50,10 +50,10 @@ def make_pos_user(env, login, group='point_of_sale.group_pos_user', **values):
     })
 
 
-def musqet_response(sale_id, status='PENDING', status_code=200):
-    """A stubbed Musqet API response carrying a sale's id and status."""
+def musqet_response(sale_id, status='PENDING', status_code=200, **fields):
+    """A stubbed Musqet API response carrying a sale's id, status and any other ``fields``."""
     response = MagicMock(status_code=status_code)
-    response.json.return_value = {'saleId': sale_id, 'status': status}
+    response.json.return_value = {'saleId': sale_id, 'status': status, **fields}
     return response
 
 
@@ -70,6 +70,20 @@ def record_refund(env, method, sale_id, original_sale_id='sale-orig-1', amount_m
         'original_sale_id': original_sale_id,
         'sale_id': sale_id,
         'amount_minor': amount_minor,
+        **overrides,
+    })
+
+
+def record_sale(env, method, sale_id, amount_minor=1000, rail='card', state='done', **overrides):
+    """Create a pos.musqet.sale on ``method`` (in its company and currency), done by default."""
+    return env['pos.musqet.sale'].create({
+        'company_id': method.company_id.id,
+        'payment_method_id': method.id,
+        'sale_id': sale_id,
+        'amount_minor': amount_minor,
+        'currency': method.company_id.currency_id.name,
+        'rail': rail,
+        'state': state,
         **overrides,
     })
 

@@ -3,24 +3,9 @@ import logging
 
 from odoo import api, fields, models
 
+from .musqet_common import MUSQET_TERMINAL, minor_units, parse_minor_amount, sale_key_domain
+
 _logger = logging.getLogger(__name__)
-
-# The Musqet sale statuses (a refund uses the same ones) that end a sale; see
-# _musqet_apply_status for the refund state each leads to. Same lists as SUCCESS_STATUS and
-# FAILURE_STATUSES in static/src/app/payment_musqet.js.
-MUSQET_SUCCESS_STATUS = 'COMPLETE'
-MUSQET_FAILURE_STATUSES = ('ERROR', 'CANCELLED', 'CANCELLED_REMOTE', 'TIMED_OUT')
-
-
-def minor_units(amount, currency):
-    """``amount`` in whole minor units of ``currency`` (cents for GBP, yen for JPY)."""
-    # `is not None`, not `or 2`: a zero-decimal currency (JPY) has decimal_places == 0, and
-    # `0 or 2` would wrongly use 2, computing a cap 100x too loose. Mirrors the frontend's
-    # Number.isInteger() check, which also preserves 0.
-    decimals = currency.decimal_places
-    if decimals is None:
-        decimals = 2
-    return int(round(amount * (10 ** decimals)))
 
 
 class PosMusqetRefund(models.Model):
@@ -37,26 +22,19 @@ class PosMusqetRefund(models.Model):
     (_musqet_record_synced_refunds).
     """
     _name = 'pos.musqet.refund'
+    _inherit = ['pos.musqet.record']
     _description = 'Musqet Refund'
-    _order = 'id desc'
+    _musqet_kind = 'refund'
 
-    company_id = fields.Many2one('res.company', required=True, readonly=True, index=True)
-    payment_method_id = fields.Many2one(
-        'pos.payment.method', required=True, readonly=True, ondelete='restrict')
     original_sale_id = fields.Char(
         string="Original Musqet Sale", required=True, readonly=True, index=True,
         help="The Musqet saleId of the card sale this refund reverses.")
-    sale_id = fields.Char(
-        string="Musqet Refund Sale", required=True, readonly=True,
-        help="The Musqet saleId of the refund itself.")
-    reference = fields.Char(readonly=True, help="The refund order reference sent to Musqet.")
+    sale_id = fields.Char(string="Musqet Refund Sale", help="The Musqet saleId of the refund itself.")
+    reference = fields.Char(help="The refund order reference sent to Musqet.")
     amount_minor = fields.Integer(
-        string="Amount (minor units)", required=True, readonly=True,
-        help="The refunded amount in minor units of the company currency (cents).")
-    state = fields.Selection(
-        [('pending', "Pending"), ('done', "Done"), ('failed', "Failed")],
-        required=True, default='pending', readonly=True,
-        help="Pending and Done count against the original sale; Failed does not.")
+        help="The amount in minor units of the company currency (cents): the amount requested "
+             "while pending, the amount Musqet reports refunded once done.")
+    state = fields.Selection(help="Pending and Done count against the original sale; Failed does not.")
 
     _unique_sale = models.Constraint(
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet refund is already recorded.')
@@ -76,17 +54,49 @@ class PosMusqetRefund(models.Model):
         self.check_access('read')
         self.filtered(lambda refund: refund.state == 'pending').sudo().write({'state': 'failed'})
 
-    def _musqet_apply_status(self, status):
-        """Settle the pending refunds as a Musqet status says; other statuses leave them.
+    def _musqet_done_vals(self, response):
+        """A refund settles at the amount Musqet reports refunded.
 
-        Only a pending refund moves: a settled one keeps its state whatever a later read
-        says, and a refund already in the right state isn't rewritten on every poll.
+        A refund's status reply has the same shape as a sale's, the response shape of
+        Musqet's partner API (Musqet/musqet#2094).
         """
-        pending = self.filtered(lambda refund: refund.state == 'pending')
-        if status == MUSQET_SUCCESS_STATUS:
-            pending.write({'state': 'done'})
-        elif status in MUSQET_FAILURE_STATUSES:
-            pending.write({'state': 'failed'})
+        amount = parse_minor_amount(response.get('amountInCents'))
+        return None if amount is None else {'amount_minor': amount}
+
+    @api.model
+    def _musqet_forget_shared_references(self):
+        """Clear the reference of each refund record that several linked refund lines carry.
+
+        For the upgrade to 19.0.1.3.0 (see its post-migration). The 19.0.1.2.0 backfill took
+        the reference of an arbitrary one of the linked payments, so for a saleId several of
+        them shared, it named one of their orders arbitrarily, and the settle check would take
+        that order's line as the genuine one (even a copy on a paid order, with the genuine
+        line on an unpaid one). A record is cleared when at least two linked refund lines, of
+        any order state, carry it and its reference is one of their orders. With no
+        reference, none of those lines is Verified (the settle check then needs a line no
+        other line carries), so clearing never makes a line Verified. A reference that names
+        none of their orders is no guess of that backfill, and is kept: the duplicate check
+        may know that refund only by it. The duplicate check still knows a cleared refund by
+        its synced payments' order references.
+        """
+        refunds = self.sudo().search([('reference', '!=', False), ('state', '=', 'done')])
+        payments = self.env['pos.payment'].sudo().search(sale_key_domain(
+            'transaction_id', refunds.mapped('sale_id'), refunds.payment_method_id,
+        ) + [('musqet_refund_of', '!=', False)])
+        # Linked refund lines of every order state, by their claim: the lines the old backfill
+        # chose among.
+        carriers = payments._musqet_claimants(paid_only=False)
+        Payment = self.env['pos.payment']
+
+        def has_guessed_reference(refund):
+            lines = carriers[Payment._musqet_claim_key_for(
+                refund.payment_method_id.id, refund.sale_id, is_sale=False)]
+            return len(lines) > 1 and any(
+                refund.reference in line._musqet_order_references() for line in lines)
+
+        shared = refunds.filtered(has_guessed_reference)
+        shared.write({'reference': False})
+        _logger.info("pos_musqet: cleared the order reference of %d shared refund(s)", len(shared))
 
     @api.model
     def _musqet_record_synced_refunds(self):
@@ -94,32 +104,17 @@ class PosMusqetRefund(models.Model):
 
         For the upgrade to 19.0.1.2.0 (see its post-migration); safe to run again. The
         payment's own amount and link are the best evidence there is for a refund made
-        before refunds were recorded on the server.
+        before refunds were recorded on the server. Unlike the sale backfill, a refund line of
+        an order never paid is recorded too: the terminal refunded the card all the same, so
+        it counts against the sale.
         """
         payments = self.env['pos.payment'].sudo().search([
             ('musqet_refund_of', '!=', False),
             ('transaction_id', '!=', False),
-            ('payment_method_id.use_payment_terminal', '=', 'musqet'),
+            ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
         ])
-        recorded = {
-            (refund.payment_method_id.id, refund.sale_id)
-            for refund in self.sudo().search([('sale_id', 'in', payments.mapped('transaction_id'))])
-        }
-        vals_list = []
-        for payment in payments:
-            key = (payment.payment_method_id.id, payment.transaction_id)
-            if key in recorded:
-                continue
-            recorded.add(key)
-            order = payment.pos_order_id
-            vals_list.append({
-                'company_id': payment.company_id.id,
-                'payment_method_id': payment.payment_method_id.id,
-                'original_sale_id': payment.musqet_refund_of,
-                'sale_id': payment.transaction_id,
-                'reference': order.pos_reference or order.uuid,
-                'amount_minor': abs(minor_units(payment.amount, payment.currency_id)),
-                'state': 'done',
-            })
-        self.sudo().create(vals_list)
-        _logger.info("pos_musqet: recorded %d refund(s) synced before this version", len(vals_list))
+        count = self._musqet_record_unrecorded(payments, lambda payment: {
+            'original_sale_id': payment.musqet_refund_of,
+            'amount_minor': abs(minor_units(payment.amount, payment.currency_id)),
+        })
+        _logger.info("pos_musqet: recorded %d refund(s) synced before this version", count)

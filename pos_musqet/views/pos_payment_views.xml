@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Show whether Musqet confirmed each Musqet payment line (pos.payment.musqet_settle_check). -->
+    <record id="view_pos_payment_tree_inherit_pos_musqet" model="ir.ui.view">
+        <field name="name">pos.payment.list.inherit.musqet</field>
+        <field name="model">pos.payment</field>
+        <field name="inherit_id" ref="point_of_sale.view_pos_payment_tree"/>
+        <field name="arch" type="xml">
+            <field name="amount" position="after">
+                <field name="musqet_settle_check" optional="show" widget="badge"
+                       decoration-success="musqet_settle_check == 'verified'"
+                       decoration-danger="musqet_settle_check == 'unverified'"/>
+            </field>
+        </field>
+    </record>
+
+    <record id="view_pos_payment_form_inherit_pos_musqet" model="ir.ui.view">
+        <field name="name">pos.payment.form.inherit.musqet</field>
+        <field name="model">pos.payment</field>
+        <field name="inherit_id" ref="point_of_sale.view_pos_payment_form"/>
+        <field name="arch" type="xml">
+            <field name="transaction_id" position="after">
+                <field name="musqet_settle_check" invisible="not musqet_settle_check"/>
+            </field>
+        </field>
+    </record>
+
+    <record id="view_pos_payment_search_inherit_pos_musqet" model="ir.ui.view">
+        <field name="name">pos.payment.search.inherit.musqet</field>
+        <field name="model">pos.payment</field>
+        <field name="inherit_id" ref="point_of_sale.view_pos_payment_search"/>
+        <field name="arch" type="xml">
+            <field name="pos_order_id" position="after">
+                <filter name="musqet_unverified" string="Musqet: Not Verified"
+                        domain="[('musqet_settle_check', '=', 'unverified')]"/>
+            </field>
+        </field>
+    </record>
+
+    <record id="view_pos_pos_form_inherit_pos_musqet" model="ir.ui.view">
+        <field name="name">pos.order.form.inherit.musqet</field>
+        <field name="model">pos.order</field>
+        <field name="inherit_id" ref="point_of_sale.view_pos_pos_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='payment_ids']/list/field[@name='amount']" position="after">
+                <field name="musqet_settle_check" optional="show" widget="badge"
+                       decoration-success="musqet_settle_check == 'verified'"
+                       decoration-danger="musqet_settle_check == 'unverified'"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

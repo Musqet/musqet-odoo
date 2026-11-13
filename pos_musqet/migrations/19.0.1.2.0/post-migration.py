@@ -4,7 +4,7 @@
 Runs after the ORM has created pos.musqet.refund. Each refund payment already synced with a
 musqet_refund_of link gets a done refund record, so the over-refund cap counts that refund
 from the record rather than from the refund payment's own fields, which the POS can rewrite.
-(The cap still starts from the original sale's payment row; see INSTALL.md §8.)
+(The cap starts from the server's sale record since 19.0.1.3.0.)
 """
 from odoo import SUPERUSER_ID, api
 
