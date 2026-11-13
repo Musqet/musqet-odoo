@@ -170,10 +170,22 @@ class PosPaymentMethod(models.Model):
         # call) may drive the terminal.
         if not self.env.su and not self.env.user.has_group('point_of_sale.group_pos_user'):
             raise AccessDenied()
+        self._musqet_check_method()
+
+    def _musqet_check_method(self):
         # Only a Musqet payment method drives a Musqet terminal: refuse to run the proxy on
         # any other method record a caller points it at.
         if any(method.use_payment_terminal != 'musqet' for method in self):
             raise AccessDenied()
+
+    def _musqet_business_currency(self):
+        """The currency code every Musqet sale and refund is made in: the company currency.
+
+        amountInCents is read in this currency, so it must never come from the caller.
+        sudo(): a cashier may lack read access on res.currency; this is a fixed lookup.
+        """
+        self.ensure_one()
+        return (self.company_id or self.env.company).sudo().currency_id.name
 
     def _musqet_headers(self):
         # The key is read with sudo() because the field is restricted to ERP managers;
@@ -273,11 +285,9 @@ class PosPaymentMethod(models.Model):
         mode = payload.get('mode', MUSQET_DEFAULT_SALE_MODE)
         if mode not in MUSQET_SALE_MODES:
             return {'error': {'message': _("The payment mode is invalid.")}}
-        # amountInCents is read in this currency, so the caller must not pick it: a sale of
-        # 1250 in a currency with a different minor unit would charge a different value from
-        # the one the POS records. Musqet charges in the business's own currency.
-        # sudo(): a cashier may lack read access on res.currency; this is a fixed lookup.
-        currency = (self.company_id or self.env.company).sudo().currency_id.name
+        # The caller must not pick the currency: a sale of 1250 in a currency with a
+        # different minor unit would charge a different value from the one the POS records.
+        currency = self._musqet_business_currency()
         if payload.get('currency', currency) != currency:
             return {'error': {'message': _("The sale currency does not match the company currency.")}}
         reference = payload.get('reference')
@@ -344,10 +354,10 @@ class PosPaymentMethod(models.Model):
         ``original_payment_id`` (the Odoo id of the original pos.payment, supplied by the POS)
         is UNTRUSTED, like the rest of the payload. We re-read that payment server-side and
         refuse the refund unless it is a card-settled Musqet payment of this company whose
-        captured amount covers the request, then FORCE the refund-defining fields (type, mode,
-        serial) and forward only known keys — so a tampered payload (mode:"any", type:"sale",
-        a foreign serial/amount, extra keys) cannot widen the action. Returns the create
-        response or a clean ``{error}``.
+        captured amount covers the request. type, mode, serial and currency are set on the
+        server; reference is required and validated; only known keys are forwarded — so a
+        tampered payload (mode:"any", type:"sale", a foreign serial/amount, extra keys) cannot
+        widen the action. Returns the create response or a clean ``{error}``.
 
         Cumulative-refund accounting and idempotency/dedup (issue #9): the request is capped
         against the REMAINING refundable amount (captured minus refunds already settled against
@@ -362,6 +372,8 @@ class PosPaymentMethod(models.Model):
         self._musqet_check_access()
         if not isinstance(payload, dict):
             return {'error': {'message': _("The refund request is invalid.")}}
+        if not self.musqet_terminal_serial:
+            return {'error': {'message': _("No Musqet terminal serial is configured.")}}
         # Re-read the claimed original payment server-side; never trust the browser's word for
         # it. sudo() to read across the cashier's restrictions — the validation below, not the
         # ORM record rules, is what authorises the refund.
@@ -387,8 +399,13 @@ class PosPaymentMethod(models.Model):
         # mismatched scales. Enforce the assumption rather than only commenting it.
         if payload.get('currency') != original.currency_id.name:
             return {'error': {'message': _("The refund currency does not match the original payment.")}}
+        # And, like a sale, a refund is made in the company currency (one definition of the
+        # business currency for both directions).
+        if original.currency_id.name != self._musqet_business_currency():
+            return {'error': {'message': _("The refund currency does not match the company currency.")}}
         # Validate the requested amount against the captured amount, in the same minor units the
-        # POS computed it. Reject a non-positive amount or an over-refund.
+        # POS computed it: a positive whole number here, and no more than the remaining
+        # refundable amount below.
         amount = self._musqet_parse_amount(payload)
         if amount is None:
             return {'error': {'message': _("The refund amount is invalid.")}}
@@ -424,7 +441,7 @@ class PosPaymentMethod(models.Model):
                 abs(int(round(refund.amount * (10 ** decimals)))) for refund in prior_refunds
             )
         remaining = captured - already_refunded
-        if amount <= 0 or amount > remaining:
+        if amount > remaining:
             return {'error': {'message': _("The refund amount exceeds the original payment.")}}
         # Idempotency / dedup (issue #9). The API has no idempotency key, so a re-fired refund
         # carrying the same order reference would create a SECOND refund. If a refund already
