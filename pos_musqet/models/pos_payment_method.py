@@ -344,6 +344,11 @@ class PosPaymentMethod(models.Model):
     def _musqet_url(self, base_url, path):
         return base_url.rstrip('/') + '/' + path.lstrip('/')
 
+    @api.model
+    def _musqet_error(self, message):
+        """The ``{error}`` dict every proxy call returns on failure."""
+        return {'error': {'message': message}}
+
     def _musqet_request_target(self):
         """Return ``(base_url, api_key, None)`` for a request, or ``(None, None, {error})``.
 
@@ -355,12 +360,12 @@ class PosPaymentMethod(models.Model):
         payment_method_sudo = self.sudo()
         base_url = payment_method_sudo.musqet_base_url
         if not base_url:
-            return None, None, {'error': {'message': _("No Musqet API URL is configured.")}}
+            return None, None, self._musqet_error(_("No Musqet API URL is configured."))
         # Checked again here, not only on save: a direct database write skips the ORM
         # constraint, and this URL receives the bearer token.
         url_error = self._musqet_base_url_error(base_url)
         if url_error:
-            return None, None, {'error': {'message': url_error}}
+            return None, None, self._musqet_error(url_error)
         # Never send an empty bearer token: say why there is no key instead of relaying
         # the API's authentication error.
         api_key = payment_method_sudo.musqet_api_key
@@ -368,10 +373,10 @@ class PosPaymentMethod(models.Model):
             if payment_method_sudo.musqet_api_key_encrypted:
                 # Shown to the cashier, so no cause or host detail: the server log names
                 # the secret and why it failed.
-                return None, None, {'error': {'message': _(
+                return None, None, self._musqet_error(_(
                     "The Musqet API key cannot be read. Ask an administrator to check the "
-                    "Musqet encryption key and API key.")}}
-            return None, None, {'error': {'message': _("No Musqet API key is configured.")}}
+                    "Musqet encryption key and API key."))
+            return None, None, self._musqet_error(_("No Musqet API key is configured."))
         return base_url, api_key, None
 
     def _musqet_request(self, method, path, payload=None):

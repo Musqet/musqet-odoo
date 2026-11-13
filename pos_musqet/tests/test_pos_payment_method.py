@@ -49,6 +49,8 @@ class TestMusqetBaseUrl(TransactionCase):
         self.assertIsNone(error(False))
         self.assertIn('https://', error('http://api.musqet.tech'))
         self.assertIn('IP address', error('https://169.254.169.254/'))
+        # urllib3 keeps an IPv6 literal's brackets; the host comparison must allow for that.
+        self.assertIn('IP address', error('https://[::1]/x'))
         self.assertIn('internal address', error('https://localhost/'))
         self.assertIn(pos_payment_method.MUSQET_ALLOWED_HOST, error('https://musqet.tech.evil.example/'))
         # urlparse raises on this; the check must still return a message, not raise.
