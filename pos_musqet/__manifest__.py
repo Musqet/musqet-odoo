@@ -9,6 +9,7 @@
         'security/ir.model.access.csv',
         'security/pos_musqet_security.xml',
         'views/pos_payment_method_views.xml',
+        'views/pos_musqet_refund_views.xml',
     ],
     'depends': ['point_of_sale'],
     'external_dependencies': {'python': ['cryptography']},

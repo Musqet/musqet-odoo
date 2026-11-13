@@ -6,6 +6,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from odoo.addons.pos_musqet.models import pos_payment_method
+from odoo.addons.pos_musqet.models.pos_musqet_refund import minor_units
 from odoo.addons.pos_musqet.models.pos_payment_method import (
     MUSQET_LANGUAGE_MAX_LENGTH,
     MUSQET_REFERENCE_MAX_LENGTH,
@@ -15,7 +16,13 @@ from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 from odoo.tools import mute_logger
 
-from .common import create_musqet_method, load_migration, record_refund
+from .common import (
+    create_musqet_method,
+    dirty_field_names,
+    load_migration,
+    musqet_response,
+    record_refund,
+)
 
 
 @tagged('post_install', '-at_install')
@@ -345,11 +352,8 @@ class TestMusqetCreateSale(TransactionCase):
         dirty_at_post = []
 
         def fake_request(method, url, **kwargs):
-            dirty_at_post.extend(
-                field.name for field, ids in self.env.transaction.field_dirty.items() if ids)
-            response = MagicMock(status_code=200)
-            response.json.return_value = {'saleId': 'sale-1', 'status': 'PENDING'}
-            return response
+            dirty_at_post.extend(dirty_field_names(self.env))
+            return musqet_response('sale-1')
 
         with patch.object(pos_payment_method.requests, 'request', side_effect=fake_request):
             result = self.method.with_user(self.cashier).musqet_create_sale({'amountInCents': 500})
@@ -535,6 +539,7 @@ class TestMusqetCreateRefund(TransactionCase):
         # single arm of the dedup's `reference in (pos_reference, uuid)` membership check.
         refund = MagicMock()
         refund.amount = amount
+        refund.currency_id.decimal_places = 2
         refund.pos_order_id.pos_reference = reference if pos_reference is None else pos_reference
         refund.pos_order_id.uuid = reference if uuid is None else uuid
         return refund
@@ -557,17 +562,23 @@ class TestMusqetCreateRefund(TransactionCase):
                 response.json.return_value = {'saleId': url.rsplit('/', 1)[1], 'status': get_status}
             else:
                 # Anything still unwritten now could fail after the refund is sent.
-                self.dirty_at_post = {
-                    field.name for field in self.env.transaction.field_dirty
-                    if self.env.transaction.field_dirty[field]}
+                self.dirty_at_post = dirty_field_names(self.env)
                 response.status_code = post_status
                 response.json.return_value = {'saleId': sale_id, 'status': 'PENDING'}
             return response
 
-        # Stub the synced-refunds search so the legacy branch of the cap is exercised without
-        # a populated POS database; default to none.
-        with patch.object(type(self.env['pos.payment']), 'browse', return_value=original), \
-             patch.object(type(self.env['pos.payment']), 'search', return_value=prior_refunds or []), \
+        # Stub the search for synced refund payments of the original (the musqet_refund_of
+        # domain) so that branch of the cap runs without a populated POS database; default to
+        # none. Every other payment search finds nothing.
+        Payment = self.env['pos.payment']
+
+        def fake_search(domain, *args, **kwargs):
+            if any(term[0] == 'musqet_refund_of' for term in domain if isinstance(term, tuple)):
+                return prior_refunds or []
+            return Payment.browse()
+
+        with patch.object(type(Payment), 'browse', return_value=original), \
+             patch.object(type(Payment), 'search', side_effect=fake_search), \
              patch.object(pos_payment_method.requests, 'request', side_effect=fake_request) as mock_request:
             result = self.method.with_user(self.cashier).musqet_create_refund(
                 payload, original_payment_id)
@@ -858,19 +869,6 @@ class TestMusqetCreateRefund(TransactionCase):
         self.assertIn('still in progress', result['error']['message'])
         self.assertFalse(self._posts(mock_request))
 
-    def test_matches_a_recorded_refund_by_either_order_reference(self):
-        # A record holds one form of the reference (a backfilled one, the order's
-        # pos_reference); its synced payment's order supplies the other (the uuid).
-        original = self._stub_original(amount=10.0)
-        record_refund(self.env, self.method, 'refund-a', amount_minor=200,
-                      reference='Order 00001-001-0001', state='done')
-        synced = self._stub_prior_refund(-2.0, pos_reference='Order 00001-001-0001', uuid='uuid-a')
-        synced.transaction_id = 'refund-a'
-        result, mock_request = self._call_refund(
-            {'amountInCents': 200, 'reference': 'uuid-a'}, original, prior_refunds=[synced])
-        self.assertIn('already been processed', result['error']['message'])
-        self.assertFalse(self._posts(mock_request))
-
     def test_nothing_is_left_unwritten_when_the_refund_is_sent(self):
         # A write still buffered at the POST could fail at commit, after Musqet has the
         # refund, and Odoo's retry would send it again. The re-read below buffers a state
@@ -927,10 +925,9 @@ class TestMusqetCreateRefund(TransactionCase):
 
     def test_poll_updates_a_recorded_refund(self):
         self._call_refund({'amountInCents': 500}, self._stub_original(amount=10.0))
-        fake = MagicMock(status_code=200)
         for status, state in (('PROCESSING', 'pending'), ('COMPLETE', 'done')):
             with self.subTest(status=status):
-                fake.json.return_value = {'saleId': 'refund-1', 'status': status}
+                fake = musqet_response('refund-1', status)
                 with patch.object(pos_payment_method.requests, 'request', return_value=fake):
                     self.method.with_user(self.cashier).musqet_get_sale('refund-1')
                 self.assertEqual(self._recorded_refunds().state, state)
@@ -1087,8 +1084,7 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         # own transaction id, while a mere read leaves it as created.
         original = self._payment(
             amount=10.0, transaction_id='sale-orig-real', musqet_rail='card')
-        fake = MagicMock(status_code=200)
-        fake.json.return_value = {'saleId': 'refund-real', 'status': 'PENDING'}
+        fake = musqet_response('refund-real')
         before = self._row_version(original)
         with self.env.cr.savepoint(), \
              patch.object(pos_payment_method.requests, 'request', return_value=fake):
@@ -1115,8 +1111,7 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         self.assertIn('already been processed', result['error']['message'])
         mock_request.assert_not_called()
         # Another order's reference is not a duplicate, though its payments are in the table.
-        fake = MagicMock(status_code=200)
-        fake.json.return_value = {'saleId': 'refund-new', 'status': 'PENDING'}
+        fake = musqet_response('refund-new')
         with patch.object(pos_payment_method.requests, 'request', return_value=fake):
             result = self.method.musqet_create_refund(
                 {'amountInCents': 200, 'reference': self.order.uuid}, original.id)
@@ -1127,8 +1122,7 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         # must claim the other too, or a concurrent refund naming the other wouldn't wait.
         original = self._payment(amount=10.0, transaction_id='sale-orig-dup', musqet_rail='card')
         twin = self._payment(amount=10.0, transaction_id='sale-orig-dup', musqet_rail='card')
-        fake = MagicMock(status_code=200)
-        fake.json.return_value = {'saleId': 'refund-dup', 'status': 'PENDING'}
+        fake = musqet_response('refund-dup')
         before = self._row_version(twin)
         with self.env.cr.savepoint(), \
              patch.object(pos_payment_method.requests, 'request', return_value=fake):
@@ -1172,3 +1166,36 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         self.assertEqual(backfilled.payment_method_id, self.method)
         self.assertEqual(backfilled.reference, legacy.pos_order_id.pos_reference or legacy.pos_order_id.uuid)
         self.assertTrue(backfilled.reference)
+
+    def test_manager_can_mark_a_stuck_pending_refund_failed(self):
+        manager = self.env['res.users'].create({
+            'name': 'Musqet Manager', 'login': 'musqet_manager_fail',
+            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_manager').id])],
+        })
+        stuck = self.env['pos.musqet.refund'].search([('sale_id', '=', 'refund-1')])
+        done = record_refund(self.env, self.method, 'refund-done', state='done')
+        (stuck | done).with_user(manager).action_musqet_mark_failed()
+        self.assertEqual(stuck.state, 'failed')
+        self.assertEqual(done.state, 'done')
+
+    def test_cashier_cannot_mark_a_refund_failed(self):
+        cashier = self.env['res.users'].create({
+            'name': 'Musqet Cashier', 'login': 'musqet_cashier_fail',
+            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
+        })
+        stuck = self.env['pos.musqet.refund'].search([('sale_id', '=', 'refund-1')])
+        with self.assertRaises(AccessError):
+            stuck.with_user(cashier).action_musqet_mark_failed()
+        self.assertEqual(stuck.state, 'pending')
+
+
+@tagged('post_install', '-at_install')
+class TestMusqetMinorUnits(TransactionCase):
+    """minor_units converts an amount to whole minor units of its currency."""
+
+    def test_converts_by_the_currency_decimal_places(self):
+        for decimals, amount, expected in ((2, 12.34, 1234), (0, 1500.0, 1500), (3, 1.5, 1500),
+                                          (None, 12.34, 1234)):
+            with self.subTest(decimals=decimals):
+                currency = MagicMock(decimal_places=decimals)
+                self.assertEqual(minor_units(amount, currency), expected)

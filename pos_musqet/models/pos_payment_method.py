@@ -631,13 +631,12 @@ class PosPaymentMethod(models.Model):
                 ('transaction_id', 'in', list(state_by_sale)),
                 ('company_id', '=', original.company_id.id),
             ]):
-                if payment.transaction_id in state_by_sale:
-                    for reference in self._musqet_order_references(payment):
-                        note(reference, state_by_sale[payment.transaction_id])
+                for reference in self._musqet_order_references(payment):
+                    note(reference, state_by_sale[payment.transaction_id])
         return states
 
-    def _musqet_refund_limit_error(self, original, amount, reference):
-        """Return an ``{error}`` if the refund would pass the cap or repeat a refund, else None.
+    def _musqet_refund_refusal(self, original, amount, reference):
+        """Return an ``{error}`` refusing a refund over the cap or repeating one, else None.
 
         Must run after _musqet_claim_original_sale, so it sees every earlier refund's record.
         """
@@ -652,7 +651,7 @@ class PosPaymentMethod(models.Model):
         # so cap against what is left after every refund already sent for this sale.
         captured = minor_units(original.amount, original.currency_id)
         already_refunded = sum(counting.mapped('amount_minor')) + sum(
-            abs(minor_units(payment.amount, original.currency_id))
+            abs(minor_units(payment.amount, payment.currency_id))
             for payment in unrecorded_payments)
         if amount > captured - already_refunded:
             return {'error': {'message': _("The refund amount exceeds the original payment.")}}
@@ -674,9 +673,11 @@ class PosPaymentMethod(models.Model):
         """Synced refund payments of the original that have no refund record.
 
         The upgrade to 19.0.1.2.0 records every refund synced before it, so a payment here
-        is one whose refund was never recorded, such as one Musqet accepted while its
-        response was lost; its link is the musqet_refund_of the POS wrote. A payment whose
-        saleId has a record is left to the record, which Musqet's status keeps current.
+        is one whose refund was never recorded: Odoo failed to save the record (logged), or
+        Musqet accepted it while its response was lost. Its link is the musqet_refund_of the
+        POS wrote, so it counts only if the POS still knew the original when it settled (not
+        after a page refresh). A payment whose saleId has a record is left to the record,
+        which Musqet's status keeps current.
         """
         recorded_sale_ids = set(recorded.mapped('sale_id'))
         return [
@@ -694,9 +695,9 @@ class PosPaymentMethod(models.Model):
         if not sale_id:
             return
         # In a savepoint, and never raised: Musqet has the refund, so the POS must still get
-        # the saleId to poll it and sync its payment, which then counts through
-        # musqet_refund_of. Failing the request would leave the terminal armed with a refund
-        # Odoo knows nothing about.
+        # the saleId to poll it and sync its payment. That payment counts only if the POS
+        # writes its musqet_refund_of link (see _musqet_unrecorded_synced_refunds). Failing
+        # the request would leave the terminal armed with a refund Odoo knows nothing about.
         try:
             with self.env.cr.savepoint():
                 refund = self.env['pos.musqet.refund'].sudo().create({
@@ -732,8 +733,9 @@ class PosPaymentMethod(models.Model):
         cannot widen the action. Returns the create response or a clean ``{error}``.
 
         Over-refund cap and duplicate check: every refund Musqet accepts is recorded on the
-        server (pos.musqet.refund) before this call returns, so the cap counts it at once,
-        whether or not its refund order ever reaches Odoo. Refunds of the same original sale
+        server (pos.musqet.refund) before this call returns, unless saving the record fails
+        (logged, see _musqet_record_refund), so the cap counts it at once, whether or not its
+        refund order ever reaches Odoo. Refunds of the same original sale
         are decided one after the other, each seeing the records of the ones before (see
         _musqet_claim_original_sale); every pending write is flushed before the refund is
         sent, so a retry never sends it twice. A refund recorded as pending is re-read from Musqet
@@ -742,9 +744,11 @@ class PosPaymentMethod(models.Model):
         refund order carries at most one Musqet refund of a given sale.
 
         Not covered: a refund Musqet accepted but whose response never reached Odoo (a
-        timeout). It has no saleId, so no record, and its refund order hasn't synced, so a
-        retry of the same order is not stopped here. Closing that needs the abandoned-payment
-        handling (look the refund up at Musqet by reference before sending another).
+        timeout), or whose record Odoo failed to save. Neither has a record, and until its
+        refund order syncs with a musqet_refund_of link a retry of the same order is not
+        stopped here. Closing the first needs the abandoned-payment handling (look the
+        refund up at Musqet by reference before sending another); the second is logged for
+        reconciliation.
         """
         error = self._musqet_check_terminal_request(payload)
         if error:
@@ -767,7 +771,7 @@ class PosPaymentMethod(models.Model):
             return {'error': {'message': _("The refund reference is invalid.")}}
         self._musqet_reread_pending_refunds(original)
         self._musqet_claim_original_sale(original)
-        error = self._musqet_refund_limit_error(original, amount, reference)
+        error = self._musqet_refund_refusal(original, amount, reference)
         if error:
             return error
         # Forward only known fields and FORCE the refund-defining ones server-side. serial comes

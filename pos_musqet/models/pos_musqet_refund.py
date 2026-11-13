@@ -58,6 +58,17 @@ class PosMusqetRefund(models.Model):
     _unique_sale = models.Constraint(
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet refund is already recorded.')
 
+    def action_musqet_mark_failed(self):
+        """Mark pending refunds failed, for a POS manager who has checked them in Musqet.
+
+        A pending refund keeps counting against its sale until Musqet reports how it ended.
+        If that read can never succeed (Musqet doesn't know the saleId, or the method has
+        lost its Musqet configuration), this is the way out. Only pending refunds move.
+        Reading the state needs read access, which only POS managers have
+        (ir.model.access.csv), so no one else gets as far as the write.
+        """
+        self.filtered(lambda refund: refund.state == 'pending').sudo().write({'state': 'failed'})
+
     def _musqet_apply_status(self, status):
         """Settle the pending refunds as a Musqet status says; other statuses leave them.
 

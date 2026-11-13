@@ -2,7 +2,7 @@
 """Helpers shared by the pos_musqet test suites."""
 import importlib.util
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from cryptography.fernet import Fernet
 
@@ -39,6 +39,18 @@ def create_musqet_method(test, serial, **overrides):
         'musqet_terminal_serial': serial,
         **overrides,
     })
+
+
+def musqet_response(sale_id, status='PENDING', status_code=200):
+    """A stubbed Musqet API response carrying a sale's id and status."""
+    response = MagicMock(status_code=status_code)
+    response.json.return_value = {'saleId': sale_id, 'status': status}
+    return response
+
+
+def dirty_field_names(env):
+    """The fields with writes still waiting to reach the database."""
+    return {field.name for field, ids in env.transaction.field_dirty.items() if ids}
 
 
 def record_refund(env, method, sale_id, original_sale_id='sale-orig-1', amount_minor=1, **overrides):
