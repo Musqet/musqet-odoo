@@ -380,10 +380,10 @@ class PosPaymentMethod(models.Model):
         is UNTRUSTED, like the rest of the payload. We re-read that payment server-side and
         refuse the refund unless it is a card-settled Musqet payment of this company whose
         captured amount covers the request. type, mode and serial are set on the server; the
-        currency must be the company currency; reference is required and validated; only known
-        keys are forwarded — so a
-        tampered payload (mode:"any", type:"sale", a foreign serial/amount, extra keys) cannot
-        widen the action. Returns the create response or a clean ``{error}``.
+        currency must be the company currency; reference is required and validated; only
+        known keys are forwarded. So a tampered payload (mode:"any", type:"sale", a foreign
+        serial/amount, extra keys) cannot widen the action. Returns the create response or a
+        clean ``{error}``.
 
         Cumulative-refund accounting and idempotency/dedup (issue #9): the request is capped
         against the REMAINING refundable amount (captured minus refunds already settled against
@@ -480,8 +480,9 @@ class PosPaymentMethod(models.Model):
             for refund in prior_refunds
         ):
             return {'error': {'message': _("This refund has already been processed.")}}
-        # Forward only known fields and FORCE the refund-defining ones server-side. serial and
-        # currency are taken from trusted server records, not the payload.
+        # Forward only known fields and FORCE the refund-defining ones server-side. serial comes
+        # from this method's record; currency is the company currency (the payload may only
+        # repeat it).
         # The optional fields go first so the server-set fields after them always win.
         outgoing = {
             **self._musqet_optional_terminal_fields(payload),
