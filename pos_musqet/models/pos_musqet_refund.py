@@ -1,7 +1,13 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
-from odoo import fields, models
+import logging
 
-# Musqet sale statuses (a refund uses the same ones) and the refund state each maps to.
+from odoo import api, fields, models
+
+_logger = logging.getLogger(__name__)
+
+# The Musqet sale statuses (a refund uses the same ones) that end a sale; see
+# _musqet_apply_status for the refund state each leads to. Same lists as SUCCESS_STATUS and
+# FAILURE_STATUSES in static/src/app/payment_musqet.js.
 MUSQET_SUCCESS_STATUS = 'COMPLETE'
 MUSQET_FAILURE_STATUSES = ('ERROR', 'CANCELLED', 'CANCELLED_REMOTE', 'TIMED_OUT')
 
@@ -41,8 +47,50 @@ class PosMusqetRefund(models.Model):
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet refund is already recorded.')
 
     def _musqet_apply_status(self, status):
-        """Move the refunds to the state a Musqet status means; other statuses leave them."""
+        """Settle the pending refunds as a Musqet status says; other statuses leave them.
+
+        Only a pending refund moves: a settled one keeps its state whatever a later read
+        says, and a refund already in the right state isn't rewritten on every poll.
+        """
+        pending = self.filtered(lambda refund: refund.state == 'pending')
         if status == MUSQET_SUCCESS_STATUS:
-            self.write({'state': 'done'})
+            pending.write({'state': 'done'})
         elif status in MUSQET_FAILURE_STATUSES:
-            self.write({'state': 'failed'})
+            pending.write({'state': 'failed'})
+
+    @api.model
+    def _musqet_record_synced_refunds(self):
+        """Record each synced, linked Musqet refund payment that has no record yet, as done.
+
+        For the upgrade to 19.0.1.2.0 (see its post-migration); safe to run again. The
+        payment's own amount and link are the best evidence there is for a refund made
+        before refunds were recorded on the server.
+        """
+        Method = self.env['pos.payment.method']
+        payments = self.env['pos.payment'].sudo().search([
+            ('musqet_refund_of', '!=', False),
+            ('transaction_id', '!=', False),
+            ('payment_method_id.use_payment_terminal', '=', 'musqet'),
+        ])
+        recorded = {
+            (refund.payment_method_id.id, refund.sale_id)
+            for refund in self.sudo().search([('sale_id', 'in', payments.mapped('transaction_id'))])
+        }
+        vals_list = []
+        for payment in payments:
+            key = (payment.payment_method_id.id, payment.transaction_id)
+            if key in recorded:
+                continue
+            recorded.add(key)
+            order = payment.pos_order_id
+            vals_list.append({
+                'company_id': payment.company_id.id,
+                'payment_method_id': payment.payment_method_id.id,
+                'original_sale_id': payment.musqet_refund_of,
+                'sale_id': payment.transaction_id,
+                'reference': order.pos_reference or order.uuid,
+                'amount_minor': abs(Method._musqet_minor_units(payment.amount, payment.currency_id)),
+                'state': 'done',
+            })
+        self.sudo().create(vals_list)
+        _logger.info("pos_musqet: recorded %d refund(s) synced before this version", len(vals_list))

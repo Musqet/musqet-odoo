@@ -1,4 +1,6 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
+from collections import defaultdict
+
 from odoo import api, fields, models
 
 
@@ -30,7 +32,8 @@ class PosPayment(models.Model):
 
     def write(self, vals):
         result = super().write(vals)
-        if {'transaction_id', 'payment_method_id', 'musqet_refund_of'} & vals.keys():
+        if (not self.env.context.get('musqet_linking_refunds')
+                and {'transaction_id', 'payment_method_id', 'musqet_refund_of'} & vals.keys()):
             self._musqet_link_recorded_refunds()
         return result
 
@@ -49,8 +52,12 @@ class PosPayment(models.Model):
             (refund.payment_method_id.id, refund.sale_id): refund.original_sale_id
             for refund in refunds
         }
+        to_link = defaultdict(lambda: self.browse())
         for payment in payments:
             original = original_by_refund.get((payment.payment_method_id.id, payment.transaction_id))
-            # The write re-enters write(), which then finds the link already set and stops.
             if original and payment.musqet_refund_of != original:
-                payment.sudo().musqet_refund_of = original
+                to_link[original] |= payment
+        for original, linked in to_link.items():
+            # The context flag stops write() from linking these payments again.
+            linked.sudo().with_context(musqet_linking_refunds=True).write(
+                {'musqet_refund_of': original})

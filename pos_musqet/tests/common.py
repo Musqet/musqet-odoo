@@ -41,13 +41,22 @@ def create_musqet_method(test, serial, **overrides):
     })
 
 
-def load_pre_migration():
+def _load_migration(version, name):
     # The directory name has dots and the file a hyphen, so it can't be imported by name.
-    path = file_path('pos_musqet/migrations/19.0.1.1.0/pre-migration.py')
-    spec = importlib.util.spec_from_file_location('pos_musqet_pre_migration_19_0_1_1_0', path)
+    path = file_path('pos_musqet/migrations/%s/%s.py' % (version, name))
+    module_name = 'pos_musqet_%s_%s' % (name.replace('-', '_'), version.replace('.', '_'))
+    spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_pre_migration():
+    return _load_migration('19.0.1.1.0', 'pre-migration')
+
+
+def load_post_migration_19_0_1_2_0():
+    return _load_migration('19.0.1.2.0', 'post-migration')
 
 
 def reset_decrypt_failure_log(test):
