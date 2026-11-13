@@ -3,55 +3,63 @@
 
 Runs BEFORE the ORM schema sync. At this point the old plaintext columns (`musqet_api_key`,
 `musqet_webhook_secret`) still exist and the new `*_encrypted` columns do not. We create the
-new columns, encrypt each plaintext value into them, then drop the plaintext columns: Odoo
-does not drop a column when a field merely becomes non-stored, so without the drop the
-plaintext would stay in the table. Requires MUSQET_FIELD_ENCRYPTION_KEY to be set during the
-upgrade when any secret is stored, or it raises and aborts the upgrade (deliberate: better to
-stop than to drop plaintext without encrypting it).
+new columns, encrypt each plaintext value into them, check every ciphertext decrypts back to
+its plaintext, then drop the plaintext columns: Odoo does not drop a column when a field
+merely becomes non-stored, so without the drop the plaintext would stay in the table.
+
+Requires MUSQET_FIELD_ENCRYPTION_KEY to be set (and valid) during the upgrade when any secret
+is stored, or it raises and aborts the upgrade, which rolls back every change (deliberate:
+better to stop than to drop plaintext without a readable ciphertext).
 """
 import logging
 
-from odoo.addons.pos_musqet.models.musqet_crypto import encrypt_secret
+from odoo.addons.pos_musqet.models.musqet_crypto import (
+    decrypt_secret,
+    encrypt_secret,
+    secret_label,
+)
+from odoo.tools import SQL
+from odoo.tools.sql import column_exists
 
 _logger = logging.getLogger(__name__)
 
-# (old plaintext column, new encrypted column)
-COLUMNS = [
-    ('musqet_api_key', 'musqet_api_key_encrypted'),
-    ('musqet_webhook_secret', 'musqet_webhook_secret_encrypted'),
-]
+TABLE = 'pos_payment_method'
+# Plaintext columns (also the field names); each is encrypted into '<column>_encrypted'.
+COLUMNS = ('musqet_api_key', 'musqet_webhook_secret')
 
 
-def _column_exists(cr, column):
-    cr.execute(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'pos_payment_method' AND column_name = %s",
-        (column,),
-    )
-    return bool(cr.fetchone())
+class MusqetMigrationError(Exception):
+    """A secret did not survive encryption; the upgrade stops before anything is dropped."""
 
 
 def migrate(cr, version):
     if not version:
         return  # fresh install, nothing to migrate
-    # Column names are fixed literals from COLUMNS (identifiers can't be bound); values are
-    # always bound with %s.
-    for old_col, new_col in COLUMNS:
-        if not _column_exists(cr, old_col):
+    for column in COLUMNS:
+        if not column_exists(cr, TABLE, column):
             continue
-        cr.execute('ALTER TABLE pos_payment_method ADD COLUMN IF NOT EXISTS %s varchar' % new_col)
-        cr.execute(
-            "SELECT id, %s FROM pos_payment_method WHERE %s IS NOT NULL AND %s <> ''"
-            % (old_col, old_col, old_col)
-        )
+        encrypted_column = column + '_encrypted'
+        cr.execute(SQL(
+            'ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s varchar',
+            SQL.identifier(TABLE), SQL.identifier(encrypted_column)))
+        cr.execute(SQL(
+            "SELECT id, %(col)s FROM %(table)s WHERE %(col)s IS NOT NULL AND %(col)s <> ''",
+            col=SQL.identifier(column), table=SQL.identifier(TABLE)))
         rows = cr.fetchall()
         for rec_id, plaintext in rows:
-            cr.execute(
-                'UPDATE pos_payment_method SET %s = %%s WHERE id = %%s' % new_col,
-                (encrypt_secret(plaintext), rec_id),
-            )
-        cr.execute('ALTER TABLE pos_payment_method DROP COLUMN %s' % old_col)
+            label = secret_label(rec_id, column)
+            ciphertext = encrypt_secret(plaintext, label)
+            if decrypt_secret(ciphertext, label) != plaintext:
+                # Never include the value: it is a live credential.
+                raise MusqetMigrationError(
+                    'pos_musqet: %s on record %s did not decrypt back after encryption; '
+                    'nothing was dropped.' % (column, rec_id))
+            cr.execute(SQL(
+                'UPDATE %s SET %s = %s WHERE id = %s',
+                SQL.identifier(TABLE), SQL.identifier(encrypted_column), ciphertext, rec_id))
+        cr.execute(SQL(
+            'ALTER TABLE %s DROP COLUMN %s', SQL.identifier(TABLE), SQL.identifier(column)))
         _logger.info(
             'pos_musqet: encrypted %d existing value(s) from %s into %s and dropped %s',
-            len(rows), old_col, new_col, old_col,
+            len(rows), column, encrypted_column, column,
         )

@@ -110,27 +110,42 @@ The same key must be present whenever Odoo reads or writes a Musqet secret, and 
 any upgrade of the addon. Every Odoo host running `pos_musqet` against the same
 database needs the same key.
 
-- **Without the key**, saving an API key or webhook secret fails with an error, and
-  stored secrets read as empty (so Musqet calls fail with an authentication error and
-  webhooks are rejected). An error is logged each time.
+- **Without the key, or with an invalid one**, saving an API key or webhook secret
+  fails with an error naming `MUSQET_FIELD_ENCRYPTION_KEY`. Stored secrets read as
+  empty: Musqet calls fail with a message saying the API key cannot be read, and
+  webhooks are rejected. The error is logged once per secret.
 - **If the key is lost, the stored secrets cannot be recovered.** Re-enter the API key
   and webhook secret on the payment method under a new key.
-- **Rotating the key** means setting the new key and then re-entering both secrets.
-  There is no automatic re-encryption in this version.
+- **Rotating the key** means setting the new key and then re-entering **both** secrets
+  on every Musqet payment method, including a webhook secret you don't use. A secret
+  left under the old key stays unreadable and logs an error. Because it already shows
+  as empty, saving it empty changes nothing: type a value, save, then clear it and save
+  again. There is no automatic re-encryption in this version.
 
 **Upgrading from 19.0.1.0.0.** Version 19.0.1.1.0 encrypts any secrets already stored
-in plaintext and removes the plaintext columns. Set `MUSQET_FIELD_ENCRYPTION_KEY`
-**before** running the upgrade (`-u pos_musqet`). If secrets are stored and the key is
-missing, the upgrade stops and changes nothing. After the upgrade, database backups
-taken before it still hold the plaintext secrets, so treat those backups as
-containing live credentials, or rotate the API key and webhook secret with Musqet.
+in plaintext, checks each one decrypts back, and removes the plaintext columns. Set
+`MUSQET_FIELD_ENCRYPTION_KEY` **before** running the upgrade (`-u pos_musqet`). If
+secrets are stored and the key is missing or invalid, the upgrade stops and changes
+nothing.
 
-**Scope of protection.** This protects the secrets if the Odoo **database alone**
-leaks (a Postgres dump or database credentials without the host). It does **not**
-protect against compromise of the Odoo **host**: Odoo must decrypt the secrets to use
-them, so the key is present in the Odoo process on that machine. Keep the Odoo
-instance itself off the public internet or behind authentication. Encryption at rest
-is defence in depth, not a substitute for securing the host.
+**After upgrading, rotate both secrets with Musqet** (issue a new API key and webhook
+signing secret, enter them in Odoo, and revoke the old ones). The old plaintext values
+are not gone from the database server: they stay in backups taken before the upgrade,
+and in Postgres's own data files, write-ahead log and any replicas until those are
+overwritten. Rotating is the only step that makes every one of those copies useless.
+
+**Scope of protection.** This protects the secrets if a **read-only** copy of the
+database leaks, such as a Postgres dump or a backup. It does **not** protect against:
+
+- **Write access to the database.** Someone who can change rows can make Odoo send the
+  decrypted key elsewhere. The addon re-checks the API URL before every call to limit
+  this, but treat database write access as access to the secrets.
+- **Compromise of the Odoo host.** Odoo must decrypt the secrets to use them, so the
+  key is present in the Odoo process on that machine.
+
+Keep the Odoo instance itself off the public internet or behind authentication.
+Encryption at rest is defence in depth, not a substitute for securing the host and
+the database.
 
 ---
 
@@ -283,7 +298,8 @@ Then run the smoke test in section 4 with the test credentials.
   Running several physical terminals through one method on a public/multi-register
   webhook deployment is not supported in V1 (polling deployments are unaffected).
 - **Secrets are encrypted at rest, but the key lives on the Odoo host** (see §2.1).
-  This defends against a database-only leak, not against compromise of the Odoo host.
+  This defends against a leaked read-only copy of the database, not against write
+  access to the database or compromise of the Odoo host.
   Visibility is also restricted to ERP managers. An external-secrets store is a
   possible later hardening step.
 - **No automated JavaScript test harness in-repo.** The Python backend has unit tests
