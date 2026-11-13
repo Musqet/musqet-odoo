@@ -32,8 +32,7 @@ class PosPayment(models.Model):
 
     def write(self, vals):
         result = super().write(vals)
-        if (not self.env.context.get('musqet_linking_refunds')
-                and {'transaction_id', 'payment_method_id', 'musqet_refund_of'} & vals.keys()):
+        if {'transaction_id', 'payment_method_id', 'musqet_refund_of'} & vals.keys():
             self._musqet_link_recorded_refunds()
         return result
 
@@ -58,6 +57,7 @@ class PosPayment(models.Model):
             if original and payment.musqet_refund_of != original:
                 to_link[original] |= payment
         for original, linked in to_link.items():
-            # The context flag stops write() from linking these payments again.
-            linked.sudo().with_context(musqet_linking_refunds=True).write(
-                {'musqet_refund_of': original})
+            # This write re-enters write(), which finds every link already right and writes
+            # nothing more. (No context flag: an RPC caller sets the context, and could set
+            # it to keep a forged link.)
+            linked.sudo().write({'musqet_refund_of': original})

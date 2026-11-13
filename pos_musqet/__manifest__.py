@@ -7,6 +7,7 @@
     'summary': 'Integrate your POS with a Musqet dual-rail (card + Bitcoin Lightning) payment terminal',
     'data': [
         'security/ir.model.access.csv',
+        'security/pos_musqet_security.xml',
         'views/pos_payment_method_views.xml',
     ],
     'depends': ['point_of_sale'],

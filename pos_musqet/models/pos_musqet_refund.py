@@ -12,6 +12,17 @@ MUSQET_SUCCESS_STATUS = 'COMPLETE'
 MUSQET_FAILURE_STATUSES = ('ERROR', 'CANCELLED', 'CANCELLED_REMOTE', 'TIMED_OUT')
 
 
+def minor_units(amount, currency):
+    """``amount`` in whole minor units of ``currency`` (cents for GBP, yen for JPY)."""
+    # `is not None`, not `or 2`: a zero-decimal currency (JPY) has decimal_places == 0, and
+    # `0 or 2` would wrongly use 2, computing a cap 100x too loose. Mirrors the frontend's
+    # Number.isInteger() check, which also preserves 0.
+    decimals = currency.decimal_places
+    if decimals is None:
+        decimals = 2
+    return int(round(amount * (10 ** decimals)))
+
+
 class PosMusqetRefund(models.Model):
     """A refund Musqet accepted, recorded by the server when it sends the refund.
 
@@ -19,7 +30,8 @@ class PosMusqetRefund(models.Model):
     cumulative limit (Musqet/musqet#2094), so the over-refund cap and the duplicate check
     in ``pos.payment.method.musqet_create_refund`` read these records. They are written
     only by the server (sudo), never from the browser, and exist as soon as Musqet accepts
-    the refund, before the refund order reaches Odoo.
+    the refund, before the refund order reaches Odoo. The upgrade to 19.0.1.2.0 also
+    created done records for the refunds synced before it (_musqet_record_synced_refunds).
     """
     _name = 'pos.musqet.refund'
     _description = 'Musqet Refund'
@@ -66,7 +78,6 @@ class PosMusqetRefund(models.Model):
         payment's own amount and link are the best evidence there is for a refund made
         before refunds were recorded on the server.
         """
-        Method = self.env['pos.payment.method']
         payments = self.env['pos.payment'].sudo().search([
             ('musqet_refund_of', '!=', False),
             ('transaction_id', '!=', False),
@@ -89,7 +100,7 @@ class PosMusqetRefund(models.Model):
                 'original_sale_id': payment.musqet_refund_of,
                 'sale_id': payment.transaction_id,
                 'reference': order.pos_reference or order.uuid,
-                'amount_minor': abs(Method._musqet_minor_units(payment.amount, payment.currency_id)),
+                'amount_minor': abs(minor_units(payment.amount, payment.currency_id)),
                 'state': 'done',
             })
         self.sudo().create(vals_list)

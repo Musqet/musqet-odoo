@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- A manager sees only the Musqet refunds of the companies they work in. -->
+    <record id="pos_musqet_refund_company_rule" model="ir.rule">
+        <field name="name">Musqet refund: multi-company</field>
+        <field name="model_id" ref="model_pos_musqet_refund"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+</odoo>
