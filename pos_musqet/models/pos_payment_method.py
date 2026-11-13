@@ -600,16 +600,17 @@ class PosPaymentMethod(models.Model):
     def _musqet_resolve_sale(self, payment):
         """The done sale record of ``payment``'s (method, saleId) in its company, or nothing.
 
-        A record still pending (its result never read back, say the POS closed mid-sale) is
-        read from Musqet first, with the method that made the sale. One that can't be read
-        stays pending and can't be refunded.
+        A record still waiting on Musqet (_musqet_needs_status_read: its result never read
+        back, say the POS closed mid-sale, or settled without a rail) is read from Musqet
+        first, with the method that made the sale. One that can't be read stays as it is and
+        can't be refunded.
         """
         sale = self.env['pos.musqet.sale'].sudo().search([
             ('company_id', '=', payment.company_id.id),
             ('payment_method_id', '=', payment.payment_method_id.id),
             ('sale_id', '=', payment.transaction_id),
         ])
-        if sale.state == 'pending':
+        if sale and sale._musqet_needs_status_read():
             sale.payment_method_id.musqet_get_sale(sale.sale_id)
         return sale.filtered(lambda record: record.state == 'done')
 
@@ -858,8 +859,8 @@ class PosPaymentMethod(models.Model):
     def musqet_get_sale(self, sale_id):
         """GET /terminal/sales/:id — poll a sale's status.
 
-        Returns the partner sale shape (``{saleId, status, amountInCents, currency, rail,
-        ...}``, Musqet/musqet#2094) or ``{error}``. Also settles this
+        Returns the partner sale shape (``{saleId, reference, status, amountInCents,
+        currency, rail, ...}``, Musqet/musqet#2094) or ``{error}``. Also settles this
         method's recorded sale or refund with this saleId as Musqet reports
         (_musqet_sync_records), which the settle check and the over-refund cap rely on.
         """
@@ -883,9 +884,8 @@ class PosPaymentMethod(models.Model):
         echoed = response.get('saleId')
         if echoed is not None and echoed != str(sale_id):
             return
-        domain = [('payment_method_id', '=', self.id), ('sale_id', '=', str(sale_id))]
-        self.env['pos.musqet.sale'].sudo().search(domain)._musqet_apply_response(response)
-        self.env['pos.musqet.refund'].sudo().search(domain)._musqet_apply_response(response)
+        for records in self._musqet_records_of(sale_id):
+            records._musqet_apply_response(response)
 
     def musqet_cancel_sale(self, sale_id):
         """POST /terminal/sales/:id/cancel — request cancellation of an in-flight sale.
@@ -901,12 +901,16 @@ class PosPaymentMethod(models.Model):
     # POS session; the frontend pulls it via musqet_get_latest_status. The pilot is behind NAT
     # and relies on polling instead.
 
-    def _musqet_has_pending_record(self, sale_id):
-        """Whether this method has a sale or refund record of ``sale_id`` still pending."""
-        domain = [('payment_method_id', '=', self.id), ('sale_id', '=', sale_id),
-                  ('state', '=', 'pending')]
-        return bool(self.env['pos.musqet.sale'].sudo().search_count(domain)
-                    or self.env['pos.musqet.refund'].sudo().search_count(domain))
+    def _musqet_records_of(self, sale_id):
+        """This method's sale and refund records of ``sale_id`` (each at most one)."""
+        domain = [('payment_method_id', '=', self.id), ('sale_id', '=', str(sale_id))]
+        return (self.env['pos.musqet.sale'].sudo().search(domain),
+                self.env['pos.musqet.refund'].sudo().search(domain))
+
+    def _musqet_needs_status_read(self, sale_id):
+        """Whether this method has a record of ``sale_id`` that a status read would settle."""
+        return any(record._musqet_needs_status_read() for record in self._musqet_records_of(sale_id)
+                   if record)
 
     def _is_write_forbidden(self, fields):
         # The base blocks writes to most config fields while a POS session is open. Allow
@@ -918,7 +922,8 @@ class PosPaymentMethod(models.Model):
 
         Named with the ``musqet_`` prefix to match the proxy convention and the JS call site.
         Same access guard as the proxy: a POS cashier (or an internal/sudo call) may read it.
-        Returns the parsed canonical sale shape, or ``False`` if nothing is buffered.
+        Returns Musqet's reply to the status read a verified webhook triggered (the partner
+        sale shape, with its saleId), or ``False`` if nothing is buffered.
         """
         self.ensure_one()
         self._musqet_check_access()

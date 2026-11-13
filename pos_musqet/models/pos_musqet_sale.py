@@ -24,8 +24,9 @@ class PosMusqetSale(models.Model):
     each sale: created when Musqet accepts the sale (musqet_create_sale), and settled from
     Musqet's own replies to a status read (musqet_get_sale), polled by the POS or triggered
     by a signed webhook. A done record holds the amount Musqet captured, the currency and the
-    rail it reports. The over-refund cap and the rail check read it instead of the synced payment line, and each
-    synced Musqet payment line is checked against it (pos.payment.musqet_settle_check).
+    rail it reports. The over-refund cap and the rail check read it instead of the synced
+    payment line, and each synced Musqet payment line is checked against it
+    (pos.payment.musqet_settle_check).
 
     Created only by the server (sudo); nothing changes them from the browser. The upgrade
     to 19.0.1.3.0 also created done records for the sales synced before it
@@ -59,6 +60,12 @@ class PosMusqetSale(models.Model):
             if rail:
                 self.filtered(lambda sale: sale.state == 'done' and not sale.rail).write({'rail': rail})
         super()._musqet_apply_response(response)
+
+    def _musqet_needs_status_read(self):
+        """Also a done sale with no rail yet: a later reply fills it in, and until then the
+        sale can't be refunded (only a card sale can)."""
+        self.ensure_one()
+        return super()._musqet_needs_status_read() or (self.state == 'done' and not self.rail)
 
     def _musqet_done_vals(self, response):
         """A sale settles at the amount and currency Musqet reports captured, on its rail.

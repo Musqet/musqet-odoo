@@ -66,6 +66,11 @@ class PosMusqetRecord(models.AbstractModel):
         pending.write({**vals, 'state': 'done'})
         self.env['pos.payment']._musqet_check_settles_of(pending)
 
+    def _musqet_needs_status_read(self):
+        """Whether a status read of this record could still settle something: it is pending."""
+        self.ensure_one()
+        return self.state == 'pending'
+
     def _musqet_done_vals(self, response):
         """The values a COMPLETE ``response`` settles a record with, or None if it lacks them."""
         raise NotImplementedError

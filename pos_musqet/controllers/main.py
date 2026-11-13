@@ -13,13 +13,14 @@ class MusqetController(http.Controller):
     @http.route('/musqet/webhook', type='jsonrpc', methods=['POST'], auth='public',
                 csrf=False, save_session=False)
     def musqet_webhook(self):
-        """Receive a signed Musqet sale notification and push it into the live POS session.
+        """Receive a signed Musqet sale notification; read the sale back and push the reply.
 
         For publicly-reachable deployments only: the pilot is behind NAT and settles via
         polling (#4), so a blocked or lost webhook never breaks it. The HMAC over the raw
         body is the only authentication — an unverified, stale or malformed request is
-        dropped — and a verified one only triggers a status read from Musqet's API. We always reply 200 ``[accepted]`` so the response never doubles as an
-        oracle for signature validity and forged traffic can't trigger a retry storm.
+        dropped — and a verified one only triggers a status read from Musqet's API. We
+        always reply 200 ``[accepted]`` so the response never doubles as an oracle for
+        signature validity and forged traffic can't trigger a retry storm.
         """
         raw_body = request.httprequest.data  # exact bytes — needed to verify the HMAC.
         try:
@@ -55,9 +56,10 @@ class MusqetController(http.Controller):
         # (musqet_get_sale), which settles the server's record of the sale or refund, and
         # hands that reply, never the body, to the till. So the signing secret alone (leaked,
         # say) can neither set a sale's captured amount or rail nor make the till accept a
-        # payment. The read is made only while this method has a pending record of the sale:
-        # once it is settled (or if Odoo never recorded it), the POS's own poll covers the
-        # till, and a replayed webhook costs no call to Musqet.
+        # payment. The read is made only while this method has a record of the sale that a
+        # read could still settle (pending, or a done sale with no rail yet): once it is
+        # settled (or if Odoo never recorded it), the POS's own poll covers the till, and a
+        # replayed webhook costs no call to Musqet.
         # In a savepoint, and never raised: the reply must stay [accepted] whatever happens.
         # A record left pending here is read back from Musqet the next time a refund of the
         # sale resolves it; until then its synced line shows Not verified.
@@ -66,11 +68,13 @@ class MusqetController(http.Controller):
         try:
             with request.env.cr.savepoint():
                 # (An empty saleId has no record, so it is never read either.)
-                if isinstance(sale_id, str) and method_sudo._musqet_has_pending_record(sale_id):
+                if isinstance(sale_id, str) and method_sudo._musqet_needs_status_read(sale_id):
                     reply = method_sudo.musqet_get_sale(sale_id)
         except Exception:
             _logger.exception("Musqet webhook: could not settle sale %r", sale_id)
-        if not isinstance(reply, dict) or 'error' in reply or reply.get('saleId', sale_id) != sale_id:
+        # The same match as _musqet_sync_records: a reply naming another sale is ignored.
+        echoed = reply.get('saleId') if isinstance(reply, dict) else None
+        if not isinstance(reply, dict) or 'error' in reply or (echoed is not None and echoed != sale_id):
             return self._ack()
         # Buffer Musqet's reply and ping every open session that can show it. The frontend
         # pulls the buffer and settles the pending line idempotently (a poll may have already

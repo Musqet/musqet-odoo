@@ -432,10 +432,10 @@ export class PaymentMusqet extends PaymentInterface {
         const state = this.pollState[line.uuid];
         if (state) {
             // Only settle if this buffered result is for the sale this line is waiting on.
-            // The contract guarantees a webhook carries saleId, so require an exact match — a
-            // missing/foreign saleId, or the window before our own create has returned
-            // (state.saleId still null), means we can't confirm it's ours, so we leave it to
-            // the poll loop rather than settle on a guess.
+            // The server buffers Musqet's status-read reply with its saleId set, so require an
+            // exact match — a missing/foreign saleId, or the window before our own create has
+            // returned (state.saleId still null), means we can't confirm it's ours, so we
+            // leave it to the poll loop rather than settle on a guess.
             if (sale.saleId !== state.saleId) {
                 return;
             }

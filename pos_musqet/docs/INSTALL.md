@@ -289,10 +289,10 @@ Security notes (already enforced by the addon):
 - The webhook body is never trusted as the result: a verified webhook makes Odoo read
   the sale back from Musqet's API, and both Odoo's record of the sale and the till take
   that reply. A leaked signing secret alone can't change what a refund is capped at or
-  make the till accept a payment. Odoo reads only while it still has the sale pending,
-  so a replayed webhook for a settled sale costs no call to Musqet; a replay while it is
-  pending (within the ±300s window) costs one call each, which the rate-limiting below
-  also bounds.
+  make the till accept a payment. Odoo reads only while a read could still settle its
+  record of the sale (pending, or done with no rail yet), so a replayed webhook for a
+  settled sale costs no call to Musqet; a replay before then (within the ±300s window)
+  costs one call each, which the rate-limiting below also bounds.
 - Webhook and polling are mutually idempotent: whichever lands first settles the sale,
   the other is ignored.
 - The webhook route does an unauthenticated indexed lookup *before* HMAC verification.

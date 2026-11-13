@@ -703,12 +703,21 @@ class TestMusqetWebhookRoute(HttpCase):
         self.assertEqual(self._buffered()['status'], 'PROCESSING')
 
     def test_a_reply_without_a_sale_id_is_buffered_with_it(self):
-        # The till matches the buffer to its line by saleId.
-        reply = musqet_response('sale-wh', 'COMPLETE', amountInCents=900,
-                                currency=self.sale.currency, rail='card')
-        del reply.json.return_value['saleId']
-        self._post(self._body(), read=reply)
-        self.assertEqual(self._buffered()['saleId'], 'sale-wh')
+        # The till matches the buffer to its line by saleId. Left out or null, as
+        # _musqet_sync_records reads it.
+        for omit in (True, False):
+            with self.subTest(omit=omit):
+                self.sale.state = 'pending'
+                self.method.musqet_latest_response = ''
+                reply = musqet_response('sale-wh', 'COMPLETE', amountInCents=900,
+                                        currency=self.sale.currency, rail='card')
+                if omit:
+                    del reply.json.return_value['saleId']
+                else:
+                    reply.json.return_value['saleId'] = None
+                self._post(self._body(), read=reply)
+                self.assertEqual(self._buffered()['saleId'], 'sale-wh')
+                self.assertEqual(self.sale.state, 'done')
 
     def test_no_read_without_a_pending_record(self):
         # Settled already, never recorded, or no saleId: the POS's poll covers the till, and
@@ -723,6 +732,15 @@ class TestMusqetWebhookRoute(HttpCase):
                 self.assertIsNone(self._buffered())
         done.invalidate_recordset()
         self.assertEqual(done.state, 'done')
+
+    def test_a_done_sale_without_a_rail_is_read_again(self):
+        sale = record_sale(self.env, self.method, 'sale-norail', rail=False)
+        body = self._body()
+        body['data']['saleId'] = 'sale-norail'
+        _, mock_request = self._post(body)
+        self.assertEqual(len(mock_request.mock_calls), 1)
+        sale.invalidate_recordset()
+        self.assertEqual(sale.rail, 'card')
 
     def test_a_failed_read_buffers_nothing(self):
         _, mock_request = self._post(
@@ -1362,10 +1380,19 @@ class TestMusqetCreateRefund(TransactionCase):
                 mock_request.assert_not_called()
 
     def test_rejects_refund_of_a_sale_with_no_known_rail(self):
+        # Read again first (a later reply may report the rail); still none, so refused.
         result, mock_request = self._call_refund(
-            {'amountInCents': 500}, self._stub_original(rail=False))
+            {'amountInCents': 500}, self._stub_original(rail=False), get_status='PROCESSING')
         self.assertIn('Only card payments', result['error']['message'])
-        mock_request.assert_not_called()
+        self.assertEqual(len(self._gets(mock_request)), 1)
+        self.assertFalse(self._posts(mock_request))
+
+    def test_reads_the_rail_of_a_done_sale_settled_without_one(self):
+        result, mock_request = self._call_refund(
+            {'amountInCents': 500}, self._stub_original(rail=False), get_status='COMPLETE')
+        self.assertNotIn('error', result)
+        self.assertEqual(
+            self.env['pos.musqet.sale'].search([('sale_id', '=', 'sale-orig-1')]).rail, 'card')
 
     def test_ignores_a_record_of_the_sale_on_another_method(self):
         original = self._stub_original(amount=10.0)
