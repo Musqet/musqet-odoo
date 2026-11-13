@@ -143,7 +143,7 @@ class PosPayment(models.Model):
         """Make checks of these lines' sales and refunds run one after the other.
 
         Updates the record rows of these lines' saleIds (to the same values), as
-        pos.payment.method._musqet_claim_original_sale does for refunds: a second
+        pos.musqet.sale._musqet_claim_for_refund does for refunds: a second
         transaction checking a line of the same sale waits, and if the first committed, its
         update fails with a serialisation error and Odoo retries it with a snapshot that
         holds the first line. Without this, two lines copying one saleId, synced at once,

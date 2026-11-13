@@ -1,11 +1,16 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 import logging
 
-from odoo import api, fields, models
+from odoo import _, api, fields, models
 
 from .musqet_common import MUSQET_TERMINAL, minor_units, parse_minor_amount, sale_key_domain
 
 _logger = logging.getLogger(__name__)
+
+# At most this many pending refunds of a sale are re-read from Musqet per refund request, so
+# refunds Musqet never resolves can't make every later refund wait on many slow calls. The
+# ones not re-read stay pending and keep counting against the sale.
+MUSQET_REFUND_REREAD_LIMIT = 5
 
 
 class PosMusqetRefund(models.Model):
@@ -62,6 +67,123 @@ class PosMusqetRefund(models.Model):
         """
         amount = parse_minor_amount(response.get('amountInCents'))
         return None if amount is None else {'amount_minor': amount}
+
+    @api.model
+    def _musqet_sale_refunds_domain(self, company, sale_id):
+        """The domain of the refund records of sale ``sale_id`` in ``company``."""
+        return [('company_id', '=', company.id), ('original_sale_id', '=', sale_id)]
+
+    @api.model
+    def _musqet_reread_pending(self, company, sale_id):
+        """Ask Musqet about sale ``sale_id``'s oldest pending refunds, so failed ones stop counting.
+
+        Runs before anything locks the sale's rows (see
+        pos.payment.method.musqet_create_refund), so the calls to Musqet don't hold up other
+        refunds of the sale. A refund that can't be re-read stays pending and keeps counting,
+        the safe side for a cap. Only a Musqet method may call the API
+        (pos.payment.method._musqet_check_method).
+        """
+        pending = self.sudo().search(
+            self._musqet_sale_refunds_domain(company, sale_id) + [
+                ('state', '=', 'pending'),
+                # A refund whose method is no longer a Musqet one can't be re-read, so it
+                # mustn't use up the limit.
+                ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
+            ],
+            order='id', limit=MUSQET_REFUND_REREAD_LIMIT)
+        for refund in pending:
+            refund.payment_method_id.musqet_get_sale(refund.sale_id)
+
+    @api.model
+    def _musqet_refusal_message(self, original, *, amount, reference):
+        """Return why a refund of ``amount`` over the cap or repeating one is refused, else None.
+
+        ``original`` is the pos.musqet.sale being refunded. Must run after
+        original._musqet_claim_for_refund, so it sees every earlier refund's record.
+        """
+        all_recorded = self.sudo().search(
+            self._musqet_sale_refunds_domain(original.company_id, original.sale_id))
+        # All records, failed ones too: a synced payment of a refund Musqet reports as failed
+        # must not count through the synced branch either.
+        unrecorded_payments = all_recorded._musqet_unrecorded_synced(original)
+        # A failed refund moved no money, so it neither counts nor blocks a retry.
+        counting = all_recorded.filtered(lambda refund: refund.state != 'failed')
+        # Cumulative cap: the Musqet API enforces no limit across refunds (Musqet/musqet#2094),
+        # so cap against what is left after every refund already sent for this sale.
+        captured = original.amount_minor
+        already_refunded = sum(counting.mapped('amount_minor')) + sum(
+            abs(minor_units(payment.amount, payment.currency_id))
+            for payment in unrecorded_payments)
+        if amount > captured - already_refunded:
+            return _("The refund amount exceeds the original payment.")
+        # Duplicate check: the API has no idempotency key, so a refund re-sent with the same
+        # order reference would refund twice. The key is the order reference, so one refund
+        # order can carry one Musqet refund of a given sale.
+        state = counting._musqet_reference_states(original).get(reference)
+        if state == 'pending':
+            # Say so plainly: a refund cancelled moments ago can still read as pending.
+            return _("A refund for this order is still in progress at the terminal.")
+        if state or any(
+            reference in payment._musqet_order_references() for payment in unrecorded_payments
+        ):
+            return _("This refund has already been processed.")
+        return None
+
+    def _musqet_reference_states(self, original):
+        """Map each order reference these refunds are known by to their state.
+
+        A synced payment belongs to a refund when it has the refund's (method, saleId), the
+        record's own key; a payment of another method that shares the saleId does not.
+
+        A refund is known by the reference it was sent with and by both forms of its synced
+        order's reference (a record backfilled at the upgrade holds at most one of them: none
+        if several payments shared its saleId). A reference of a pending refund maps to
+        'pending' even if a done one shares it.
+        """
+        state_by_key = {
+            (refund.payment_method_id.id, refund.sale_id): refund.state for refund in self}
+        states = {}
+
+        def note(reference, state):
+            if reference and states.get(reference) != 'pending':
+                states[reference] = state
+
+        for refund in self:
+            note(refund.reference, refund.state)
+        if self:
+            for payment in self.env['pos.payment'].sudo().search([
+                ('transaction_id', 'in', self.mapped('sale_id')),
+                ('payment_method_id', 'in', self.payment_method_id.ids),
+                ('company_id', '=', original.company_id.id),
+            ]):
+                state = state_by_key.get((payment.payment_method_id.id, payment.transaction_id))
+                if state:
+                    for reference in payment._musqet_order_references():
+                        note(reference, state)
+        return states
+
+    def _musqet_unrecorded_synced(self, original):
+        """Synced Musqet refund payments of the original that have no refund record among these.
+
+        The upgrade to 19.0.1.2.0 records every refund synced before it, so a payment here
+        is one whose refund was never recorded: Odoo failed to save the record (logged), or
+        Musqet accepted it while its response was lost. Its link is the musqet_refund_of the
+        POS wrote, so it counts only if the POS still knew the original when it settled (not
+        after a page refresh). A payment whose (method, saleId) has a record is left to the
+        record, which Musqet's status keeps current.
+        """
+        recorded_keys = {(refund.payment_method_id.id, refund.sale_id) for refund in self}
+        return [
+            payment for payment in self.env['pos.payment'].sudo().search([
+                ('musqet_refund_of', '=', original.sale_id),
+                ('company_id', '=', original.company_id.id),
+                # Only a settled Musqet refund (it has a saleId) can be a refund of a Musqet
+                # sale, as in the backfill and the link hook.
+                ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
+                ('transaction_id', '!=', False),
+            ])
+            if (payment.payment_method_id.id, payment.transaction_id) not in recorded_keys
+        ]
 
     @api.model
     def _musqet_forget_shared_references(self):
