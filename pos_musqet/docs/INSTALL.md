@@ -213,6 +213,21 @@ and make your **company currency match it** (and keep each POS on the company cu
    Lightning-settled original shows a *manual refund* message and makes **no** API
    call (Lightning can't be reversed on the device).
 
+   Odoo records every refund Musqet accepts, straight away (except in the two cases
+   below). So the refunds of one sale can't add up to more than the sale, even before
+   the refund orders sync, and a refund order sent twice by mistake is refused. A refund that fails at the terminal stops
+   counting once Musqet reports it as failed. One refund order takes one Musqet refund of
+   a given sale: to refund more of that sale later, make a new refund order.
+
+   Two cases Odoo can't record: the connection drops after Musqet accepted a refund, or
+   Odoo fails to save the record (the server log then names the refund). If a refund
+   fails with a connection error, check the Musqet app before trying again.
+
+   The records are under **Point of Sale → Orders → Musqet Refunds** (managers only). A
+   refund stuck as *Pending* that Musqet shows did not go through can be marked
+   **Failed** there, so it stops counting against the sale. This can't be undone, so
+   check the Musqet app first.
+
 ---
 
 ## 5. Webhook (optional — public-HTTPS deployments only)
@@ -313,6 +328,13 @@ Then run the smoke test in section 4 with the test credentials.
   access to the database or compromise of the Odoo host.
   Visibility is also restricted to ERP managers. An external-secrets store is a
   possible later hardening step.
+- **The refund cap trusts payment lines as the POS synced them.** Refunds made through
+  Odoo are counted from records only the server writes. Two inputs still come from
+  payment lines the POS writes: the original sale's line (amount, Musqet sale id, rail)
+  and any synced Musqet refund payment that has no record, which counts by its own
+  amount and link. The second can only tighten the cap: a bad line can block a sale's
+  refunds, never release more money. The pilot assumes trusted cashiers; checking each
+  settled sale with Musqet is planned.
 - **No automated JavaScript test harness in-repo.** The Python backend has unit tests
   (`pos_musqet/tests/`); the POS frontend logic (polling, in-flight lock, webhook/poll
   race) is verified by the live smoke test in section 4, not by automated JS tests. A

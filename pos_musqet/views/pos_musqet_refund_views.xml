@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="pos_musqet_refund_view_list" model="ir.ui.view">
+        <field name="name">pos.musqet.refund.list</field>
+        <field name="model">pos.musqet.refund</field>
+        <field name="arch" type="xml">
+            <list create="false" edit="false" delete="false">
+                <field name="create_date" string="Sent"/>
+                <field name="reference"/>
+                <field name="original_sale_id"/>
+                <field name="sale_id"/>
+                <field name="amount_minor"/>
+                <field name="payment_method_id"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="state" widget="badge"
+                       decoration-warning="state == 'pending'"
+                       decoration-success="state == 'done'"
+                       decoration-muted="state == 'failed'"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="pos_musqet_refund_view_form" model="ir.ui.view">
+        <field name="name">pos.musqet.refund.form</field>
+        <field name="model">pos.musqet.refund</field>
+        <field name="arch" type="xml">
+            <form create="false" edit="false" delete="false">
+                <header>
+                    <button name="action_musqet_mark_failed" type="object" string="Mark as Failed"
+                            invisible="state != 'pending'"
+                            confirm="Only do this once the Musqet app shows this refund did not go through. It then stops counting against the original sale, and this cannot be undone."/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="reference"/>
+                            <field name="original_sale_id"/>
+                            <field name="sale_id"/>
+                        </group>
+                        <group>
+                            <field name="amount_minor"/>
+                            <field name="payment_method_id"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_pos_musqet_refund" model="ir.actions.act_window">
+        <field name="name">Musqet Refunds</field>
+        <field name="res_model">pos.musqet.refund</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <menuitem id="menu_pos_musqet_refund"
+              name="Musqet Refunds"
+              parent="point_of_sale.menu_point_of_sale"
+              action="action_pos_musqet_refund"
+              groups="point_of_sale.group_pos_manager"
+              sequence="90"/>
+</odoo>

@@ -2,7 +2,7 @@
 """Helpers shared by the pos_musqet test suites."""
 import importlib.util
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from cryptography.fernet import Fernet
 
@@ -41,10 +41,45 @@ def create_musqet_method(test, serial, **overrides):
     })
 
 
-def load_pre_migration():
+def make_pos_user(env, login, group='point_of_sale.group_pos_user', **values):
+    """Create a user in a POS group (a cashier by default) and nothing else."""
+    return env['res.users'].create({
+        'name': login, 'login': login,
+        'group_ids': [(6, 0, [env.ref(group).id])],
+        **values,
+    })
+
+
+def musqet_response(sale_id, status='PENDING', status_code=200):
+    """A stubbed Musqet API response carrying a sale's id and status."""
+    response = MagicMock(status_code=status_code)
+    response.json.return_value = {'saleId': sale_id, 'status': status}
+    return response
+
+
+def dirty_field_names(env):
+    """The fields with writes still waiting to reach the database."""
+    return {field.name for field, ids in env.transaction.field_dirty.items() if ids}
+
+
+def record_refund(env, method, sale_id, original_sale_id='sale-orig-1', amount_minor=1, **overrides):
+    """Create a pos.musqet.refund of ``original_sale_id`` on ``method`` (in its company)."""
+    return env['pos.musqet.refund'].create({
+        'company_id': method.company_id.id,
+        'payment_method_id': method.id,
+        'original_sale_id': original_sale_id,
+        'sale_id': sale_id,
+        'amount_minor': amount_minor,
+        **overrides,
+    })
+
+
+def load_migration(version, name):
+    """Load a migration script, e.g. load_migration('19.0.1.1.0', 'pre-migration')."""
     # The directory name has dots and the file a hyphen, so it can't be imported by name.
-    path = file_path('pos_musqet/migrations/19.0.1.1.0/pre-migration.py')
-    spec = importlib.util.spec_from_file_location('pos_musqet_pre_migration_19_0_1_1_0', path)
+    path = file_path('pos_musqet/migrations/%s/%s.py' % (version, name))
+    module_name = 'pos_musqet_%s_%s' % (name.replace('-', '_'), version.replace('.', '_'))
+    spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

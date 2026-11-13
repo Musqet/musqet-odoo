@@ -1,12 +1,15 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 {
     'name': 'POS Musqet',
-    'version': '19.0.1.1.0',
+    'version': '19.0.1.2.0',
     'category': 'Sales/Point of Sale',
     'sequence': 6,
     'summary': 'Integrate your POS with a Musqet dual-rail (card + Bitcoin Lightning) payment terminal',
     'data': [
+        'security/ir.model.access.csv',
+        'security/pos_musqet_security.xml',
         'views/pos_payment_method_views.xml',
+        'views/pos_musqet_refund_views.xml',
     ],
     'depends': ['point_of_sale'],
     'external_dependencies': {'python': ['cryptography']},

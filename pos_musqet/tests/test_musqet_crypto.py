@@ -12,7 +12,7 @@ from odoo.tools.sql import column_exists
 from .common import (
     TEST_FERNET_KEY,
     create_musqet_method,
-    load_pre_migration,
+    load_migration,
     reset_decrypt_failure_log,
     use_test_encryption_key,
 )
@@ -54,7 +54,7 @@ class TestMusqetSecretEncryption(TransactionCase):
         fields = self.method._fields
         secrets = [name for name in fields
                    if musqet_crypto.encrypted_field_name(name) in fields]
-        self.assertEqual(sorted(secrets), sorted(load_pre_migration().COLUMNS))
+        self.assertEqual(sorted(secrets), sorted(load_migration('19.0.1.1.0', 'pre-migration').COLUMNS))
         for name in secrets:
             self.assertFalse(fields[name].store, name)
             self.assertFalse(column_exists(self.env.cr, self.method._table, name), name)
@@ -229,7 +229,7 @@ class TestMusqetSecretMigration(TransactionCase):
     def setUp(self):
         super().setUp()
         reset_decrypt_failure_log(self)
-        self.migration = load_pre_migration()
+        self.migration = load_migration('19.0.1.1.0', 'pre-migration')
         self.method = create_musqet_method(self, 'MSQ-MIG-001', musqet_api_key=False)
         self.env.flush_all()
         cr = self.env.cr
