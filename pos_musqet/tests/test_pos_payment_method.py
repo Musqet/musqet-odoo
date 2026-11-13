@@ -525,6 +525,8 @@ class TestMusqetCreateRefund(TransactionCase):
         refund = MagicMock()
         refund.amount = amount
         refund.currency_id.decimal_places = 2
+        # Taken on this method, so a record of the same saleId here is its record.
+        refund.payment_method_id.id = self.method.id
         refund.pos_order_id.pos_reference = reference if pos_reference is None else pos_reference
         refund.pos_order_id.uuid = reference if uuid is None else uuid
         return refund
@@ -1115,6 +1117,20 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
             result = self.method.musqet_create_refund(
                 {'amountInCents': 200, 'reference': other_order.uuid}, original.id)
         self.assertNotIn('error', result)
+
+    def test_a_synced_refund_of_another_method_counts_beside_a_record_sharing_its_sale_id(self):
+        # The record (this method, saleId X) is a different refund from a synced payment of
+        # another method that also carries saleId X: both count.
+        original = self._payment(amount=10.0, transaction_id='sale-orig-x', musqet_rail='card')
+        record_refund(self.env, self.method, 'refund-x', original_sale_id='sale-orig-x',
+                      amount_minor=600, state='done')
+        self._payment(payment_method_id=self.plain.id, transaction_id='refund-x',
+                      musqet_refund_of='sale-orig-x', amount=-6.0)
+        with patch.object(pos_payment_method.requests, 'request') as mock_request:
+            result = self.method.musqet_create_refund(
+                {'amountInCents': 1, 'reference': 'R-X'}, original.id)
+        self.assertIn('exceeds', result['error']['message'])
+        mock_request.assert_not_called()
 
     def test_refund_claims_every_row_carrying_the_original_sale(self):
         # Two rows with the original's saleId (say, a duplicated sync): a refund naming one

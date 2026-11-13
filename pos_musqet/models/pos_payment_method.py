@@ -687,16 +687,16 @@ class PosPaymentMethod(models.Model):
         is one whose refund was never recorded: Odoo failed to save the record (logged), or
         Musqet accepted it while its response was lost. Its link is the musqet_refund_of the
         POS wrote, so it counts only if the POS still knew the original when it settled (not
-        after a page refresh). A payment whose saleId has a record is left to the record,
-        which Musqet's status keeps current.
+        after a page refresh). A payment whose (method, saleId) has a record is left to the
+        record, which Musqet's status keeps current.
         """
-        recorded_sale_ids = set(recorded.mapped('sale_id'))
+        recorded_keys = {(refund.payment_method_id.id, refund.sale_id) for refund in recorded}
         return [
             payment for payment in self.env['pos.payment'].sudo().search([
                 ('musqet_refund_of', '=', original.transaction_id),
                 ('company_id', '=', original.company_id.id),
             ])
-            if payment.transaction_id not in recorded_sale_ids
+            if (payment.payment_method_id.id, payment.transaction_id) not in recorded_keys
         ]
 
     def _musqet_record_refund(self, response, original, amount, reference):

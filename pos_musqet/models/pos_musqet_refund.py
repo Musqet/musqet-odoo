@@ -28,12 +28,13 @@ class PosMusqetRefund(models.Model):
 
     The Musqet API keeps no link from a refund to the sale it reverses and enforces no
     cumulative limit (Musqet/musqet#2094), so the over-refund cap and the duplicate check
-    in ``pos.payment.method.musqet_create_refund`` read these records. They are written
-    only by the server (sudo), never from the browser, and exist as soon as Musqet accepts
-    the refund, before the refund order reaches Odoo (except in the cases the "Not covered"
-    paragraph of musqet_create_refund names). A POS manager can mark a pending one failed
-    (action_musqet_mark_failed); nothing else changes them from the browser. The upgrade to 19.0.1.2.0 also
-    created done records for the refunds synced before it (_musqet_record_synced_refunds).
+    in ``pos.payment.method.musqet_create_refund`` read these records. They are created
+    only by the server (sudo), and exist as soon as Musqet accepts the refund, before the
+    refund order reaches Odoo (except in the cases the "Not covered" paragraph of
+    musqet_create_refund names). A POS manager can mark a pending one failed
+    (action_musqet_mark_failed); nothing else changes them from the browser. The upgrade
+    to 19.0.1.2.0 also created done records for the refunds synced before it
+    (_musqet_record_synced_refunds).
     """
     _name = 'pos.musqet.refund'
     _description = 'Musqet Refund'
@@ -70,8 +71,8 @@ class PosMusqetRefund(models.Model):
         It can't be undone: a failed refund is never re-read, and its synced payment doesn't
         count either, so the amount leaves the cap for good.
         """
-        # Checked here, not left to the read of `state`: a cached read checks nothing. Read
-        # access (ACL and company rule) is POS managers' only (ir.model.access.csv).
+        # Explicit, not left to the read of `state`. Read access is POS managers' only
+        # (ir.model.access.csv), within their companies (pos_musqet_security.xml).
         self.check_access('read')
         self.filtered(lambda refund: refund.state == 'pending').sudo().write({'state': 'failed'})
 
