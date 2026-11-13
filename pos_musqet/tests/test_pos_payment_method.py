@@ -1143,6 +1143,16 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
                 {'amountInCents': 1000, 'reference': 'R-C'}, original.id)
         self.assertNotIn('error', result)
 
+    def test_a_musqet_payment_without_a_sale_id_does_not_count(self):
+        # A settled Musqet refund always has a saleId, so a line without one isn't a refund.
+        original = self._payment(amount=10.0, transaction_id='sale-orig-n', musqet_rail='card')
+        self._payment(musqet_refund_of='sale-orig-n', amount=-10.0)
+        with patch.object(pos_payment_method.requests, 'request',
+                          return_value=musqet_response('refund-n')):
+            result = self.method.musqet_create_refund(
+                {'amountInCents': 1000, 'reference': 'R-N'}, original.id)
+        self.assertNotIn('error', result)
+
     def test_refund_claims_every_row_carrying_the_original_sale(self):
         # Two rows with the original's saleId (say, a duplicated sync): a refund naming one
         # must claim the other too, or a concurrent refund naming the other wouldn't wait.

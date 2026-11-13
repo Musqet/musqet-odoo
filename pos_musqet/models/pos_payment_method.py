@@ -681,7 +681,7 @@ class PosPaymentMethod(models.Model):
         return None
 
     def _musqet_unrecorded_synced_refunds(self, original, recorded):
-        """Synced refund payments of the original that have no refund record.
+        """Synced Musqet refund payments of the original that have no refund record.
 
         The upgrade to 19.0.1.2.0 records every refund synced before it, so a payment here
         is one whose refund was never recorded: Odoo failed to save the record (logged), or
@@ -695,9 +695,10 @@ class PosPaymentMethod(models.Model):
             payment for payment in self.env['pos.payment'].sudo().search([
                 ('musqet_refund_of', '=', original.transaction_id),
                 ('company_id', '=', original.company_id.id),
-                # Only a Musqet refund can be a refund of a Musqet sale, as in the backfill
-                # and the link hook.
+                # Only a settled Musqet refund (it has a saleId) can be a refund of a Musqet
+                # sale, as in the backfill and the link hook.
                 ('payment_method_id.use_payment_terminal', '=', 'musqet'),
+                ('transaction_id', '!=', False),
             ])
             if (payment.payment_method_id.id, payment.transaction_id) not in recorded_keys
         ]
@@ -753,8 +754,8 @@ class PosPaymentMethod(models.Model):
         are decided one after the other, each seeing the records of the ones before (see
         _musqet_claim_original_sale); every pending write is flushed before the refund is
         sent, so a retry never sends it twice. A refund recorded as pending is re-read from Musqet
-        first, so one that failed stops counting. A synced refund payment with no record still
-        counts, through its musqet_refund_of. The duplicate key is the order reference, so a
+        first, so one that failed stops counting. A synced Musqet refund payment with no record
+        still counts, through its musqet_refund_of. The duplicate key is the order reference, so a
         refund order carries at most one Musqet refund of a given sale.
 
         Not covered: a refund Musqet accepted but whose response never reached Odoo (a
