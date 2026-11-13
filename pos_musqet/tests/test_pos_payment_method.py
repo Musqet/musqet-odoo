@@ -25,10 +25,21 @@ from odoo.tests.common import TransactionCase
 _TEST_FERNET_KEY = Fernet.generate_key().decode()
 
 
-def _use_test_encryption_key(test):
-    patcher = patch.dict(os.environ, {musqet_crypto.ENV_KEY: _TEST_FERNET_KEY})
+def _use_test_encryption_key(test, key=_TEST_FERNET_KEY):
+    """Set the encryption key for the rest of the test; None unsets it."""
+    patcher = patch.dict(os.environ)
     patcher.start()
     test.addCleanup(patcher.stop)
+    if key is None:
+        os.environ.pop(musqet_crypto.ENV_KEY, None)
+    else:
+        os.environ[musqet_crypto.ENV_KEY] = key
+
+
+def _reset_decrypt_failure_log(test):
+    """Start and end the test with no decrypt failures recorded as already logged."""
+    musqet_crypto._reported_failures.clear()
+    test.addCleanup(musqet_crypto._reported_failures.clear)
 
 
 @tagged('post_install', '-at_install')
@@ -56,6 +67,36 @@ class TestMusqetBaseUrl(TransactionCase):
         # Non-Musqet methods carry no base URL; the constraint must skip them.
         self._check('')
         self._check(False)
+
+    def test_base_url_error_messages(self):
+        error = self.env['pos.payment.method']._musqet_base_url_error
+        self.assertIsNone(error('https://api.musqet.tech/api/v1'))
+        self.assertIsNone(error(False))
+        self.assertIn('https://', error('http://api.musqet.tech'))
+        self.assertIn('IP address', error('https://169.254.169.254/'))
+        self.assertIn('internal address', error('https://localhost/'))
+        self.assertIn(pos_payment_method.MUSQET_ALLOWED_HOST, error('https://musqet.tech.evil.example/'))
+
+    def test_request_rechecks_a_base_url_written_behind_the_orm(self):
+        # A direct database write skips the save-time constraint; the bearer token must
+        # still never go to an off-domain host.
+        _use_test_encryption_key(self)
+        method = self.env['pos.payment.method'].create({
+            'name': 'Musqet Terminal',
+            'use_payment_terminal': 'musqet',
+            'musqet_base_url': 'https://api.musqet.tech/api/v1',
+            'musqet_api_key': 'secret-token',
+            'musqet_terminal_serial': 'MSQ-URL-001',
+        })
+        self.env.flush_all()
+        self.env.cr.execute(
+            'UPDATE pos_payment_method SET musqet_base_url = %s WHERE id = %s',
+            ('https://attacker.example/api', method.id))
+        method.invalidate_recordset()
+        with patch.object(pos_payment_method.requests, 'request') as mock_request:
+            result = method.musqet_get_sale('sale-123')
+        mock_request.assert_not_called()
+        self.assertIn('musqet.tech', result['error']['message'])
 
     def test_rejects_non_https(self):
         with self.assertRaises(ValidationError):
@@ -740,7 +781,8 @@ class TestMusqetCreateRefund(TransactionCase):
 class TestMusqetSecretEncryption(TransactionCase):
     """The API key and webhook secret are stored as Fernet ciphertext, never plaintext.
 
-    Guards the database-only-leak defence: the stored column holds ciphertext bound to its
+    Guards the defence against a leaked read-only copy of the database: the stored column
+    holds ciphertext bound to its
     record and field, the plaintext field round-trips through the key in the environment,
     the plaintext has no column, and a missing or broken key degrades instead of crashing.
     """
@@ -748,9 +790,7 @@ class TestMusqetSecretEncryption(TransactionCase):
     def setUp(self):
         super().setUp()
         _use_test_encryption_key(self)
-        # Failures are logged once per process; start each test with a clean slate.
-        musqet_crypto._reported_failures.clear()
-        self.addCleanup(musqet_crypto._reported_failures.clear)
+        _reset_decrypt_failure_log(self)
         self.method = self._create_method('MSQ-ENC-001')
 
     def _create_method(self, serial):
@@ -768,16 +808,6 @@ class TestMusqetSecretEncryption(TransactionCase):
             'SELECT musqet_api_key_encrypted, musqet_webhook_secret_encrypted '
             'FROM pos_payment_method WHERE id = %s', (self.method.id,))
         return self.env.cr.fetchone()
-
-    def _set_key(self, value):
-        """Set the encryption key for the rest of the test; None unsets it."""
-        patcher = patch.dict(os.environ)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        if value is None:
-            os.environ.pop(musqet_crypto.ENV_KEY, None)
-        else:
-            os.environ[musqet_crypto.ENV_KEY] = value
 
     def test_api_key_stored_as_ciphertext_bound_to_its_record(self):
         stored_key, _ = self._stored_row()
@@ -816,24 +846,24 @@ class TestMusqetSecretEncryption(TransactionCase):
 
     def test_key_with_surrounding_whitespace_still_works(self):
         # An env file or a pasted value often carries a trailing newline.
-        self._set_key('  %s\n' % _TEST_FERNET_KEY)
+        _use_test_encryption_key(self, '  %s\n' % _TEST_FERNET_KEY)
         self.method.invalidate_recordset()
         self.assertEqual(self.method.musqet_api_key, 'secret-token')
 
     def test_write_without_key_raises_a_user_error(self):
-        self._set_key(None)
+        _use_test_encryption_key(self, None)
         with self.assertRaisesRegex(UserError, musqet_crypto.ENV_KEY):
             self.method.musqet_api_key = 'x'
 
     def test_write_with_malformed_key_raises_a_user_error(self):
-        self._set_key('not-a-key')
+        _use_test_encryption_key(self, 'not-a-key')
         with self.assertRaisesRegex(UserError, musqet_crypto.ENV_KEY):
             self.method.musqet_webhook_secret = 'x'
 
     def test_read_with_wrong_key_degrades_to_empty(self):
         # A mis-provisioned box must not crash on every read: decrypt logs and yields False.
         self.method.invalidate_recordset()
-        self._set_key(Fernet.generate_key().decode())
+        _use_test_encryption_key(self, Fernet.generate_key().decode())
         with self.assertLogs(musqet_crypto.__name__, level='ERROR') as logs:
             self.assertFalse(self.method.musqet_api_key)
         # The log names the secret, so an admin knows which one to re-enter.
@@ -841,18 +871,18 @@ class TestMusqetSecretEncryption(TransactionCase):
 
     def test_read_without_key_degrades_to_empty(self):
         self.method.invalidate_recordset()
-        self._set_key(None)
+        _use_test_encryption_key(self, None)
         with self.assertLogs(musqet_crypto.__name__, level='ERROR'):
             self.assertFalse(self.method.musqet_api_key)
 
     def test_read_with_malformed_key_degrades_to_empty(self):
         self.method.invalidate_recordset()
-        self._set_key('not-a-key')
+        _use_test_encryption_key(self, 'not-a-key')
         with self.assertLogs(musqet_crypto.__name__, level='ERROR'):
             self.assertFalse(self.method.musqet_api_key)
 
     def test_decrypt_failure_is_logged_once(self):
-        self._set_key('not-a-key')
+        _use_test_encryption_key(self, 'not-a-key')
         self.method.invalidate_recordset()
         with self.assertLogs(musqet_crypto.__name__, level='ERROR'):
             self.assertFalse(self.method.musqet_api_key)
@@ -880,7 +910,7 @@ class TestMusqetSecretEncryption(TransactionCase):
             self.assertFalse(self.method.musqet_webhook_secret)
 
     def test_request_with_unreadable_key_says_why_and_sends_nothing(self):
-        self._set_key(Fernet.generate_key().decode())
+        _use_test_encryption_key(self, Fernet.generate_key().decode())
         self.method.invalidate_recordset()
         with patch.object(pos_payment_method.requests, 'request') as mock_request, \
                 self.assertLogs(musqet_crypto.__name__, level='ERROR'):
@@ -888,22 +918,40 @@ class TestMusqetSecretEncryption(TransactionCase):
         mock_request.assert_not_called()
         self.assertIn(musqet_crypto.ENV_KEY, result['error']['message'])
 
-    def test_request_rechecks_a_base_url_written_behind_the_orm(self):
-        # A direct database write skips the save-time constraint; the bearer token must
-        # still never go to an off-domain host.
-        self.env.flush_all()
-        self.env.cr.execute(
-            'UPDATE pos_payment_method SET musqet_base_url = %s WHERE id = %s',
-            ('https://attacker.example/api', self.method.id))
+    def test_onchange_copy_reads_the_secret_without_an_alarm(self):
+        # A form onchange computes on an in-memory copy (NewId) of the saved record; the
+        # binding must use the saved id, or every edit logs a false tamper error.
         self.method.invalidate_recordset()
+        draft = self.method.new({'name': 'Renamed'}, origin=self.method)
+        with self.assertNoLogs(musqet_crypto.__name__, level='ERROR'):
+            self.assertEqual(draft.musqet_api_key, 'secret-token')
+
+    def test_unsaved_record_has_no_secret(self):
+        draft = self.env['pos.payment.method'].new({'musqet_api_key_encrypted': 'not-a-token'})
+        with self.assertNoLogs(musqet_crypto.__name__, level='ERROR'):
+            self.assertFalse(draft.musqet_api_key)
+
+    def test_decrypt_failure_is_logged_again_after_a_recovery(self):
+        good_key = _TEST_FERNET_KEY
+        for key, expect_log in (('not-a-key', True), (good_key, False), ('not-a-key', True)):
+            _use_test_encryption_key(self, key)
+            self.method.invalidate_recordset()
+            if expect_log:
+                with self.assertLogs(musqet_crypto.__name__, level='ERROR'):
+                    self.assertFalse(self.method.musqet_api_key)
+            else:
+                self.assertEqual(self.method.musqet_api_key, 'secret-token')
+
+    def test_request_without_any_api_key_sends_nothing(self):
+        self.method.musqet_api_key = False
         with patch.object(pos_payment_method.requests, 'request') as mock_request:
             result = self.method.musqet_get_sale('sale-123')
         mock_request.assert_not_called()
-        self.assertIn('error', result)
+        self.assertEqual(result['error']['message'], 'No Musqet API key is configured.')
 
     def test_malformed_webhook_header_does_not_read_the_secret(self):
         self.method.musqet_webhook_secret = 'whsec-xyz'
-        self._set_key('not-a-key')
+        _use_test_encryption_key(self, 'not-a-key')
         self.method.invalidate_recordset()
         with self.assertNoLogs(musqet_crypto.__name__, level='ERROR'):
             self.assertFalse(self.method._musqet_verify_webhook('garbage', b'{}'))
@@ -931,8 +979,7 @@ class TestMusqetSecretMigration(TransactionCase):
     def setUp(self):
         super().setUp()
         _use_test_encryption_key(self)
-        musqet_crypto._reported_failures.clear()
-        self.addCleanup(musqet_crypto._reported_failures.clear)
+        _reset_decrypt_failure_log(self)
         self.migration = _load_pre_migration()
         self.method = self.env['pos.payment.method'].create({
             'name': 'Musqet Terminal',
@@ -945,6 +992,15 @@ class TestMusqetSecretMigration(TransactionCase):
                    'ADD COLUMN musqet_webhook_secret varchar')
         cr.execute("UPDATE pos_payment_method SET musqet_api_key = 'legacy-token', "
                    "musqet_webhook_secret = 'legacy-whsec' WHERE id = %s", (self.method.id,))
+
+    def _migrate_expecting(self, error_class):
+        # Not self.assertRaises: Odoo's version rolls back to a savepoint on the error,
+        # which would undo a premature DROP COLUMN and hide it from the assertions.
+        try:
+            self.migration.migrate(self.env.cr, '19.0.1.0.0')
+        except error_class:
+            return
+        self.fail('%s not raised' % error_class.__name__)
 
     def _plaintext_columns(self):
         return [name for name in ('musqet_api_key', 'musqet_webhook_secret')
@@ -962,14 +1018,22 @@ class TestMusqetSecretMigration(TransactionCase):
         self.assertEqual(self._plaintext_columns(), ['musqet_api_key', 'musqet_webhook_secret'])
 
     def test_missing_key_aborts_before_dropping(self):
-        with patch.dict(os.environ):
-            os.environ.pop(musqet_crypto.ENV_KEY, None)
-            with self.assertRaises(musqet_crypto.MusqetEncryptionKeyMissing):
-                self.migration.migrate(self.env.cr, '19.0.1.0.0')
-        self.assertIn('musqet_api_key', self._plaintext_columns())
+        _use_test_encryption_key(self, None)
+        self._migrate_expecting(musqet_crypto.MusqetEncryptionKeyMissing)
+        self.assertEqual(self._plaintext_columns(), ['musqet_api_key', 'musqet_webhook_secret'])
 
     def test_failed_round_trip_aborts_before_dropping(self):
-        with patch.object(self.migration, 'decrypt_secret', return_value=False), \
-                self.assertRaises(self.migration.MusqetMigrationError):
-            self.migration.migrate(self.env.cr, '19.0.1.0.0')
-        self.assertIn('musqet_api_key', self._plaintext_columns())
+        with patch.object(self.migration, 'decrypt_secret', return_value=False):
+            self._migrate_expecting(self.migration.MusqetMigrationError)
+        self.assertEqual(self._plaintext_columns(), ['musqet_api_key', 'musqet_webhook_secret'])
+
+    def test_failure_on_a_later_column_keeps_every_plaintext_column(self):
+        # The API key passes, then the webhook secret fails: nothing may be dropped yet.
+        real_decrypt = self.migration.decrypt_secret
+
+        def decrypt_failing_webhook_secret(ciphertext, label):
+            return False if label.endswith('musqet_webhook_secret') else real_decrypt(ciphertext, label)
+
+        with patch.object(self.migration, 'decrypt_secret', side_effect=decrypt_failing_webhook_secret):
+            self._migrate_expecting(self.migration.MusqetMigrationError)
+        self.assertEqual(self._plaintext_columns(), ['musqet_api_key', 'musqet_webhook_secret'])

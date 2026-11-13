@@ -19,9 +19,9 @@ _logger = logging.getLogger(__name__)
 
 ENV_KEY = 'MUSQET_FIELD_ENCRYPTION_KEY'
 
-# (label, reason) pairs already logged by this process, so a broken key or value logs one
-# error per secret rather than one per read (the webhook route reads before it can
-# authenticate the caller).
+# (label, reason) pairs already logged by this worker process, so a broken key or value
+# logs one error per secret and reason rather than one per read. A successful decrypt
+# clears the label's entries, so a key that breaks again later is reported again.
 _reported_failures = set()
 
 
@@ -33,9 +33,14 @@ class MusqetEncryptionKeyMissing(Exception):
     """
 
 
-def secret_label(record_id, field_name):
-    """The label a secret is bound to: its model, record id and field."""
-    return 'pos.payment.method,%s,%s' % (record_id, field_name)
+def secret_label(model_name, record_id, field_name):
+    """The label a secret is bound to: its model, saved record id and field."""
+    return '%s,%s,%s' % (model_name, record_id, field_name)
+
+
+def encrypted_field_name(field_name):
+    """The stored column holding the ciphertext of a secret field."""
+    return field_name + '_encrypted'
 
 
 def _fernet():
@@ -66,7 +71,8 @@ def decrypt_secret(ciphertext, label):
     """Return the plaintext of a ciphertext bound to label, or False if it cannot be read.
 
     A failure (key unset or invalid, wrong key, corrupted value, or a ciphertext written for
-    another record or field) is logged once per label and reason, and yields False rather
+    another record or field) is logged once per label and reason until that label next
+    decrypts, and yields False rather
     than raising, so a mis-provisioned box degrades instead of crashing on every read.
     Encryption is the loud path; decryption is the soft one.
     """
@@ -81,9 +87,15 @@ def decrypt_secret(ciphertext, label):
     else:
         bound_label, separator, plaintext = bound.partition('\n')
         if separator and bound_label == label:
+            _forget_failures(label)
             return plaintext
         reason = 'the value was written for another record or field'
     if (label, reason) not in _reported_failures:
         _reported_failures.add((label, reason))
         _logger.error('Cannot decrypt the Musqet secret %s: %s', label, reason)
     return False
+
+
+def _forget_failures(label):
+    for reported in [entry for entry in _reported_failures if entry[0] == label]:
+        _reported_failures.discard(reported)
