@@ -55,8 +55,9 @@ class MusqetController(http.Controller):
         # buffer the verified result and ping every open session that can show it. The
         # frontend pulls the buffer and settles the pending line idempotently (a poll may
         # have already settled it — see payment_musqet.js _finishSale).
-        # In a savepoint, and never raised: the reply must stay [accepted] whatever happens,
-        # and the poll path settles the record later anyway.
+        # In a savepoint, and never raised: the reply must stay [accepted] whatever happens.
+        # A record left pending here is read back from Musqet the next time a refund of the
+        # sale resolves it; until then its synced line shows Not verified.
         try:
             with request.env.cr.savepoint():
                 method_sudo._musqet_sync_records(sale.get('saleId'), sale)

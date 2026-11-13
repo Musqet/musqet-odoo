@@ -220,10 +220,11 @@ and make your **company currency match it** (and keep each POS on the company cu
    **Point of Sale → Orders → Musqet Sales** (managers only). When the order syncs,
    Odoo checks each Musqet payment line against that record and shows the result in the
    order's **Payments** tab: *Verified* if Musqet reported that sale or refund complete
-   for that amount, *Not verified* if not. If another payment line claims the same
-   Musqet sale, only the line of the order Odoo sent to the terminal stays Verified; the
-   copy is Not verified, and if Odoo can't tell which line that is, both are. Lines of an
-   order not yet paid are left blank. To find the Not verified
+   for that amount, on the order Odoo sent it for; *Not verified* if not. So a copy of a
+   Musqet sale id on another order's line is Not verified, and if Odoo can't tell which
+   line is the genuine one (two on the same order, or sales recorded by the upgrade from
+   lines that already shared an id), none of them is. Lines of an order not yet paid are
+   left blank. To find the Not verified
    ones, filter **Point of Sale → Orders → Payments** by **Musqet: Not Verified**, and
    check each in the Musqet app. The server log also names each one. A Not verified sale
    line can't be refunded through the terminal: if a copy has blocked a genuine sale's

@@ -1,9 +1,16 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 import logging
+from collections import Counter
 
 from odoo import api, fields, models
+from odoo.tools import SQL
 
-from .musqet_common import MUSQET_FAILURE_STATUSES, MUSQET_SUCCESS_STATUS, sale_key_domain
+from .musqet_common import (
+    MUSQET_FAILURE_STATUSES,
+    MUSQET_MAX_MINOR_AMOUNT,
+    MUSQET_SUCCESS_STATUS,
+    sale_key_domain,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -85,12 +92,29 @@ class PosMusqetRecord(models.AbstractModel):
                 self._musqet_kind, sale_id, details)
 
     @api.model
+    def _musqet_lock(self, condition):
+        """Update this model's rows matching ``condition`` (an SQL condition) to the same values.
+
+        A no-op write that takes the rows' locks: a concurrent transaction updating them waits,
+        and if this one commits first it fails with a serialisation error, so Odoo retries it
+        with a snapshot that sees this one's work. A plain lock would leave it its old snapshot.
+        """
+        self.env.cr.execute(SQL(
+            'UPDATE %s SET write_date = write_date WHERE %s', SQL.identifier(self._table), condition))
+
+    @api.model
     def _musqet_record_unrecorded(self, payments, vals_for):
         """Create a done record for each payment whose (method, saleId) has none.
 
         For the upgrade backfills; safe to run again. ``vals_for(payment)`` gives the
         model's own values. Returns how many were created.
+
+        The reference is the payment's order's, unless several payments share the
+        (method, saleId): which of them the command was sent for is unknown, so the record
+        names none, and the settle check can't pick one of them as genuine. An amount too
+        large to store is skipped and logged rather than failing the upgrade.
         """
+        shared = Counter((payment.payment_method_id.id, payment.transaction_id) for payment in payments)
         recorded = {
             (record.payment_method_id.id, record.sale_id)
             for record in self.sudo().search(sale_key_domain(
@@ -102,14 +126,20 @@ class PosMusqetRecord(models.AbstractModel):
             if key in recorded:
                 continue
             recorded.add(key)
+            vals = vals_for(payment)
+            if abs(vals['amount_minor']) > MUSQET_MAX_MINOR_AMOUNT:
+                _logger.warning(
+                    "pos_musqet: not recording Musqet %s %r of payment %s: amount %s is too large",
+                    self._musqet_kind, payment.transaction_id, payment.id, payment.amount)
+                continue
             order = payment.pos_order_id
             vals_list.append({
                 'company_id': payment.company_id.id,
                 'payment_method_id': payment.payment_method_id.id,
                 'sale_id': payment.transaction_id,
-                'reference': order.pos_reference or order.uuid,
+                'reference': (order.pos_reference or order.uuid) if shared[key] == 1 else False,
                 'state': 'done',
-                **vals_for(payment),
+                **vals,
             })
         self.sudo().create(vals_list)
         return len(vals_list)

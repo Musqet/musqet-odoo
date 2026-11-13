@@ -741,7 +741,9 @@ class TestMusqetCreateRefund(TransactionCase):
             sale.write(vals)
         else:
             record_sale(self.env, self.method, 'sale-orig-1', **vals)
-        original = MagicMock()
+        # Spec'd on pos.payment, so a method the refund calls that pos.payment lacks fails
+        # here rather than answering with a truthy mock.
+        original = MagicMock(spec=type(self.env['pos.payment']))
         original.exists.return_value = original
         original.company_id = company if company is not None else self.method.company_id
         original.payment_method_id.use_payment_terminal = terminal
@@ -1461,6 +1463,32 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
             self.assertNotIn('error', result)
             self.assertEqual(versions_at_read, [before])
             self.assertNotEqual(self._row_version(sale), before)
+
+    def test_a_sole_line_on_another_order_is_not_verified(self):
+        # The sale was sent for another order (which never synced): a line on this one, even
+        # alone and for the right amount, isn't the line the sale vouches for.
+        record_sale(self.env, self.method, 'sale-elsewhere', reference='Order 99999-999-9999')
+        line = self._payment(amount=10.0, transaction_id='sale-elsewhere')
+        self.assertEqual(line.musqet_settle_check, 'unverified')
+
+    def test_sale_backfill_names_no_order_for_a_shared_sale_id(self):
+        # Two lines already shared a saleId before the upgrade: the record can't say which
+        # one the sale was sent for, so neither is Verified.
+        older = self._payment(pos_order_id=self._order().id, amount=10.0, transaction_id='sale-shared')
+        newer = self._payment(amount=10.0, transaction_id='sale-shared')
+        self.env['pos.musqet.sale']._musqet_record_synced_sales()
+        sale = self.env['pos.musqet.sale'].search([('sale_id', '=', 'sale-shared')])
+        self.assertFalse(sale.reference)
+        (older | newer)._musqet_check_settles()
+        self.assertEqual({older.musqet_settle_check, newer.musqet_settle_check}, {'unverified'})
+
+    def test_sale_backfill_skips_an_amount_too_large_to_store(self):
+        self._payment(amount=30000000.0, transaction_id='sale-huge')
+        logger = 'odoo.addons.pos_musqet.models.pos_musqet_record'
+        with self.assertLogs(logger, 'WARNING') as logs:
+            self.env['pos.musqet.sale']._musqet_record_synced_sales()
+        self.assertIn('sale-huge', logs.output[0])
+        self.assertFalse(self.env['pos.musqet.sale'].search([('sale_id', '=', 'sale-huge')]))
 
     def test_a_line_check_claims_the_sale_record(self):
         # Two lines copying one saleId, synced at once, must meet on the record's row.

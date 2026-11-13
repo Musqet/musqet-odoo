@@ -1,6 +1,6 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 import logging
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 from odoo import api, fields, models
 from odoo.tools import SQL
@@ -108,11 +108,13 @@ class PosPayment(models.Model):
         """Set musqet_settle_check on these payments, and on every line sharing their saleIds.
 
         A line is checked against the server's done sale or refund record of its
-        (method, saleId), and against the other paid lines claiming it: one Musqet sale or
-        refund vouches for one line. When a saleId is copied onto another line, only the line
-        of the order Odoo sent to Musqet (the record's reference) stays Verified; if no single
-        line is that one, all of them are Not verified. Logs each Musqet line that becomes
-        Not verified, so it can be checked by hand.
+        (method, saleId): the amount (and currency) Musqet reported, and the order. One
+        Musqet sale or refund vouches for one line, the line of the order Odoo sent the
+        command for (the record's reference), alone on it; a saleId copied onto another
+        order's line leaves the copy Not verified. A record with no reference (made by the
+        upgrade from lines sharing a saleId) vouches for a line only if no other paid line
+        claims it. Logs each Musqet line that becomes Not verified, so it can be checked by
+        hand.
         """
         own_lines = self._musqet_lines()
         # Lock first, so a line of the same sale synced at the same time is counted below.
@@ -151,12 +153,11 @@ class PosPayment(models.Model):
         """
         if not self:
             return
-        for table in ('pos_musqet_sale', 'pos_musqet_refund'):
-            self.env.cr.execute(SQL(
-                'UPDATE %s SET write_date = write_date'
-                ' WHERE sale_id IN %s AND payment_method_id IN %s',
-                SQL.identifier(table), tuple(self.mapped('transaction_id')),
-                tuple(self.payment_method_id.ids)))
+        condition = SQL(
+            'sale_id IN %s AND payment_method_id IN %s',
+            tuple(self.mapped('transaction_id')), tuple(self.payment_method_id.ids))
+        for model in ('pos.musqet.sale', 'pos.musqet.refund'):
+            self.env[model]._musqet_lock(condition)
 
     def _musqet_done_records(self):
         """The done sale and refund records of these Musqet lines, each by (method, saleId)."""
@@ -202,11 +203,14 @@ class PosPayment(models.Model):
         if not record:
             return 'unverified'
         rivals = claimants[self._musqet_claim_key()]
-        if len(rivals) > 1:
-            # Contested: the line of the order the command was sent for wins, if it is alone.
+        if record.reference:
+            # The line must be on the order the command was sent for, and be alone there.
             sent_for = [line for line in rivals if record.reference in line._musqet_order_references()]
             if sent_for != [self]:
                 return 'unverified'
+        elif len(rivals) > 1:
+            # No reference to tell them apart (a record the upgrade made from shared lines).
+            return 'unverified'
         amount = minor_units(self.amount, self.currency_id)
         if is_sale:
             verified = record.amount_minor == amount and record.currency == self.currency_id.name
