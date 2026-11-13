@@ -111,6 +111,16 @@ class TestMusqetBaseUrl(TransactionCase):
         for url in (
             'https://evil.example\\@api.musqet.tech/api/v1',
             'https://evil.example\\api.musqet.tech/api/v1',
+        ):
+            self.assertIn('not valid', error(url), msg=url)
+        # Past the character filter, so only the host cross-check can catch it: urllib3
+        # sends to the punycode host, which is not the host urlparse checked.
+        self.assertIn('not valid', error('https://ápi.musqet.tech/api/v1'))
+
+    def test_rejects_credentials_and_unsafe_characters(self):
+        # Both parsers agree on these hosts; they are refused by policy.
+        error = self.env['pos.payment.method']._musqet_base_url_error
+        for url in (
             'https://user:pass@api.musqet.tech/api/v1',
             'https://evil.example@api.musqet.tech/api/v1',
             'https://api.musqet.tech /api/v1',
@@ -124,14 +134,17 @@ class TestMusqetBaseUrl(TransactionCase):
         # still never go to an off-domain host.
         method = _create_musqet_method(self, 'MSQ-URL-001')
         self.env.flush_all()
-        for url in ('https://attacker.example/api', 'https://attacker.example\\@api.musqet.tech/api'):
+        for url, expected in (
+            ('https://attacker.example/api', pos_payment_method.MUSQET_ALLOWED_HOST),
+            ('https://attacker.example\\@api.musqet.tech/api', 'not valid'),
+        ):
             self.env.cr.execute(
                 'UPDATE pos_payment_method SET musqet_base_url = %s WHERE id = %s', (url, method.id))
             method.invalidate_recordset()
             with patch.object(pos_payment_method.requests, 'request') as mock_request:
                 result = method.musqet_get_sale('sale-123')
             mock_request.assert_not_called()
-            self.assertIn('error', result, msg=url)
+            self.assertIn(expected, result['error']['message'], msg=url)
 
     def test_rejects_non_https(self):
         with self.assertRaises(ValidationError):
@@ -820,9 +833,12 @@ class TestMusqetSecretEncryption(TransactionCase):
     def test_api_key_round_trips_and_reaches_the_header(self):
         self.method.invalidate_recordset()
         self.assertEqual(self.method.sudo().musqet_api_key, 'secret-token')
+        response = MagicMock(status_code=200)
+        response.json.return_value = {}
+        with patch.object(pos_payment_method.requests, 'request', return_value=response) as mock_request:
+            self.method.musqet_get_sale('sale-123')
         self.assertEqual(
-            self.method._musqet_headers(self.method.sudo().musqet_api_key)['Authorization'],
-            'Bearer secret-token')
+            mock_request.call_args.kwargs['headers']['Authorization'], 'Bearer secret-token')
 
     def test_webhook_secret_round_trips(self):
         self.method.musqet_webhook_secret = 'whsec-xyz'

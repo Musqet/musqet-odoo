@@ -334,29 +334,23 @@ class PosPaymentMethod(models.Model):
     def _musqet_url(self, base_url, path):
         return base_url.rstrip('/') + '/' + path.lstrip('/')
 
-    def _musqet_request(self, method, path, payload=None):
-        """Make one server-side call to the Musqet API.
+    def _musqet_request_target(self):
+        """Return ``(base_url, api_key, None)`` for a request, or ``(None, None, {error})``.
 
-        Returns the parsed JSON body on success, or a clean ``{'error': {...}}`` dict on
-        a transport failure or non-2xx response — never raises the raw error, and never
-        puts the API key in a log line.
+        Checks the configuration a request needs, so _musqet_request only sends and reads.
         """
-        self.ensure_one()
-        self._musqet_check_access()
-        # Read with sudo() because the field is restricted to ERP managers (like the key),
-        # but _musqet_check_access intentionally lets a plain POS cashier drive the
-        # terminal — a cashier isn't an ERP manager, so an un-sudo'd read would fail.
+        # Read with sudo() because the fields are restricted to ERP managers, but
+        # _musqet_check_access intentionally lets a plain POS cashier drive the terminal:
+        # a cashier isn't an ERP manager, so an un-sudo'd read would fail.
         payment_method_sudo = self.sudo()
         base_url = payment_method_sudo.musqet_base_url
         if not base_url:
-            # Keep the "always return {error}" contract: rstrip on a falsy field would
-            # otherwise raise a raw AttributeError before the try block below.
-            return {'error': {'message': _("No Musqet API URL is configured.")}}
+            return None, None, {'error': {'message': _("No Musqet API URL is configured.")}}
         # Checked again here, not only on save: a direct database write skips the ORM
         # constraint, and this URL receives the bearer token.
         url_error = self._musqet_base_url_error(base_url)
         if url_error:
-            return {'error': {'message': url_error}}
+            return None, None, {'error': {'message': url_error}}
         # Never send an empty bearer token: say why there is no key instead of relaying
         # the API's authentication error.
         api_key = payment_method_sudo.musqet_api_key
@@ -364,10 +358,24 @@ class PosPaymentMethod(models.Model):
             if payment_method_sudo.musqet_api_key_encrypted:
                 # Shown to the cashier, so no cause or host detail: the server log names
                 # the secret and why it failed.
-                return {'error': {'message': _(
+                return None, None, {'error': {'message': _(
                     "The Musqet API key cannot be read. Ask an administrator to check the "
                     "Musqet encryption key and API key.")}}
-            return {'error': {'message': _("No Musqet API key is configured.")}}
+            return None, None, {'error': {'message': _("No Musqet API key is configured.")}}
+        return base_url, api_key, None
+
+    def _musqet_request(self, method, path, payload=None):
+        """Make one server-side call to the Musqet API.
+
+        Returns the parsed JSON body on success, or a clean ``{'error': {...}}`` dict on
+        a configuration problem, a transport failure or a non-2xx response: never raises
+        the raw error, and never puts the API key in a log line.
+        """
+        self.ensure_one()
+        self._musqet_check_access()
+        base_url, api_key, error = self._musqet_request_target()
+        if error:
+            return error
         url = self._musqet_url(base_url, path)
         _logger.info("Musqet %s %s by user #%d", method, path, self.env.uid)
         if payload is not None:
