@@ -232,20 +232,9 @@ class PosPaymentMethod(models.Model):
         """
         if not url:
             return None
-        invalid = _("The Musqet API URL is not valid.")
-        # urlparse (used below) and urllib3 (used by requests to send the token) split some
-        # URLs differently: urllib3 also ends the host at a backslash, so
-        # "https://evil.example\@api.musqet.tech" reads as api.musqet.tech here but is sent
-        # to evil.example. Refuse the characters behind such splits, and credentials.
-        if any(char in '\\@' or char.isspace() or not char.isprintable() for char in url):
-            return invalid
-        try:
-            parsed = urllib.parse.urlparse(url)
-            parsed.port  # noqa: B018 -- read to raise on a non-numeric or out-of-range port
-            requests_host = (parse_url(url).host or '').lower()
-        except ValueError:
-            # e.g. an unclosed IPv6 bracket ("https://[::1") or a bad port.
-            return invalid
+        parsed = self._musqet_parse_base_url(url)
+        if not parsed:
+            return _("The Musqet API URL is not valid.")
         if parsed.scheme != 'https':
             return _("The Musqet API URL must use https://.")
         host = (parsed.hostname or '').lower()
@@ -259,9 +248,6 @@ class PosPaymentMethod(models.Model):
             pass
         else:
             return _("The Musqet API URL must be a domain name, not an IP address.")
-        # Whatever this check reads as the host must be the host requests connects to.
-        if requests_host != host:
-            return invalid
         # Reject obvious internal hostnames as a defence-in-depth layer.
         if host == 'localhost' or host.endswith(('.local', '.internal', '.lan', '.localdomain')):
             return _("The Musqet API URL must point to a public Musqet host, not an internal address.")
@@ -269,6 +255,30 @@ class PosPaymentMethod(models.Model):
         if host != MUSQET_ALLOWED_HOST and not host.endswith('.' + MUSQET_ALLOWED_HOST):
             return _("The Musqet API URL must be on the %(domain)s domain.", domain=MUSQET_ALLOWED_HOST)
         return None
+
+    @api.model
+    def _musqet_parse_base_url(self, url):
+        """Parse a Musqet API URL, or return None if it can't be read one way only.
+
+        urlparse (used by the checks) and urllib3 (used by requests to send the token) split
+        some URLs differently: urllib3 also ends the host at a backslash, so
+        "https://evil.example\\@api.musqet.tech" reads as api.musqet.tech to urlparse but is
+        sent to evil.example. Refuse the characters behind such splits (and so credentials),
+        and require both parsers to read the same host.
+        """
+        if any(char in '\\@' or char.isspace() or not char.isprintable() for char in url):
+            return None
+        try:
+            parsed = urllib.parse.urlparse(url)
+            parsed.port  # noqa: B018 -- read to raise on a non-numeric or out-of-range port
+            requests_host = parse_url(url).host or ''
+        except ValueError:
+            # e.g. an unclosed IPv6 bracket ("https://[::1") or a bad port.
+            return None
+        # urllib3 keeps an IPv6 literal's brackets; urlparse drops them.
+        if requests_host.strip('[]').lower() != (parsed.hostname or '').lower():
+            return None
+        return parsed
 
     # -- Backend proxy --------------------------------------------------------
     # These methods hold the Bearer key and make the Musqet HTTPS calls server-side:

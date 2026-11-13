@@ -9,6 +9,7 @@
         'views/pos_payment_method_views.xml',
     ],
     'depends': ['point_of_sale'],
+    'external_dependencies': {'python': ['cryptography']},
     'installable': True,
     'assets': {
         'point_of_sale._assets_pos': [
