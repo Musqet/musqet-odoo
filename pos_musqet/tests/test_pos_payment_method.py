@@ -26,7 +26,10 @@ _TEST_FERNET_KEY = Fernet.generate_key().decode()
 
 
 def _use_test_encryption_key(test, key=_TEST_FERNET_KEY):
-    """Set the encryption key for the rest of the test; None unsets it."""
+    """Set the encryption key for the rest of the test; None unsets it.
+
+    May be called again to switch keys; each call is undone at cleanup.
+    """
     patcher = patch.dict(os.environ)
     patcher.start()
     test.addCleanup(patcher.stop)
@@ -34,6 +37,19 @@ def _use_test_encryption_key(test, key=_TEST_FERNET_KEY):
         os.environ.pop(musqet_crypto.ENV_KEY, None)
     else:
         os.environ[musqet_crypto.ENV_KEY] = key
+
+
+def _create_musqet_method(test, serial, **overrides):
+    """Create a configured Musqet payment method, with the test encryption key set."""
+    _use_test_encryption_key(test)
+    return test.env['pos.payment.method'].create({
+        'name': 'Musqet Terminal %s' % serial,
+        'use_payment_terminal': 'musqet',
+        'musqet_base_url': 'https://api.musqet.tech/api/v1',
+        'musqet_api_key': 'secret-token',
+        'musqet_terminal_serial': serial,
+        **overrides,
+    })
 
 
 def _reset_decrypt_failure_log(test):
@@ -80,14 +96,7 @@ class TestMusqetBaseUrl(TransactionCase):
     def test_request_rechecks_a_base_url_written_behind_the_orm(self):
         # A direct database write skips the save-time constraint; the bearer token must
         # still never go to an off-domain host.
-        _use_test_encryption_key(self)
-        method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': 'MSQ-URL-001',
-        })
+        method = _create_musqet_method(self, 'MSQ-URL-001')
         self.env.flush_all()
         self.env.cr.execute(
             'UPDATE pos_payment_method SET musqet_base_url = %s WHERE id = %s',
@@ -145,19 +154,12 @@ class TestMusqetProxyAccess(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        _use_test_encryption_key(self)
         self.cashier = self.env['res.users'].create({
             'name': 'Musqet Cashier',
             'login': 'musqet_cashier',
             'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
         })
-        self.method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': 'MSQ-TEST-001',
-        })
+        self.method = _create_musqet_method(self, 'MSQ-TEST-001')
 
     def _fake_response(self, status_code=200, json_body=None):
         response = MagicMock()
@@ -210,15 +212,7 @@ class TestMusqetWebhookVerification(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        _use_test_encryption_key(self)
-        self.method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': 'MSQ-WH-001',
-            'musqet_webhook_secret': self.SECRET,
-        })
+        self.method = _create_musqet_method(self, 'MSQ-WH-001', musqet_webhook_secret=self.SECRET)
 
     def _sign(self, raw_body, timestamp, secret=None):
         if isinstance(raw_body, str):
@@ -272,19 +266,12 @@ class TestMusqetLatestStatus(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        _use_test_encryption_key(self)
         self.cashier = self.env['res.users'].create({
             'name': 'Musqet Cashier',
             'login': 'musqet_cashier_status',
             'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
         })
-        self.method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': 'MSQ-WH-002',
-        })
+        self.method = _create_musqet_method(self, 'MSQ-WH-002')
 
     def test_denies_a_non_musqet_payment_method_and_keeps_its_buffer(self):
         # The method check guards the buffer itself: a refused read must not consume it.
@@ -343,19 +330,12 @@ class TestMusqetCreateSale(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        _use_test_encryption_key(self)
         self.cashier = self.env['res.users'].create({
             'name': 'Musqet Cashier',
             'login': 'musqet_cashier_sale',
             'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
         })
-        self.method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': 'MSQ-SALE-001',
-        })
+        self.method = _create_musqet_method(self, 'MSQ-SALE-001')
         self.currency = self.method.company_id.currency_id.name
 
     def _call_sale(self, payload):
@@ -513,19 +493,12 @@ class TestMusqetCreateRefund(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        _use_test_encryption_key(self)
         self.cashier = self.env['res.users'].create({
             'name': 'Musqet Cashier',
             'login': 'musqet_cashier_refund',
             'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
         })
-        self.method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': 'MSQ-RF-001',
-        })
+        self.method = _create_musqet_method(self, 'MSQ-RF-001')
         self.currency = self.method.company_id.currency_id.name
         self.other_currency = 'EUR' if self.currency != 'EUR' else 'USD'
 
@@ -789,18 +762,8 @@ class TestMusqetSecretEncryption(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        _use_test_encryption_key(self)
         _reset_decrypt_failure_log(self)
-        self.method = self._create_method('MSQ-ENC-001')
-
-    def _create_method(self, serial):
-        return self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal %s' % serial,
-            'use_payment_terminal': 'musqet',
-            'musqet_base_url': 'https://api.musqet.tech/api/v1',
-            'musqet_api_key': 'secret-token',
-            'musqet_terminal_serial': serial,
-        })
+        self.method = _create_musqet_method(self, 'MSQ-ENC-001')
 
     def _stored_row(self):
         self.env.flush_all()
@@ -818,15 +781,22 @@ class TestMusqetSecretEncryption(TransactionCase):
             'pos.payment.method,%s,musqet_api_key\nsecret-token' % self.method.id)
 
     def test_plaintext_fields_have_no_column(self):
-        # The migration's list of plaintext columns is the list of secret fields.
-        for name in _load_pre_migration().COLUMNS:
-            self.assertFalse(self.method._fields[name].store, name)
-            self.assertFalse(column_exists(self.env.cr, 'pos_payment_method', name), name)
+        # Every secret field (one with a ciphertext column) is non-stored and has no column,
+        # and the 19.0.1.1.0 migration covers exactly these fields.
+        fields = self.method._fields
+        secrets = [name for name in fields
+                   if musqet_crypto.encrypted_field_name(name) in fields]
+        self.assertEqual(sorted(secrets), sorted(_load_pre_migration().COLUMNS))
+        for name in secrets:
+            self.assertFalse(fields[name].store, name)
+            self.assertFalse(column_exists(self.env.cr, self.method._table, name), name)
 
     def test_api_key_round_trips_and_reaches_the_header(self):
         self.method.invalidate_recordset()
         self.assertEqual(self.method.sudo().musqet_api_key, 'secret-token')
-        self.assertEqual(self.method._musqet_headers()['Authorization'], 'Bearer secret-token')
+        self.assertEqual(
+            self.method._musqet_headers(self.method.sudo().musqet_api_key)['Authorization'],
+            'Bearer secret-token')
 
     def test_webhook_secret_round_trips(self):
         self.method.musqet_webhook_secret = 'whsec-xyz'
@@ -876,12 +846,6 @@ class TestMusqetSecretEncryption(TransactionCase):
         with self.assertLogs(musqet_crypto.__name__, level='ERROR'):
             self.assertFalse(self.method.musqet_api_key)
 
-    def test_read_with_malformed_key_degrades_to_empty(self):
-        self.method.invalidate_recordset()
-        _use_test_encryption_key(self, 'not-a-key')
-        with self.assertLogs(musqet_crypto.__name__, level='ERROR'):
-            self.assertFalse(self.method.musqet_api_key)
-
     def test_decrypt_failure_is_logged_once(self):
         _use_test_encryption_key(self, 'not-a-key')
         self.method.invalidate_recordset()
@@ -891,8 +855,19 @@ class TestMusqetSecretEncryption(TransactionCase):
         with self.assertNoLogs(musqet_crypto.__name__, level='ERROR'):
             self.assertFalse(self.method.musqet_api_key)
 
+    def test_ciphertext_without_a_label_does_not_decrypt(self):
+        # A valid token under the right key, but not bound to any record or field.
+        unbound = Fernet(_TEST_FERNET_KEY).encrypt(b'secret-token').decode()
+        self.env.flush_all()
+        self.env.cr.execute(
+            'UPDATE pos_payment_method SET musqet_api_key_encrypted = %s WHERE id = %s',
+            (unbound, self.method.id))
+        self.method.invalidate_recordset()
+        with self.assertLogs(musqet_crypto.__name__, level='ERROR'):
+            self.assertFalse(self.method.musqet_api_key)
+
     def test_ciphertext_moved_to_another_record_does_not_decrypt(self):
-        other = self._create_method('MSQ-ENC-002')
+        other = _create_musqet_method(self, 'MSQ-ENC-002')
         stored_key, _ = self._stored_row()
         self.env.cr.execute(
             'UPDATE pos_payment_method SET musqet_api_key_encrypted = %s WHERE id = %s',
@@ -936,7 +911,7 @@ class TestMusqetSecretEncryption(TransactionCase):
 
     def test_unsaved_record_cannot_take_a_secret(self):
         draft = self.env['pos.payment.method'].new({'musqet_api_key': 'secret-token'})
-        with self.assertRaises(UserError):
+        with self.assertRaisesRegex(UserError, 'Save the payment method'):
             draft._inverse_musqet_api_key()
 
     def test_decrypt_failure_is_logged_again_after_a_recovery(self):
@@ -991,14 +966,9 @@ class TestMusqetSecretMigration(TransactionCase):
 
     def setUp(self):
         super().setUp()
-        _use_test_encryption_key(self)
         _reset_decrypt_failure_log(self)
         self.migration = _load_pre_migration()
-        self.method = self.env['pos.payment.method'].create({
-            'name': 'Musqet Terminal',
-            'use_payment_terminal': 'musqet',
-            'musqet_terminal_serial': 'MSQ-MIG-001',
-        })
+        self.method = _create_musqet_method(self, 'MSQ-MIG-001', musqet_api_key=False)
         self.env.flush_all()
         cr = self.env.cr
         cr.execute('ALTER TABLE pos_payment_method ADD COLUMN musqet_api_key varchar, '
@@ -1017,7 +987,7 @@ class TestMusqetSecretMigration(TransactionCase):
 
     def _plaintext_columns(self):
         return [name for name in self.migration.COLUMNS
-                if column_exists(self.env.cr, 'pos_payment_method', name)]
+                if column_exists(self.env.cr, self.migration.TABLE, name)]
 
     def test_encrypts_and_drops_the_plaintext_columns(self):
         self.migration.migrate(self.env.cr, '19.0.1.0.0')

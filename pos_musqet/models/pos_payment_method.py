@@ -311,11 +311,9 @@ class PosPaymentMethod(models.Model):
             return {'error': {'message': _("No Musqet terminal serial is configured.")}}
         return None
 
-    def _musqet_headers(self):
-        # The key is read with sudo() because the field is restricted to ERP managers;
-        # it lives only in this header and is never logged.
-        # _musqet_request returns an error before calling this when there is no key.
-        return {'Authorization': 'Bearer %s' % self.sudo().musqet_api_key}
+    def _musqet_headers(self, api_key):
+        # The key lives only in this header and is never logged.
+        return {'Authorization': 'Bearer %s' % api_key}
 
     def _musqet_url(self, base_url, path):
         return base_url.rstrip('/') + '/' + path.lstrip('/')
@@ -332,8 +330,8 @@ class PosPaymentMethod(models.Model):
         # Read with sudo() because the field is restricted to ERP managers (like the key),
         # but _musqet_check_access intentionally lets a plain POS cashier drive the
         # terminal — a cashier isn't an ERP manager, so an un-sudo'd read would fail.
-        sudo_method = self.sudo()
-        base_url = sudo_method.musqet_base_url
+        payment_method_sudo = self.sudo()
+        base_url = payment_method_sudo.musqet_base_url
         if not base_url:
             # Keep the "always return {error}" contract: rstrip on a falsy field would
             # otherwise raise a raw AttributeError before the try block below.
@@ -345,13 +343,14 @@ class PosPaymentMethod(models.Model):
             return {'error': {'message': url_error}}
         # Never send an empty bearer token: say why there is no key instead of relaying
         # the API's authentication error.
-        if not sudo_method.musqet_api_key:
-            if sudo_method.musqet_api_key_encrypted:
+        api_key = payment_method_sudo.musqet_api_key
+        if not api_key:
+            if payment_method_sudo.musqet_api_key_encrypted:
                 # Shown to the cashier, so no cause or host detail: the server log names
                 # the secret and why it failed.
                 return {'error': {'message': _(
                     "The Musqet API key cannot be read. Ask an administrator to check the "
-                    "encryption key or re-enter the API key on the payment method.")}}
+                    "Musqet encryption key and API key.")}}
             return {'error': {'message': _("No Musqet API key is configured.")}}
         url = self._musqet_url(base_url, path)
         _logger.info("Musqet %s %s by user #%d", method, path, self.env.uid)
@@ -360,7 +359,7 @@ class PosPaymentMethod(models.Model):
         try:
             response = requests.request(
                 method, url,
-                headers=self._musqet_headers(),
+                headers=self._musqet_headers(api_key),
                 json=payload if payload is not None else None,
                 timeout=MUSQET_TIMEOUT,
                 # The base URL is statically validated (https, no IP/internal hosts, locked
@@ -692,8 +691,8 @@ class PosPaymentMethod(models.Model):
             return False
         if age > MUSQET_WEBHOOK_TOLERANCE:
             return False
-        # Decrypt only once the header is well formed and fresh, so a malformed request
-        # can't make the server decrypt (and log a broken key) at will.
+        # Skip the decrypt for malformed or stale headers. This is not a guard: a well-formed,
+        # fresh header with a bogus signature still reaches the decrypt.
         secret = self.sudo().musqet_webhook_secret
         if not secret:
             return False

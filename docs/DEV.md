@@ -49,7 +49,7 @@ safe; to start from an empty DB first, see **Teardown** below.
 ## 2. Bring up the UI for a live smoke test
 
 The Musqet API key and webhook secret are encrypted at rest with
-`MUSQET_FIELD_ENCRYPTION_KEY` ([`INSTALL.md` §2.1](../pos_musqet/docs/INSTALL.md)), which
+`MUSQET_FIELD_ENCRYPTION_KEY` ([`INSTALL.md` §2.1](../pos_musqet/docs/INSTALL.md#21-set-the-secret-encryption-key-required)), which
 the compose file passes through from your shell. Export a throwaway key first, or saving
 the API key in the UI fails:
 
