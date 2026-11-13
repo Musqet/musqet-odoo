@@ -6,6 +6,10 @@ import time
 from unittest.mock import MagicMock, patch
 
 from odoo.addons.pos_musqet.models import pos_payment_method
+from odoo.addons.pos_musqet.models.pos_payment_method import (
+    MUSQET_LANGUAGE_MAX_LENGTH,
+    MUSQET_REFERENCE_MAX_LENGTH,
+)
 from odoo.exceptions import AccessDenied, ValidationError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
@@ -119,6 +123,21 @@ class TestMusqetProxyAccess(TransactionCase):
         # ...and redirects are not followed (SSRF guard).
         self.assertFalse(called_kwargs['allow_redirects'])
 
+    def test_get_and_cancel_deny_a_non_musqet_payment_method(self):
+        # _musqet_check_access also refuses a method that isn't a Musqet one: no request may go
+        # out for it.
+        plain = self.env['pos.payment.method'].create({'name': 'Plain Method'}).with_user(self.cashier)
+        calls = {
+            'musqet_get_sale': lambda: plain.musqet_get_sale('sale-1'),
+            'musqet_cancel_sale': lambda: plain.musqet_cancel_sale('sale-1'),
+        }
+        for name, call in calls.items():
+            with self.subTest(method=name), \
+                 patch.object(pos_payment_method.requests, 'request') as mock_request:
+                with self.assertRaises(AccessDenied):
+                    call()
+                mock_request.assert_not_called()
+
 
 @tagged('post_install', '-at_install')
 class TestMusqetWebhookVerification(TransactionCase):
@@ -207,6 +226,14 @@ class TestMusqetLatestStatus(TransactionCase):
             'musqet_terminal_serial': 'MSQ-WH-002',
         })
 
+    def test_denies_a_non_musqet_payment_method_and_keeps_its_buffer(self):
+        # The method check guards the buffer itself: a refused read must not consume it.
+        plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
+        plain.musqet_latest_response = '{"status": "COMPLETE"}'
+        with self.assertRaises(AccessDenied):
+            plain.with_user(self.cashier).musqet_get_latest_status()
+        self.assertEqual(plain.musqet_latest_response, '{"status": "COMPLETE"}')
+
     def test_returns_false_when_nothing_buffered(self):
         self.assertFalse(self.method.with_user(self.cashier).musqet_get_latest_status())
 
@@ -240,8 +267,174 @@ class TestMusqetLatestStatus(TransactionCase):
         fake.status_code = 200
         fake.json.return_value = {'saleId': 'new', 'status': 'PENDING'}
         with patch.object(pos_payment_method.requests, 'request', return_value=fake):
-            self.method.with_user(self.cashier).musqet_create_sale({'serial': 'MSQ-WH-002'})
+            self.method.with_user(self.cashier).musqet_create_sale({'amountInCents': 500})
         self.assertFalse(self.method.musqet_latest_response)
+
+
+@tagged('post_install', '-at_install')
+class TestMusqetCreateSale(TransactionCase):
+    """musqet_create_sale rebuilds the request server-side from an untrusted payload.
+
+    Any POS user can call it over RPC, and the API accepts ``type`` on the same endpoint,
+    so the payload must never be able to turn a sale into a refund, name a serial other
+    than the method's own, pick the currency, or smuggle extra keys through. (Which method
+    record the caller runs it on is a separate access question.)
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.cashier = self.env['res.users'].create({
+            'name': 'Musqet Cashier',
+            'login': 'musqet_cashier_sale',
+            'group_ids': [(6, 0, [self.env.ref('point_of_sale.group_pos_user').id])],
+        })
+        self.method = self.env['pos.payment.method'].create({
+            'name': 'Musqet Terminal',
+            'use_payment_terminal': 'musqet',
+            'musqet_base_url': 'https://api.musqet.tech/api/v1',
+            'musqet_api_key': 'secret-token',
+            'musqet_terminal_serial': 'MSQ-SALE-001',
+        })
+        self.currency = self.method.company_id.currency_id.name
+
+    def _call_sale(self, payload):
+        fake = MagicMock()
+        fake.status_code = 200
+        fake.json.return_value = {'saleId': 'sale-1', 'status': 'PENDING'}
+        with patch.object(pos_payment_method.requests, 'request', return_value=fake) as mock_request:
+            result = self.method.with_user(self.cashier).musqet_create_sale(payload)
+        return result, mock_request
+
+    def test_sends_a_well_formed_sale(self):
+        payload = {
+            'amountInCents': 1250,
+            'mode': 'any',
+            'shouldPrint': True,
+            'language': 'en',
+            'reference': 'Order 00001-001-0001',
+            'currency': self.currency,
+        }
+        result, mock_request = self._call_sale(payload)
+        self.assertEqual(result, {'saleId': 'sale-1', 'status': 'PENDING'})
+        _, called_args, called_kwargs = mock_request.mock_calls[0]
+        self.assertEqual(called_args[:2], ('POST', 'https://api.musqet.tech/api/v1/terminal/sales'))
+        self.assertEqual(called_kwargs['json'], {
+            'serial': 'MSQ-SALE-001',
+            'type': 'sale',
+            'mode': 'any',
+            'amountInCents': 1250,
+            'shouldPrint': True,
+            'language': 'en',
+            'reference': 'Order 00001-001-0001',
+            'currency': self.currency,
+        })
+
+    def test_forces_type_sale_and_own_serial_and_drops_unknown_keys(self):
+        payload = {
+            'amountInCents': 99999999,
+            'type': 'refund',
+            'serial': 'MSQ-OTHER-999',
+            'extra': 'smuggled',
+        }
+        result, mock_request = self._call_sale(payload)
+        self.assertNotIn('error', result)
+        sent = mock_request.mock_calls[0].kwargs['json']
+        self.assertEqual(sent['type'], 'sale')            # never the payload's "refund"
+        self.assertEqual(sent['serial'], 'MSQ-SALE-001')  # this method's serial
+        self.assertNotIn('extra', sent)
+        self.assertEqual(sent['mode'], 'any')             # default when the payload omits it
+        self.assertEqual(sent['currency'], self.currency)  # the company's, when omitted
+
+    def test_rejects_invalid_amounts(self):
+        for amount in (None, 0, -100, 12.5, '500', True, [500]):
+            with self.subTest(amount=amount):
+                result, mock_request = self._call_sale({'amountInCents': amount})
+                self.assertIn('error', result)
+                mock_request.assert_not_called()
+
+    def test_rejects_unknown_mode(self):
+        result, mock_request = self._call_sale({'amountInCents': 500, 'mode': 'refund'})
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_rejects_a_non_dict_payload(self):
+        result, mock_request = self._call_sale(['amountInCents', 500])
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_drops_or_defaults_cosmetic_fields_of_the_wrong_type(self):
+        for should_print in ('yes', 'false', 0, None):
+            with self.subTest(shouldPrint=should_print):
+                result, mock_request = self._call_sale(
+                    {'amountInCents': 500, 'language': ['en'], 'shouldPrint': should_print})
+                self.assertNotIn('error', result)
+                sent = mock_request.mock_calls[0].kwargs['json']
+                self.assertNotIn('language', sent)
+                self.assertIs(sent['shouldPrint'], True)   # the default, never a coerced value
+
+    def test_keeps_should_print_false(self):
+        result, mock_request = self._call_sale({'amountInCents': 500, 'shouldPrint': False})
+        self.assertNotIn('error', result)
+        self.assertIs(mock_request.mock_calls[0].kwargs['json']['shouldPrint'], False)
+
+    def test_accepts_every_valid_mode(self):
+        for mode in ('any', 'card', 'bitcoin'):
+            with self.subTest(mode=mode):
+                result, mock_request = self._call_sale({'amountInCents': 500, 'mode': mode})
+                self.assertNotIn('error', result)
+                self.assertEqual(mock_request.mock_calls[0].kwargs['json']['mode'], mode)
+
+    def test_accepts_a_reference_at_the_length_limit(self):
+        result, mock_request = self._call_sale({'amountInCents': 500, 'reference': 'r' * MUSQET_REFERENCE_MAX_LENGTH})
+        self.assertNotIn('error', result)
+        self.assertEqual(mock_request.mock_calls[0].kwargs['json']['reference'], 'r' * MUSQET_REFERENCE_MAX_LENGTH)
+
+    def test_language_length_limits(self):
+        for language, kept in (
+            ('', False),
+            ('x' * MUSQET_LANGUAGE_MAX_LENGTH, True),
+            ('x' * (MUSQET_LANGUAGE_MAX_LENGTH + 1), False),
+        ):
+            with self.subTest(language=language):
+                result, mock_request = self._call_sale({'amountInCents': 500, 'language': language})
+                self.assertNotIn('error', result)
+                self.assertEqual('language' in mock_request.mock_calls[0].kwargs['json'], kept)
+
+    def test_rejects_a_currency_other_than_the_company_currency(self):
+        other = 'EUR' if self.currency != 'EUR' else 'USD'
+        for currency in (other, 'NOT-A-CODE', ['USD']):
+            with self.subTest(currency=currency):
+                result, mock_request = self._call_sale({'amountInCents': 500, 'currency': currency})
+                self.assertIn('company currency', result['error']['message'])
+                mock_request.assert_not_called()
+
+    def test_rejects_an_invalid_reference(self):
+        for reference in ({'nested': 'object'}, '', 'x' * (MUSQET_REFERENCE_MAX_LENGTH + 1), 42):
+            with self.subTest(reference=reference):
+                result, mock_request = self._call_sale({'amountInCents': 500, 'reference': reference})
+                self.assertIn('error', result)
+                mock_request.assert_not_called()
+
+    def test_denies_a_non_musqet_payment_method(self):
+        cash = self.env['pos.payment.method'].create({'name': 'Plain Method'})
+        with self.assertRaises(AccessDenied):
+            cash.with_user(self.cashier).musqet_create_sale({'amountInCents': 500})
+
+    def test_rejects_when_no_serial_is_configured(self):
+        self.method.musqet_terminal_serial = False
+        result, mock_request = self._call_sale({'amountInCents': 500})
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_does_not_clear_the_buffer_on_a_rejected_request(self):
+        self.method.musqet_latest_response = json.dumps({'saleId': 'live', 'status': 'PENDING'})
+        self._call_sale({'amountInCents': 0})
+        self.assertTrue(self.method.musqet_latest_response)
+
+    def test_denies_a_non_pos_user(self):
+        public = self.env.ref('base.public_user')
+        with self.assertRaises(AccessDenied):
+            self.method.with_user(public).musqet_create_sale({'amountInCents': 500})
 
 
 @tagged('post_install', '-at_install')
@@ -250,10 +443,11 @@ class TestMusqetCreateRefund(TransactionCase):
 
     The Musqet API enforces neither rail correctness nor over-refund (Musqet/musqet#2094), so
     this method must: re-read the (untrusted) original payment by id, refuse anything that
-    isn't a card-settled Musqet sale of this company whose captured amount covers the request,
-    and FORCE the refund-defining fields (type, mode, serial) so a tampered payload can't widen
-    the action. The original pos.payment is stubbed (a real one needs a full POS session, left
-    to the live smoke run) so these tests exercise the authorization logic directly.
+    isn't a card-settled Musqet sale of this company, in the company currency, whose captured
+    amount covers the request, set type, mode and serial on the server, require the company
+    currency, and require a valid reference, so a tampered payload can't widen the action. The
+    original pos.payment is stubbed (a real one needs a full POS session, left to the live
+    smoke run) so these tests exercise the authorization logic directly.
     """
 
     def setUp(self):
@@ -270,6 +464,8 @@ class TestMusqetCreateRefund(TransactionCase):
             'musqet_api_key': 'secret-token',
             'musqet_terminal_serial': 'MSQ-RF-001',
         })
+        self.currency = self.method.company_id.currency_id.name
+        self.other_currency = 'EUR' if self.currency != 'EUR' else 'USD'
 
     def _stub_original(self, rail='card', amount=10.0, terminal='musqet', company=None):
         original = MagicMock()
@@ -279,7 +475,7 @@ class TestMusqetCreateRefund(TransactionCase):
         original.musqet_rail = rail
         original.amount = amount
         original.currency_id.decimal_places = 2
-        original.currency_id.name = 'USD'
+        original.currency_id.name = self.currency
         # A real string saleId so the cumulative-refund search runs against a concrete value
         # (the search itself is stubbed in _call_refund — see prior_refunds).
         original.transaction_id = 'sale-orig-1'
@@ -297,9 +493,9 @@ class TestMusqetCreateRefund(TransactionCase):
         return refund
 
     def _call_refund(self, payload, original, original_payment_id=123, prior_refunds=None):
-        # Default the request currency to the stub's so the currency-equality guard passes
-        # unless a test deliberately overrides it.
-        payload = {'currency': 'USD', **payload}
+        # No default currency: an omitted one means the company currency, so most tests take
+        # that path. Tests that send a currency do so deliberately.
+        payload = {'reference': 'REFUND-ORDER-1', **payload}
         fake = MagicMock()
         fake.status_code = 200
         fake.json.return_value = {'saleId': 'refund-1', 'status': 'PENDING'}
@@ -331,7 +527,7 @@ class TestMusqetCreateRefund(TransactionCase):
             'type': 'sale',
             'mode': 'any',
             'serial': 'MSQ-EVIL-999',
-            'currency': 'USD',   # must match the original; the mismatch case is tested separately
+            'currency': self.currency,   # must be the company currency; mismatch tested separately
             'extra': 'smuggled',
         }
         result, mock_request = self._call_refund(payload, original)
@@ -340,16 +536,17 @@ class TestMusqetCreateRefund(TransactionCase):
         self.assertEqual(sent['type'], 'refund')         # forced — not the payload's "sale"
         self.assertEqual(sent['mode'], 'card')           # forced — not the payload's "any"
         self.assertEqual(sent['serial'], 'MSQ-RF-001')   # this method's serial, not the payload's
-        self.assertEqual(sent['currency'], 'USD')        # the original's currency, from the record
+        self.assertEqual(sent['currency'], self.currency)  # the company currency
         self.assertNotIn('extra', sent)
 
     def test_rejects_currency_mismatch(self):
-        # The over-refund cap compares minor units, so a request in a different currency than
-        # the original could compare mismatched scales — reject before forwarding.
-        original = self._stub_original(rail='card', amount=10.0)   # currency USD
-        result, mock_request = self._call_refund({'amountInCents': 500, 'currency': 'EUR'}, original)
-        self.assertIn('error', result)
-        mock_request.assert_not_called()
+        # A refund requested in any currency but the company's is refused before forwarding.
+        for currency in (self.other_currency, 'NOT-A-CODE', ['USD']):
+            with self.subTest(currency=currency):
+                result, mock_request = self._call_refund(
+                    {'amountInCents': 500, 'currency': currency}, self._stub_original())
+                self.assertIn('company currency', result['error']['message'])
+                mock_request.assert_not_called()
 
     def test_rejects_refund_of_a_lightning_sale(self):
         original = self._stub_original(rail='bitcoin', amount=10.0)
@@ -429,6 +626,75 @@ class TestMusqetCreateRefund(TransactionCase):
             {'amountInCents': 200, 'reference': 'REFUND-ORDER-8'}, original, prior_refunds=prior)
         self.assertNotIn('error', result)
         self.assertEqual(mock_request.mock_calls[0].kwargs['json']['amountInCents'], 200)
+
+    def test_rejects_a_non_dict_payload(self):
+        with patch.object(pos_payment_method.requests, 'request') as mock_request:
+            result = self.method.with_user(self.cashier).musqet_create_refund(['amountInCents', 500], 123)
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+
+    def test_rejects_loosely_typed_amounts(self):
+        original = self._stub_original(amount=10.0)
+        for amount in (True, 12.9, '500', None):
+            with self.subTest(amount=amount):
+                result, mock_request = self._call_refund({'amountInCents': amount}, original)
+                self.assertIn('error', result)
+                mock_request.assert_not_called()
+
+    def test_omitted_currency_means_the_company_currency(self):
+        # Same rule as a sale: no currency in the payload means the company currency.
+        result, mock_request = self._call_refund({'amountInCents': 500}, self._stub_original(amount=10.0))
+        self.assertNotIn('error', result)
+        self.assertEqual(mock_request.mock_calls[0].kwargs['json']['currency'], self.currency)
+
+    def test_rejects_an_original_not_in_the_company_currency(self):
+        # The over-refund cap compares minor units, so an original in another currency could
+        # compare mismatched scales: refused even when the request itself is fine.
+        original = self._stub_original(amount=10.0)
+        original.currency_id.name = self.other_currency
+        result, mock_request = self._call_refund({'amountInCents': 500}, original)
+        self.assertIn('original payment', result['error']['message'])
+        mock_request.assert_not_called()
+
+    def test_rejects_when_no_serial_is_configured(self):
+        self.method.musqet_terminal_serial = False
+        self.method.musqet_latest_response = json.dumps({'saleId': 'live', 'status': 'PENDING'})
+        result, mock_request = self._call_refund({'amountInCents': 500}, self._stub_original())
+        self.assertIn('error', result)
+        mock_request.assert_not_called()
+        self.assertTrue(self.method.musqet_latest_response)
+
+    def test_denies_a_non_musqet_payment_method(self):
+        plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
+        with self.assertRaises(AccessDenied):
+            plain.with_user(self.cashier).musqet_create_refund(
+                {'amountInCents': 500, 'currency': self.currency, 'reference': 'R-1'}, 123)
+
+    def test_accepts_a_reference_at_the_length_limit(self):
+        result, mock_request = self._call_refund(
+            {'amountInCents': 500, 'reference': 'r' * MUSQET_REFERENCE_MAX_LENGTH}, self._stub_original())
+        self.assertNotIn('error', result)
+        self.assertEqual(mock_request.mock_calls[0].kwargs['json']['reference'], 'r' * MUSQET_REFERENCE_MAX_LENGTH)
+
+    def test_rejects_a_missing_or_invalid_reference(self):
+        original = self._stub_original(amount=10.0)
+        for reference in (None, '', {'nested': 'object'}, 'x' * (MUSQET_REFERENCE_MAX_LENGTH + 1)):
+            with self.subTest(reference=reference):
+                result, mock_request = self._call_refund(
+                    {'amountInCents': 500, 'reference': reference}, original)
+                self.assertIn('error', result)
+                mock_request.assert_not_called()
+
+    def test_drops_cosmetic_fields_of_the_wrong_type_and_keeps_server_currency(self):
+        original = self._stub_original(amount=10.0)
+        result, mock_request = self._call_refund(
+            {'amountInCents': 500, 'language': ['en'], 'shouldPrint': 'no'}, original)
+        self.assertNotIn('error', result)
+        sent = mock_request.mock_calls[0].kwargs['json']
+        self.assertNotIn('language', sent)
+        self.assertIs(sent['shouldPrint'], True)
+        self.assertEqual(sent['currency'], self.currency)
+        self.assertEqual(sent['reference'], 'REFUND-ORDER-1')
 
     def test_rejects_cross_company_original(self):
         other_company = self.env['res.company'].create({'name': 'Other Co'})

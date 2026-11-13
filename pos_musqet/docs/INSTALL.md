@@ -110,16 +110,19 @@ your Odoo addons path.
 
 ### 3.1 Currency match — the most likely footgun ⚠️
 
-**The POS currency must equal the terminal/business currency configured at Musqet.**
+**The company currency must equal the business currency configured at Musqet.**
 
-The addon sends every sale amount in the **POS currency**. The sale side is **not**
-validated server-side — Odoo trusts your POS currency — so if your Odoo company/POS is
-in GBP but the Musqet terminal settles in another currency, **sales will be
-mischarged** and there is no guard to catch it. Refunds *are* enforced: the backend
-**rejects any refund** whose currency does not match the original payment's currency.
+Every amount must be in the **company currency**. The backend refuses a sale or refund
+in any other currency with a currency-mismatch error, and a refund must also match the
+original payment's currency. So if a POS is set to a currency other than the company
+currency, its Musqet payments are refused until they match.
 
-Before going live, confirm with Musqet which currency the terminal/business is set to
-and make your **POS pricelist / company currency match it**.
+What the backend **cannot** check is the currency set for your business at Musqet: if
+your Odoo company is in GBP but your business at Musqet is set to another currency, **sales
+will be mischarged**.
+
+Before going live, confirm with Musqet which currency your business is set to
+and make your **company currency match it** (and keep each POS on the company currency).
 
 ---
 
@@ -182,9 +185,9 @@ Security notes (already enforced by the addon):
 
 Keep this simple for V1:
 
-- **Book everything in your POS/store currency to one journal.** Configure the Musqet
+- **Book everything in your company currency to one journal.** Configure the Musqet
   payment method with a single standard payment **journal** (the normal Odoo payment
-  method setup). Card and Lightning sales both post to that one journal in your store
+  method setup). Card and Lightning sales both post to that one journal in your company
   currency. There is **no** separate sats ledger and **no** exchange-rate field in
   Odoo.
 - **my.musqet is the source of truth for the Bitcoin-vs-pounds split.** The Musqet
@@ -212,8 +215,8 @@ Before going live, request the following from Musqet and confirm each item:
 - [ ] **Test terminal serial** for a physical/sandbox terminal.
 - [ ] **Settlement option chosen** (Voltage LND *keep sats*, or Solidi *auto-exchange
       to GBP*) — and that it's configured on the Musqet side.
-- [ ] **Terminal/business currency** at Musqet, and that your **POS/company currency
-      matches it** (see §3.1).
+- [ ] **Business currency** at Musqet, and that your **company currency matches it**
+      (each POS must use the company currency; see §3.1).
 - [ ] Sample `metadata` shapes (card + bitcoin) so you know what the terminal returns.
 - [ ] **Terminal API is deployed** for your environment (the Musqet-side terminal API
       work, tracked separately) — confirm the create/poll/cancel endpoints are live
