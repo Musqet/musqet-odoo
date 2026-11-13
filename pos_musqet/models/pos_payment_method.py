@@ -475,11 +475,11 @@ class PosPaymentMethod(models.Model):
         if not self._musqet_valid_reference(reference):
             return {'error': {'message': _("The sale reference is invalid.")}}
         response = self._musqet_send_terminal_command(
-            payload, 'sale', mode, amount, currency, reference)
+            payload, kind='sale', mode=mode, amount=amount, currency=currency, reference=reference)
         self._musqet_record_sale(response, amount, currency, reference)
         return response
 
-    def _musqet_send_terminal_command(self, payload, kind, mode, amount, currency, reference):
+    def _musqet_send_terminal_command(self, payload, *, kind, mode, amount, currency, reference):
         """POST a sale or refund (``kind``) to this method's terminal; return Musqet's reply.
 
         The request is rebuilt from known fields only: the cosmetic ones from ``payload``
@@ -850,7 +850,8 @@ class PosPaymentMethod(models.Model):
         # send flushes every pending write first, the refund states moved by the re-reads
         # included.
         response = self._musqet_send_terminal_command(
-            payload, 'refund', 'card', amount, currency, reference)
+            payload, kind='refund', mode='card', amount=amount, currency=currency,
+            reference=reference)
         self._musqet_record_refund(response, original, amount, reference)
         return response
 
