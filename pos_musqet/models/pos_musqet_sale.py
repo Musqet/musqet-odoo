@@ -1,7 +1,7 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 import logging
 
-from odoo import api, fields, models
+from odoo import _, api, fields, models
 from odoo.tools import SQL
 
 from .musqet_common import (
@@ -16,6 +16,11 @@ from .musqet_common import (
 )
 
 _logger = logging.getLogger(__name__)
+
+# At most this many pending sales of an order are read from Musqet before another sale of it
+# is started (pos.musqet.sale._musqet_sale_to_resume). An order normally has at most one: the
+# terminal takes one command at a time.
+MUSQET_SALE_REREAD_LIMIT = 5
 
 
 class PosMusqetSale(models.Model):
@@ -97,6 +102,57 @@ class PosMusqetSale(models.Model):
         if sale and sale._musqet_needs_status_read():
             sale.payment_method_id.musqet_get_sale(sale.sale_id)
         return sale.filtered(lambda record: record.state == 'done')
+
+    @api.model
+    def _musqet_sale_to_resume(self, method, *, reference, amount, currency, settled_sale_ids):
+        """The sale of order ``reference`` a new sale request on ``method`` should resume.
+
+        Returns ``(sale, message)``: refuse the request with ``message`` if there is one,
+        else resume ``sale`` if it is set, else send a new sale.
+
+        The POS gives up on a sale it has polled for too long, or lost contact over, and a
+        page refresh forgets the sale it was waiting on, yet the customer can still pay it
+        on the terminal. A retry must not send a second sale for the same payment. So the
+        order's sales Musqet hasn't failed, other than ``settled_sale_ids`` (the saleIds on
+        the order's payment lines, which the POS sends), are read from Musqet first if still
+        pending, then:
+
+        1. one still pending on another method, or for another amount, refuses the request:
+           it may still be paid, so it has to end first (cancel it, or let it time out);
+        2. one on ``method`` for this amount and ``currency`` is resumed, a pending one before
+           a done one: the POS polls it, and settles the line with it once Musqet reports it
+           complete;
+        3. otherwise a new sale is sent, as when a done sale was for another amount.
+
+        A record whose method is no longer a Musqet one can't be read, and is left out.
+
+        ``settled_sale_ids`` comes from the browser, so it can only make this resume less
+        (a saleId it names is never resumed), never refuse more.
+        """
+        if not isinstance(settled_sale_ids, (list, tuple)):
+            settled_sale_ids = []
+        settled = [sale_id for sale_id in settled_sale_ids if isinstance(sale_id, str)]
+        open_sales = self.sudo().search([
+            ('company_id', '=', method._musqet_company().id),
+            ('reference', '=', reference),
+            ('state', '!=', 'failed'),
+            ('sale_id', 'not in', settled),
+            ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
+        ], order='id')
+        for sale in open_sales.filtered(lambda sale: sale.state == 'pending')[:MUSQET_SALE_REREAD_LIMIT]:
+            sale.payment_method_id.musqet_get_sale(sale.sale_id)
+        open_sales = open_sales.filtered(lambda sale: sale.state != 'failed')
+
+        def is_repeat(sale):
+            return (sale.payment_method_id == method and sale.amount_minor == amount
+                    and sale.currency == currency)
+
+        pending = open_sales.filtered(lambda sale: sale.state == 'pending')
+        if pending.filtered(lambda sale: not is_repeat(sale)):
+            return self.browse(), _(
+                "A Musqet payment for this order is still in progress. Finish or cancel it on "
+                "the terminal, then try again.")
+        return (pending.filtered(is_repeat) or open_sales.filtered(is_repeat))[:1], None
 
     def _musqet_claim_for_refund(self):
         """Make refunds of this sale decide one after the other, each seeing the last.

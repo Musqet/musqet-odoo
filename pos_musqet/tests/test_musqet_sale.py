@@ -42,9 +42,10 @@ class TestMusqetCreateSale(TransactionCase):
 
     def _call_sale(self, payload):
         # A new saleId per call (sale-1, sale-2, ...), as Musqet gives: each sale is recorded.
+        # A new order per call too: a second sale of one order would resume the first.
         self.sales_sent += 1
         if isinstance(payload, dict):
-            payload = {'reference': 'Order-T', **payload}
+            payload = {'reference': 'Order-T%d' % self.sales_sent, **payload}
         fake = musqet_response('sale-%d' % self.sales_sent)
         with patch.object(pos_payment_method.requests, 'request', return_value=fake) as mock_request:
             result = self.method.with_user(self.cashier).musqet_create_sale(payload)
