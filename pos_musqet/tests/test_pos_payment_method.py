@@ -646,8 +646,8 @@ class TestMusqetSaleRecords(TransactionCase):
 
 @tagged('post_install', '-at_install')
 class TestMusqetWebhookRoute(HttpCase):
-    """A signed webhook triggers a status read of a pending sale; its record and the till
-    take that reply, never the body."""
+    """A signed webhook triggers a status read of a sale a read could still settle; its
+    record and the till take that reply, never the body."""
 
     SECRET = 'whsec_route_0123456789'
 
@@ -719,10 +719,10 @@ class TestMusqetWebhookRoute(HttpCase):
                 self.assertEqual(self._buffered()['saleId'], 'sale-wh')
                 self.assertEqual(self.sale.state, 'done')
 
-    def test_no_read_without_a_pending_record(self):
+    def test_no_read_without_a_record_a_read_could_settle(self):
         # Settled already, never recorded, or no saleId: the POS's poll covers the till, and
         # a replay costs no call to Musqet. Nothing is buffered.
-        done = record_sale(self.env, self.method, 'sale-done')
+        done = record_sale(self.env, self.method, 'sale-done', rail='card')
         for sale_id in ('sale-done', 'sale-unknown', ''):
             with self.subTest(sale_id=sale_id):
                 body = self._body()

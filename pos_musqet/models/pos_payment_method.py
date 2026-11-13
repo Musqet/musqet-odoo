@@ -577,12 +577,13 @@ class PosPaymentMethod(models.Model):
         the line it vouches for; else ``(None, {error})``. The amount, rail and currency come
         from the record, which only Musqet's own replies settle, never from the payment.
 
-        May read a pending sale from Musqet (_musqet_resolve_sale), and takes the sale's row
-        locks (settling it, checking its line): call it after any other call to Musqet.
+        May read the sale from Musqet if a read could still settle it (_musqet_resolve_sale),
+        and takes the sale's row locks (settling it, checking its line): call it after any
+        other call to Musqet.
         """
         original = self._musqet_resolve_sale(payment)
-        # The line must be one the sale vouches for, by a check run now: after a pending sale
-        # has settled above, and on a line synced before the check existed. A line that
+        # The line must be one the sale vouches for, by a check run now: after a read above
+        # has settled the sale, and on a line synced before the check existed. A line that
         # copies a real sale's saleId, or whose amount isn't the one captured, is refused.
         payment._musqet_check_settles()
         if not original or payment.musqet_settle_check != 'verified':
@@ -879,13 +880,20 @@ class PosPaymentMethod(models.Model):
         saleId is taken as about it. An {error} response has no status, so it leaves the
         records as they were.
         """
-        if not isinstance(response, dict) or not sale_id:
-            return
-        echoed = response.get('saleId')
-        if echoed is not None and echoed != str(sale_id):
+        if not sale_id or not self._musqet_reply_is_for(sale_id, response):
             return
         for records in self._musqet_records_of(sale_id):
             records._musqet_apply_response(response)
+
+    @staticmethod
+    def _musqet_reply_is_for(sale_id, reply):
+        """Whether ``reply`` is Musqet's reply about ``sale_id``: a dict with no error that
+        names no other saleId (a status read is about its URL's sale, so one that names none
+        is taken as about it)."""
+        if not isinstance(reply, dict) or 'error' in reply:
+            return False
+        echoed = reply.get('saleId')
+        return echoed is None or echoed == str(sale_id)
 
     def musqet_cancel_sale(self, sale_id):
         """POST /terminal/sales/:id/cancel — request cancellation of an in-flight sale.
