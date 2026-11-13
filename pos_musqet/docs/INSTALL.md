@@ -286,10 +286,13 @@ Security notes (already enforced by the addon):
   HMAC-SHA256 over `"<ts>.<rawbody>"`) using a constant-time compare; timestamps more
   than **±300s** from now are rejected to blunt replay.
 - The route always returns `200` so it can't be used as a signature oracle.
-- Odoo's own record of the sale is never settled from the webhook body: a verified
-  webhook makes Odoo read the sale back from Musqet's API, and the record takes the
-  amount and rail from that reply. A leaked signing secret alone can't change what a
-  refund is capped at.
+- The webhook body is never trusted as the result: a verified webhook makes Odoo read
+  the sale back from Musqet's API, and both Odoo's record of the sale and the till take
+  that reply. A leaked signing secret alone can't change what a refund is capped at or
+  make the till accept a payment. Odoo reads only while it still has the sale pending,
+  so a replayed webhook for a settled sale costs no call to Musqet; a replay while it is
+  pending (within the ±300s window) costs one call each, which the rate-limiting below
+  also bounds.
 - Webhook and polling are mutually idempotent: whichever lands first settles the sale,
   the other is ignored.
 - The webhook route does an unauthenticated indexed lookup *before* HMAC verification.

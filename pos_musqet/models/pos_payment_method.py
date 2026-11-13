@@ -500,9 +500,9 @@ class PosPaymentMethod(models.Model):
         """Record a sale Musqet accepted, so its settle can be checked against Musqet's word.
 
         Pending until Musqet says otherwise: the create reply is normally PENDING, and a
-        status read settles it (_musqet_sync_records), polled or triggered by a signed
-        webhook. If saving fails
-        (logged), the sale can't be refunded here and its synced payment is Not verified.
+        status read settles it (_musqet_sync_records), polled or triggered by a signed webhook.
+        If saving fails (logged), the sale can't be refunded here and its synced payment is Not
+        verified.
         """
         self.env['pos.musqet.sale']._musqet_record_accepted(response, {
             'company_id': self._musqet_company().id,
@@ -897,8 +897,16 @@ class PosPaymentMethod(models.Model):
 
     # -- Webhook (async push) -------------------------------------------------
     # Used only on publicly-reachable deployments. The public controller verifies the HMAC,
-    # buffers the result here and pings the POS session; the frontend pulls it via
-    # musqet_get_latest_status. The pilot is behind NAT and relies on polling instead.
+    # reads the sale back from Musqet (musqet_get_sale), buffers that reply here and pings the
+    # POS session; the frontend pulls it via musqet_get_latest_status. The pilot is behind NAT
+    # and relies on polling instead.
+
+    def _musqet_has_pending_record(self, sale_id):
+        """Whether this method has a sale or refund record of ``sale_id`` still pending."""
+        domain = [('payment_method_id', '=', self.id), ('sale_id', '=', sale_id),
+                  ('state', '=', 'pending')]
+        return bool(self.env['pos.musqet.sale'].sudo().search_count(domain)
+                    or self.env['pos.musqet.refund'].sudo().search_count(domain))
 
     def _is_write_forbidden(self, fields):
         # The base blocks writes to most config fields while a POS session is open. Allow

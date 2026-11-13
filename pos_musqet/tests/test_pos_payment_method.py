@@ -646,7 +646,8 @@ class TestMusqetSaleRecords(TransactionCase):
 
 @tagged('post_install', '-at_install')
 class TestMusqetWebhookRoute(HttpCase):
-    """A signed webhook triggers a status read of the sale, and the record settles from that."""
+    """A signed webhook triggers a status read of a pending sale; its record and the till
+    take that reply, never the body."""
 
     SECRET = 'whsec_route_0123456789'
 
@@ -680,16 +681,54 @@ class TestMusqetWebhookRoute(HttpCase):
             'currency': self.sale.currency, 'rail': 'card', 'serial': 'MSQ-WHR-001',
         }}
 
+    def _buffered(self):
+        self.method.invalidate_recordset()
+        latest = self.method.musqet_latest_response
+        return json.loads(latest) if latest else None
+
     def test_a_signed_webhook_settles_the_sale_from_a_status_read(self):
         _, mock_request = self._post(self._body())
         self.assertEqual([call.args[:2] for call in mock_request.mock_calls if call.args], [
             ('GET', 'https://api.musqet.tech/api/v1/terminal/sales/sale-wh')])
         self.assertEqual((self.sale.state, self.sale.amount_minor, self.sale.rail),
                          ('done', 900, 'card'))
+        # The till gets the reply, not the body.
+        self.assertEqual(self._buffered()['amountInCents'], 900)
 
     def test_the_body_alone_settles_nothing(self):
-        # Musqet still reports the sale in progress: the body's COMPLETE changes nothing.
+        # Musqet still reports the sale in progress: the body's COMPLETE reaches neither the
+        # record nor the till.
         self._post(self._body(), read=musqet_response('sale-wh', 'PROCESSING'))
+        self.assertEqual(self.sale.state, 'pending')
+        self.assertEqual(self._buffered()['status'], 'PROCESSING')
+
+    def test_a_reply_without_a_sale_id_is_buffered_with_it(self):
+        # The till matches the buffer to its line by saleId.
+        reply = musqet_response('sale-wh', 'COMPLETE', amountInCents=900,
+                                currency=self.sale.currency, rail='card')
+        del reply.json.return_value['saleId']
+        self._post(self._body(), read=reply)
+        self.assertEqual(self._buffered()['saleId'], 'sale-wh')
+
+    def test_no_read_without_a_pending_record(self):
+        # Settled already, never recorded, or no saleId: the POS's poll covers the till, and
+        # a replay costs no call to Musqet. Nothing is buffered.
+        done = record_sale(self.env, self.method, 'sale-done')
+        for sale_id in ('sale-done', 'sale-unknown', ''):
+            with self.subTest(sale_id=sale_id):
+                body = self._body()
+                body['data']['saleId'] = sale_id
+                _, mock_request = self._post(body, read=musqet_response(sale_id or 'x', 'COMPLETE'))
+                mock_request.assert_not_called()
+                self.assertIsNone(self._buffered())
+        done.invalidate_recordset()
+        self.assertEqual(done.state, 'done')
+
+    def test_a_failed_read_buffers_nothing(self):
+        _, mock_request = self._post(
+            self._body(), read=musqet_response('sale-wh', 'COMPLETE', status_code=502))
+        self.assertEqual(len(mock_request.mock_calls), 1)
+        self.assertIsNone(self._buffered())
         self.assertEqual(self.sale.state, 'pending')
 
     def test_a_signed_webhook_settles_a_refund(self):
@@ -709,16 +748,15 @@ class TestMusqetWebhookRoute(HttpCase):
         sale.invalidate_recordset()
         self.assertEqual(sale.state, 'pending')
 
-    def test_a_failed_settle_still_buffers_the_result(self):
+    def test_a_failed_settle_still_answers(self):
         Method = type(self.env['pos.payment.method'])
         with patch.object(Method, 'musqet_get_sale', side_effect=Exception('boom')), \
              mute_logger('odoo.addons.pos_musqet.controllers.main'):
             response, _ = self._post(self._body())
-        # Answered as normal (no error), and the result was still buffered.
+        # Answered as normal (no error); nothing to buffer, the poll covers the till.
         self.assertEqual(response.status_code, 200)
         self.assertNotIn('error', response.json())
-        self.method.invalidate_recordset()
-        self.assertEqual(json.loads(self.method.musqet_latest_response)['saleId'], 'sale-wh')
+        self.assertIsNone(self._buffered())
         self.assertEqual(self.sale.state, 'pending')
 
     def test_an_unsigned_webhook_reads_nothing(self):
