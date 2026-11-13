@@ -85,6 +85,12 @@ your Odoo addons path.
    odoo -d <your_db> -i pos_musqet --test-enable --stop-after-init   # also runs the tests
    ```
 
+5. **Upgrading an existing install:** close every POS session that uses a Musqet method
+   first, so no sale is still in progress, then run `odoo -d <your_db> -u pos_musqet
+   --stop-after-init`. The upgrade to 19.0.1.3.0 records each Musqet sale already
+   synced; a sale started before it but synced after it has no record, so Odoo can't
+   refund it and marks its payment *Not verified* (see §8).
+
 ---
 
 ### 2.1 Set the secret-encryption key (required)
@@ -214,7 +220,8 @@ and make your **company currency match it** (and keep each POS on the company cu
    **Point of Sale → Orders → Musqet Sales** (managers only). When the order syncs,
    Odoo checks each Musqet payment line against that record and shows the result in the
    order's **Payments** tab: *Verified* if Musqet reported that sale or refund complete
-   for that amount, *Not verified* if not. To find the Not verified ones, filter
+   for that amount, *Not verified* if not, or if another payment line claims the same
+   Musqet sale. Lines of an order not yet paid are left blank. To find the Not verified ones, filter
    **Point of Sale → Orders → Payments** by **Musqet: Not Verified**, and check each in
    the Musqet app. The server log also names each one. Payment lines synced before this
    check existed are left blank.
@@ -347,7 +354,8 @@ Then run the smoke test in section 4 with the test credentials.
   app.
 - **Sales made before the upgrade to 19.0.1.3.0 are taken as the POS synced them.** The
   upgrade records each one from its payment line (amount, currency, rail), so it can
-  still be refunded. Refunds Odoo has no record of (see §4) still count by their synced
+  still be refunded. A sale still in progress during the upgrade is not recorded, which
+  is why §2 says to close the POS sessions first. Refunds Odoo has no record of (see §4) still count by their synced
   payment line, which can only tighten the cap, never release more money.
 - **No automated JavaScript test harness in-repo.** The Python backend has unit tests
   (`pos_musqet/tests/`); the POS frontend logic (polling, in-flight lock, webhook/poll

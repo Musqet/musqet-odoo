@@ -3,24 +3,14 @@ import logging
 
 from odoo import api, fields, models
 
+from .musqet_common import (
+    MUSQET_FAILURE_STATUSES,
+    MUSQET_SUCCESS_STATUS,
+    minor_units,
+    record_unrecorded_payments,
+)
+
 _logger = logging.getLogger(__name__)
-
-# The Musqet sale statuses (a refund uses the same ones) that end a sale; see
-# _musqet_apply_status for the refund state each leads to. Same lists as SUCCESS_STATUS and
-# FAILURE_STATUSES in static/src/app/payment_musqet.js.
-MUSQET_SUCCESS_STATUS = 'COMPLETE'
-MUSQET_FAILURE_STATUSES = ('ERROR', 'CANCELLED', 'CANCELLED_REMOTE', 'TIMED_OUT')
-
-
-def minor_units(amount, currency):
-    """``amount`` in whole minor units of ``currency`` (cents for GBP, yen for JPY)."""
-    # `is not None`, not `or 2`: a zero-decimal currency (JPY) has decimal_places == 0, and
-    # `0 or 2` would wrongly use 2, computing a cap 100x too loose. Mirrors the frontend's
-    # Number.isInteger() check, which also preserves 0.
-    decimals = currency.decimal_places
-    if decimals is None:
-        decimals = 2
-    return int(round(amount * (10 ** decimals)))
 
 
 class PosMusqetRefund(models.Model):
@@ -102,25 +92,8 @@ class PosMusqetRefund(models.Model):
             ('transaction_id', '!=', False),
             ('payment_method_id.use_payment_terminal', '=', 'musqet'),
         ])
-        recorded = {
-            (refund.payment_method_id.id, refund.sale_id)
-            for refund in self.sudo().search([('sale_id', 'in', payments.mapped('transaction_id'))])
-        }
-        vals_list = []
-        for payment in payments:
-            key = (payment.payment_method_id.id, payment.transaction_id)
-            if key in recorded:
-                continue
-            recorded.add(key)
-            order = payment.pos_order_id
-            vals_list.append({
-                'company_id': payment.company_id.id,
-                'payment_method_id': payment.payment_method_id.id,
-                'original_sale_id': payment.musqet_refund_of,
-                'sale_id': payment.transaction_id,
-                'reference': order.pos_reference or order.uuid,
-                'amount_minor': abs(minor_units(payment.amount, payment.currency_id)),
-                'state': 'done',
-            })
-        self.sudo().create(vals_list)
-        _logger.info("pos_musqet: recorded %d refund(s) synced before this version", len(vals_list))
+        count = record_unrecorded_payments(self, payments, lambda payment: {
+            'original_sale_id': payment.musqet_refund_of,
+            'amount_minor': abs(minor_units(payment.amount, payment.currency_id)),
+        })
+        _logger.info("pos_musqet: recorded %d refund(s) synced before this version", count)

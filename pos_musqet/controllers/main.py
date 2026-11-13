@@ -55,9 +55,7 @@ class MusqetController(http.Controller):
         # buffer the verified result and ping every open session that can show it. The
         # frontend pulls the buffer and settles the pending line idempotently (a poll may
         # have already settled it — see payment_musqet.js _finishSale).
-        sale_id = sale.get('saleId')
-        if isinstance(sale_id, str):
-            method_sudo._musqet_sync_records(sale_id, sale)
+        method_sudo._musqet_sync_records(sale.get('saleId'), sale)
         method_sudo.musqet_latest_response = json.dumps(sale)
         sessions = request.env['pos.session'].sudo().search(
             [('payment_method_ids', 'in', method_sudo.id), ('state', '=', 'opened')])

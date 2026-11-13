@@ -15,7 +15,7 @@ from odoo import fields, models, api, _
 from odoo.exceptions import AccessDenied, UserError, ValidationError
 from odoo.tools import SQL, consteq
 
-from .pos_musqet_refund import minor_units
+from .musqet_common import minor_units
 from .musqet_crypto import (
     ENV_KEY,
     MusqetEncryptionKeyUnavailable,
@@ -505,9 +505,9 @@ class PosPaymentMethod(models.Model):
         # here, and its synced payment shows as Not verified.
         try:
             with self.env.cr.savepoint():
-                # Pending: Musqet has only accepted the sale. A status read or a signed
-                # webhook settles it (_musqet_sync_records).
-                self.env['pos.musqet.sale'].sudo().create({
+                # Pending until Musqet says otherwise. The create reply is normally PENDING;
+                # a status read or a signed webhook settles it (_musqet_sync_records).
+                sale = self.env['pos.musqet.sale'].sudo().create({
                     'company_id': self._musqet_company().id,
                     'payment_method_id': self.id,
                     'sale_id': str(sale_id),
@@ -515,6 +515,7 @@ class PosPaymentMethod(models.Model):
                     'amount_minor': amount,
                     'currency': currency,
                 })
+                sale._musqet_apply_response(response)
         except Exception:
             _logger.exception(
                 "Musqet accepted sale %s (reference %s, %s minor units) but Odoo could not "
@@ -580,7 +581,7 @@ class PosPaymentMethod(models.Model):
             "Only card payments taken on a Musqet terminal can be refunded automatically.")}}
         if payment.payment_method_id.use_payment_terminal != 'musqet' or not payment.transaction_id:
             return None, card_only
-        original = self._musqet_settled_sale(company, payment.transaction_id)
+        original = self._musqet_settled_sale(payment)
         if not original:
             return None, {'error': {'message': _(
                 "Musqet has not confirmed this sale, so it cannot be refunded here.")}}
@@ -594,18 +595,19 @@ class PosPaymentMethod(models.Model):
             return None, {'error': {'message': _("The refund currency does not match the original payment.")}}
         return original, None
 
-    def _musqet_settled_sale(self, company, sale_id):
-        """The done sale record of ``sale_id`` in ``company``, or an empty recordset.
+    def _musqet_settled_sale(self, payment):
+        """The done sale record of ``payment``'s (method, saleId) in its company, or nothing.
 
         A record still pending (its result never read back, say the POS closed mid-sale) is
-        read from Musqet first. One that can't be read stays pending and can't be refunded.
+        read from Musqet first, with the method that made the sale. One that can't be read
+        stays pending and can't be refunded.
         """
         sale = self.env['pos.musqet.sale'].sudo().search([
-            ('company_id', '=', company.id),
-            ('sale_id', '=', sale_id),
-            ('state', '!=', 'failed'),
-        ], order='id', limit=1)
-        if sale.state == 'pending' and sale.payment_method_id.use_payment_terminal == 'musqet':
+            ('company_id', '=', payment.company_id.id),
+            ('payment_method_id', '=', payment.payment_method_id.id),
+            ('sale_id', '=', payment.transaction_id),
+        ])
+        if sale.state == 'pending':
             sale.payment_method_id.musqet_get_sale(sale.sale_id)
         return sale.filtered(lambda record: record.state == 'done')
 
@@ -624,7 +626,10 @@ class PosPaymentMethod(models.Model):
 
         The row lock lasts until commit, so it spans the call to Musqet (up to
         MUSQET_TIMEOUT). Only the server writes sale records, so nothing else waits on it but
-        another refund of the sale, or a status read of it.
+        another refund of the sale, or a status read of it. One more case holds locks that
+        long: when the sale was still pending and the refund settled it
+        (_musqet_settled_sale), that also re-checked the sale's payment lines, so their rows
+        stay locked too, and a session close touching them waits.
         """
         self.env.cr.execute(SQL(
             'UPDATE pos_musqet_sale SET write_date = write_date WHERE id = %s', original.id))
@@ -879,10 +884,10 @@ class PosPaymentMethod(models.Model):
         """Settle this method's recorded sale and refund ``sale_id`` as ``response`` reports.
 
         ``response`` must be Musqet's own word: a status read, or a webhook whose signature
-        was verified. An {error} response has no top-level status, so it leaves the records
-        as they were.
+        was verified, and about this sale: a reply naming another saleId changes nothing. An
+        {error} response has no saleId, so it leaves the records as they were.
         """
-        if not isinstance(response, dict) or not sale_id:
+        if not isinstance(response, dict) or not sale_id or response.get('saleId') != str(sale_id):
             return
         domain = [('payment_method_id', '=', self.id), ('sale_id', '=', str(sale_id))]
         self.env['pos.musqet.sale'].sudo().search(domain)._musqet_apply_response(response)
