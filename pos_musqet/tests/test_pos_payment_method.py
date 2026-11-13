@@ -1481,6 +1481,12 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
             self.assertEqual(versions_at_read, [before])
             self.assertNotEqual(self._row_version(sale), before)
 
+    def test_changing_the_order_reference_checks_its_lines_again(self):
+        line = self._original('sale-renamed')
+        self.assertEqual(line.musqet_settle_check, 'verified')
+        self.order.uuid = 'renamed-order'
+        self.assertEqual(line.musqet_settle_check, 'unverified')
+
     def test_a_sole_line_on_another_order_is_not_verified(self):
         # The sale was sent for another order (which never synced): a line on this one, even
         # alone and for the right amount, isn't the line the sale vouches for.

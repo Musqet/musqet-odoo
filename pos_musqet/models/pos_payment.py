@@ -195,9 +195,15 @@ class PosPayment(models.Model):
                 by_claim[line._musqet_claim_key()].append(line)
         return by_claim
 
+    @staticmethod
+    def _musqet_claim_key_for(method_id, sale_id, is_sale):
+        """The key of a claim on a sale (``is_sale``) or refund ``sale_id`` taken on a method."""
+        return (method_id, sale_id, is_sale)
+
     def _musqet_claim_key(self):
-        """The sale or refund this line claims: (method, saleId, whether it is a sale)."""
-        return (self.payment_method_id.id, self.transaction_id, self._musqet_is_sale_line())
+        """The sale or refund this line claims (see _musqet_claim_key_for)."""
+        return self._musqet_claim_key_for(
+            self.payment_method_id.id, self.transaction_id, self._musqet_is_sale_line())
 
     def _musqet_settle_value(self, sales, refunds, claimants, carriers):
         """This payment's musqet_settle_check, given the done records by (method, saleId), and

@@ -82,9 +82,11 @@ class PosMusqetRefund(models.Model):
         # Linked refund lines of every order state, by their claim: the lines the old backfill
         # chose among.
         carriers = payments._musqet_claimants(paid_only=False)
+        Payment = self.env['pos.payment']
 
         def has_guessed_reference(refund):
-            lines = carriers[(refund.payment_method_id.id, refund.sale_id, False)]
+            lines = carriers[Payment._musqet_claim_key_for(
+                refund.payment_method_id.id, refund.sale_id, is_sale=False)]
             return len(lines) > 1 and any(
                 refund.reference in line._musqet_order_references() for line in lines)
 

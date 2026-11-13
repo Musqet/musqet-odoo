@@ -669,8 +669,8 @@ class PosPaymentMethod(models.Model):
 
         A refund is known by the reference it was sent with and by both forms of its synced
         order's reference (a record backfilled at the upgrade holds at most one of them: none
-        if several payments shared its saleId). A
-        reference of a pending refund maps to 'pending' even if a done one shares it.
+        if several payments shared its saleId). A reference of a pending refund maps to
+        'pending' even if a done one shares it.
         """
         state_by_key = {
             (refund.payment_method_id.id, refund.sale_id): refund.state for refund in refunds}
