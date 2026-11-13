@@ -225,8 +225,9 @@ export class PaymentMusqet extends PaymentInterface {
     }
 
     _commonPayload(order) {
+        // serial and type are not sent: the server sets both from its own records, whatever
+        // the request says (musqet_create_sale / musqet_create_refund).
         return {
-            serial: this.payment_method_id.musqet_terminal_serial,
             currency: this.pos.currency.name,
             // The terminal prompts the rail and handles QR + FX for Bitcoin/Lightning.
             mode: "any",
@@ -243,7 +244,6 @@ export class PaymentMusqet extends PaymentInterface {
         return {
             ...this._commonPayload(order),
             amountInCents: this._amountInCents(line.amount),
-            type: "sale",
         };
     }
 
@@ -290,9 +290,8 @@ export class PaymentMusqet extends PaymentInterface {
             // strips unknown keys and keeps no sale↔refund linkage of its own (#2094); the
             // original-sale link lives in Odoo, and the gate above is what enforces card-only.
             mode: "card",
-            // Positive magnitude of the refund; type:"refund" denotes the direction.
+            // Positive magnitude of the refund; the server sends type:"refund" for the direction.
             amountInCents: this._amountInCents(Math.abs(line.amount)),
-            type: "refund",
         };
     }
 

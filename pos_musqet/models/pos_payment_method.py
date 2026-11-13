@@ -31,6 +31,10 @@ MUSQET_ALLOWED_HOST = 'musqet.tech'
 # prompt the customer for card or Bitcoin.
 MUSQET_SALE_MODES = ('any', 'card', 'bitcoin')
 MUSQET_DEFAULT_SALE_MODE = 'any'
+# Upper bounds on the free-text request fields. reference: the API schema's max(255).
+# language: a short locale code ("en", "pt"); the API checks it against its own list.
+MUSQET_REFERENCE_MAX_LENGTH = 255
+MUSQET_LANGUAGE_MAX_LENGTH = 16
 
 
 class PosPaymentMethod(models.Model):
@@ -166,6 +170,10 @@ class PosPaymentMethod(models.Model):
         # call) may drive the terminal.
         if not self.env.su and not self.env.user.has_group('point_of_sale.group_pos_user'):
             raise AccessDenied()
+        # Only a Musqet payment method drives a Musqet terminal: refuse to run the proxy on
+        # any other method record a caller points it at.
+        if any(method.use_payment_terminal != 'musqet' for method in self):
+            raise AccessDenied()
 
     def _musqet_headers(self):
         # The key is read with sudo() because the field is restricted to ERP managers;
@@ -247,8 +255,10 @@ class PosPaymentMethod(models.Model):
         they like. The Musqet API accepts ``type`` on this same endpoint, so forwarding the
         payload as-is would let a caller start a refund here and skip every check in
         musqet_create_refund. Instead, rebuild the request from known keys only: ``type``
-        is forced to "sale", ``serial`` comes from this method's own record, and every
-        other field is checked before it is sent.
+        is forced to "sale", ``serial`` comes from this method's own record, ``currency``
+        must be the company currency, and the remaining fields are checked before they are
+        sent. The caller still chooses which payment method record this runs on; scoping
+        that to the cashier's own POS is a separate check.
         """
         self.ensure_one()
         self._musqet_check_access()
@@ -257,20 +267,34 @@ class PosPaymentMethod(models.Model):
         serial = self.musqet_terminal_serial
         if not serial:
             return {'error': {'message': _("No Musqet terminal serial is configured.")}}
-        amount = payload.get('amountInCents')
-        # bool is an int subclass, so True would otherwise pass as a 1-cent sale.
-        if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        amount = self._musqet_parse_amount(payload)
+        if amount is None:
             return {'error': {'message': _("The sale amount is invalid.")}}
         mode = payload.get('mode', MUSQET_DEFAULT_SALE_MODE)
         if mode not in MUSQET_SALE_MODES:
             return {'error': {'message': _("The payment mode is invalid.")}}
+        # amountInCents is read in this currency, so the caller must not pick it: a sale of
+        # 1250 in a currency with a different minor unit would charge a different value from
+        # the one the POS records. Musqet charges in the business's own currency.
+        # sudo(): a cashier may lack read access on res.currency; this is a fixed lookup.
+        currency = (self.company_id or self.env.company).sudo().currency_id.name
+        if payload.get('currency', currency) != currency:
+            return {'error': {'message': _("The sale currency does not match the company currency.")}}
+        reference = payload.get('reference')
+        if reference is not None and not self._musqet_valid_reference(reference):
+            return {'error': {'message': _("The sale reference is invalid.")}}
+        # The optional fields go first so the server-set fields after them always win, even
+        # if the helper's allow-list ever grows.
         outgoing = {
+            **self._musqet_optional_terminal_fields(payload),
             'serial': serial,
             'type': 'sale',
             'mode': mode,
             'amountInCents': amount,
-            **self._musqet_optional_sale_fields(payload),
+            'currency': currency,
         }
+        if reference is not None:
+            outgoing['reference'] = reference
         # Drop any buffered webhook result from a previous sale so a late notification for
         # it can't be mistaken for this one (mirrors pos_adyen). Written with sudo() because
         # the field is ERP-manager-restricted but a plain cashier drives the terminal.
@@ -278,18 +302,36 @@ class PosPaymentMethod(models.Model):
         return self._musqet_request('POST', '/terminal/sales', payload=outgoing)
 
     @api.model
-    def _musqet_optional_sale_fields(self, payload):
-        """Return the optional pass-through fields of a sale/refund request, type-checked.
+    def _musqet_parse_amount(self, payload):
+        """Return ``amountInCents`` as a positive int, or None if it is anything else.
 
-        Only plain strings (and a bool for shouldPrint) are forwarded, so a caller can't
-        smuggle nested objects or extra keys to the API through them. A value of the wrong
-        type is dropped rather than sent.
+        Strict on purpose: no coercion of strings or floats, and bool is refused even though
+        it is an int subclass (True would otherwise pass as 1).
         """
-        fields_out = {'shouldPrint': bool(payload.get('shouldPrint', True))}
-        for key, max_length in (('reference', 255), ('language', 16), ('currency', 3)):
-            value = payload.get(key)
-            if isinstance(value, str) and value and len(value) <= max_length:
-                fields_out[key] = value
+        amount = payload.get('amountInCents')
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+            return None
+        return amount
+
+    @api.model
+    def _musqet_valid_reference(self, reference):
+        """Whether ``reference`` is a non-empty string the API will accept."""
+        return isinstance(reference, str) and 0 < len(reference) <= MUSQET_REFERENCE_MAX_LENGTH
+
+    @api.model
+    def _musqet_optional_terminal_fields(self, payload):
+        """Return the cosmetic optional fields of a sale/refund request, type-checked.
+
+        Covers ``shouldPrint`` and ``language`` only; the fields that change what the request
+        does (amount, currency, reference) are validated by the caller. A value of the wrong
+        type is dropped (language) or replaced by the default (shouldPrint), so a caller can't
+        smuggle nested objects or extra keys to the API through them.
+        """
+        should_print = payload.get('shouldPrint', True)
+        fields_out = {'shouldPrint': should_print if isinstance(should_print, bool) else True}
+        language = payload.get('language')
+        if isinstance(language, str) and 0 < len(language) <= MUSQET_LANGUAGE_MAX_LENGTH:
+            fields_out['language'] = language
         return fields_out
 
     def musqet_create_refund(self, payload, original_payment_id):
@@ -347,9 +389,8 @@ class PosPaymentMethod(models.Model):
             return {'error': {'message': _("The refund currency does not match the original payment.")}}
         # Validate the requested amount against the captured amount, in the same minor units the
         # POS computed it. Reject a non-positive amount or an over-refund.
-        try:
-            amount = int(payload.get('amountInCents'))
-        except (TypeError, ValueError):
+        amount = self._musqet_parse_amount(payload)
+        if amount is None:
             return {'error': {'message': _("The refund amount is invalid.")}}
         # `is not None`, not `or 2`: a zero-decimal currency (JPY) has decimal_places == 0,
         # and `0 or 2` would wrongly use 2 — computing a cap 100x too loose. Mirrors the
@@ -392,21 +433,27 @@ class PosPaymentMethod(models.Model):
         # cases are covered by the frontend single-settle guard and the API 409.) Compare against
         # both the order's pos_reference and uuid to mirror how the reference is built caller-side
         # (order.pos_reference || order.uuid).
+        #
+        # The reference is required here: without one the duplicate check can't run.
         reference = payload.get('reference')
-        if isinstance(reference, str) and reference and any(
+        if not self._musqet_valid_reference(reference):
+            return {'error': {'message': _("The refund reference is invalid.")}}
+        if any(
             reference in (refund.pos_order_id.pos_reference, refund.pos_order_id.uuid)
             for refund in prior_refunds
         ):
             return {'error': {'message': _("This refund has already been processed.")}}
         # Forward only known fields and FORCE the refund-defining ones server-side. serial and
         # currency are taken from trusted server records, not the payload.
+        # The optional fields go first so the server-set fields after them always win.
         outgoing = {
-            **self._musqet_optional_sale_fields(payload),
+            **self._musqet_optional_terminal_fields(payload),
             'serial': self.musqet_terminal_serial,
             'type': 'refund',
             'mode': 'card',
             'amountInCents': amount,
             'currency': original.currency_id.name,
+            'reference': reference,
         }
         # Drop any buffered webhook result from a previous sale (mirrors musqet_create_sale).
         self.sudo().musqet_latest_response = ''
