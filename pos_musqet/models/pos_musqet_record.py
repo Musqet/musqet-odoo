@@ -3,7 +3,7 @@ import logging
 
 from odoo import api, fields, models
 
-from .musqet_common import sale_key_domain
+from .musqet_common import MUSQET_FAILURE_STATUSES, MUSQET_SUCCESS_STATUS, sale_key_domain
 
 _logger = logging.getLogger(__name__)
 
@@ -18,6 +18,8 @@ class PosMusqetRecord(models.AbstractModel):
     _name = 'pos.musqet.record'
     _description = 'Musqet Sale or Refund Record'
     _order = 'id desc'
+    # What a record is, for log lines: 'sale' or 'refund'.
+    _musqet_kind = 'record'
 
     company_id = fields.Many2one('res.company', required=True, readonly=True, index=True)
     payment_method_id = fields.Many2one(
@@ -30,7 +32,35 @@ class PosMusqetRecord(models.AbstractModel):
         required=True, default='pending', readonly=True)
 
     def _musqet_apply_response(self, response):
-        """Settle these records as Musqet's ``response`` (its own word about them) says."""
+        """Settle the pending records as Musqet's ``response`` (its own word about them) says.
+
+        A failure status fails them. COMPLETE makes them done with the values
+        _musqet_done_vals takes from the response, Musqet's word over what was requested; a
+        COMPLETE without them (say, no valid amount) leaves them pending, and is logged. Any
+        other status leaves them as they are. Only a pending record moves: a settled one
+        keeps its state whatever a later read says, and one already in the right state isn't
+        rewritten on every poll.
+        """
+        pending = self.filtered(lambda record: record.state == 'pending')
+        if not pending or not isinstance(response, dict):
+            return
+        status = response.get('status')
+        if status in MUSQET_FAILURE_STATUSES:
+            pending.write({'state': 'failed'})
+            return
+        if status != MUSQET_SUCCESS_STATUS:
+            return
+        vals = self._musqet_done_vals(response)
+        if vals is None:
+            _logger.warning(
+                "Musqet reported %s(s) %s complete without the values Odoo needs to settle it",
+                self._musqet_kind, ', '.join(pending.mapped('sale_id')))
+            return
+        pending.write({**vals, 'state': 'done'})
+        self.env['pos.payment']._musqet_check_settles_of(pending)
+
+    def _musqet_done_vals(self, response):
+        """The values a COMPLETE ``response`` settles a record with, or None if it lacks them."""
         raise NotImplementedError
 
     @api.model
@@ -52,7 +82,7 @@ class PosMusqetRecord(models.AbstractModel):
         except Exception:
             _logger.exception(
                 "Musqet accepted %s %s (%s) but Odoo could not record it",
-                self._description.lower(), sale_id, details)
+                self._musqet_kind, sale_id, details)
 
     @api.model
     def _musqet_record_unrecorded(self, payments, vals_for):

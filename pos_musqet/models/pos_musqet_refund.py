@@ -3,13 +3,7 @@ import logging
 
 from odoo import api, fields, models
 
-from .musqet_common import (
-    MUSQET_FAILURE_STATUSES,
-    MUSQET_SUCCESS_STATUS,
-    MUSQET_TERMINAL,
-    minor_units,
-    parse_minor_amount,
-)
+from .musqet_common import MUSQET_TERMINAL, minor_units, parse_minor_amount
 
 _logger = logging.getLogger(__name__)
 
@@ -30,6 +24,7 @@ class PosMusqetRefund(models.Model):
     _name = 'pos.musqet.refund'
     _inherit = ['pos.musqet.record']
     _description = 'Musqet Refund'
+    _musqet_kind = 'refund'
 
     original_sale_id = fields.Char(
         string="Original Musqet Sale", required=True, readonly=True, index=True,
@@ -37,7 +32,8 @@ class PosMusqetRefund(models.Model):
     sale_id = fields.Char(string="Musqet Refund Sale", help="The Musqet saleId of the refund itself.")
     reference = fields.Char(help="The refund order reference sent to Musqet.")
     amount_minor = fields.Integer(
-        help="The refunded amount in minor units of the company currency (cents).")
+        help="The amount in minor units of the company currency (cents): the amount requested "
+             "while pending, the amount Musqet reports refunded once done.")
     state = fields.Selection(help="Pending and Done count against the original sale; Failed does not.")
 
     _unique_sale = models.Constraint(
@@ -58,33 +54,10 @@ class PosMusqetRefund(models.Model):
         self.check_access('read')
         self.filtered(lambda refund: refund.state == 'pending').sudo().write({'state': 'failed'})
 
-    def _musqet_apply_response(self, response):
-        """Settle the pending refunds as a Musqet refund response says; other statuses leave them.
-
-        On COMPLETE the record takes the amount Musqet reports refunded (the same partner
-        shape as a sale), and a COMPLETE without a valid amount leaves it pending, as for a
-        sale. Only a pending refund moves: a settled one keeps its state whatever a later
-        read says, and a refund already in the right state isn't rewritten on every poll.
-        """
-        pending = self.filtered(lambda refund: refund.state == 'pending')
-        if not pending or not isinstance(response, dict):
-            return
-        status = response.get('status')
-        if status in MUSQET_FAILURE_STATUSES:
-            pending.write({'state': 'failed'})
-            return
-        if status != MUSQET_SUCCESS_STATUS:
-            return
+    def _musqet_done_vals(self, response):
+        """A refund settles at the amount Musqet reports refunded (the sale partner shape)."""
         amount = parse_minor_amount(response.get('amountInCents'))
-        if amount is None:
-            # Done means Musqet confirmed what it refunded; without that, stay pending (and
-            # keep counting the amount requested).
-            _logger.warning(
-                "Musqet reported refund(s) %s complete without a valid amount",
-                ', '.join(pending.mapped('sale_id')))
-            return
-        pending.write({'state': 'done', 'amount_minor': amount})
-        self.env['pos.payment']._musqet_check_settles_of(pending)
+        return None if amount is None else {'amount_minor': amount}
 
     @api.model
     def _musqet_record_synced_refunds(self):

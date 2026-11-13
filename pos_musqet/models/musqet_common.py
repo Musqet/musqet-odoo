@@ -29,15 +29,24 @@ def minor_units(amount, currency):
     return int(round(amount * (10 ** decimals)))
 
 
+# The largest amount an Integer field (a Postgres int4) can store.
+MUSQET_MAX_MINOR_AMOUNT = 2 ** 31 - 1
+
+
 def parse_minor_amount(value):
     """``value`` as a positive whole number of minor units, or None if it is anything else.
 
     Strict on purpose: no coercion of strings or floats, and bool is refused even though it
-    is an int subclass (True would otherwise pass as 1).
+    is an int subclass (True would otherwise pass as 1). Capped at what the records can store.
     """
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= MUSQET_MAX_MINOR_AMOUNT:
         return None
     return value
+
+
+def parse_rail(value):
+    """``value`` as a known Musqet rail, or False if it isn't one."""
+    return value if value in MUSQET_RAILS else False
 
 
 def parse_iso_currency(value):

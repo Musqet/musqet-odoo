@@ -4,15 +4,14 @@ import logging
 from odoo import api, fields, models
 
 from .musqet_common import (
-    MUSQET_FAILURE_STATUSES,
     MUSQET_RAIL_SELECTION,
-    MUSQET_RAILS,
     MUSQET_SUCCESS_STATUS,
     MUSQET_TERMINAL,
     MUSQET_UNPAID_ORDER_STATES,
     minor_units,
     parse_iso_currency,
     parse_minor_amount,
+    parse_rail,
 )
 
 _logger = logging.getLogger(__name__)
@@ -35,6 +34,7 @@ class PosMusqetSale(models.Model):
     _name = 'pos.musqet.sale'
     _inherit = ['pos.musqet.record']
     _description = 'Musqet Sale'
+    _musqet_kind = 'sale'
 
     sale_id = fields.Char(string="Musqet Sale", help="The Musqet saleId of the sale.")
     amount_minor = fields.Integer(
@@ -52,37 +52,25 @@ class PosMusqetSale(models.Model):
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet sale is already recorded.')
 
     def _musqet_apply_response(self, response):
-        """Settle the pending sales as a Musqet sale response says; other statuses leave them.
+        """Settle as for any record; also, a done sale whose rail Musqet hadn't reported yet
+        takes it from a later COMPLETE reply. A rail already set never changes."""
+        if isinstance(response, dict) and response.get('status') == MUSQET_SUCCESS_STATUS:
+            rail = parse_rail(response.get('rail'))
+            if rail:
+                self.filtered(lambda sale: sale.state == 'done' and not sale.rail).write({'rail': rail})
+        super()._musqet_apply_response(response)
 
-        On COMPLETE the record takes the amount, currency and rail from the response, Musqet's
-        own word, over what was requested; a COMPLETE without a valid amount and currency
-        leaves it pending. Only a pending sale moves, as for refunds, except that a done sale
-        whose rail Musqet hadn't reported yet takes it from a later reply.
+    def _musqet_done_vals(self, response):
+        """A sale settles at the amount and currency Musqet reports captured, on its rail.
+
+        Done means Musqet confirmed what it captured, so both are required; the rail is not
+        (only a refund needs it, and a later reply may fill it in).
         """
-        if not isinstance(response, dict):
-            return
-        status = response.get('status')
-        rail = response.get('rail') if response.get('rail') in MUSQET_RAILS else False
-        if status == MUSQET_SUCCESS_STATUS and rail:
-            self.filtered(lambda sale: sale.state == 'done' and not sale.rail).write({'rail': rail})
-        pending = self.filtered(lambda sale: sale.state == 'pending')
-        if not pending:
-            return
-        if status in MUSQET_FAILURE_STATUSES:
-            pending.write({'state': 'failed'})
-            return
-        if status != MUSQET_SUCCESS_STATUS:
-            return
         amount = parse_minor_amount(response.get('amountInCents'))
         currency = parse_iso_currency(response.get('currency'))
         if amount is None or currency is None:
-            # Done means Musqet confirmed what it captured; without that, stay pending.
-            _logger.warning(
-                "Musqet reported sale(s) %s complete without a valid amount and currency",
-                ', '.join(pending.mapped('sale_id')))
-            return
-        pending.write({'state': 'done', 'rail': rail, 'amount_minor': amount, 'currency': currency})
-        self.env['pos.payment']._musqet_check_settles_of(pending)
+            return None
+        return {'amount_minor': amount, 'currency': currency, 'rail': parse_rail(response.get('rail'))}
 
     @api.model
     def _musqet_record_synced_sales(self):
@@ -93,6 +81,8 @@ class PosMusqetSale(models.Model):
         sales were recorded on the server. A payment that is a refund (negative, or linked to
         a sale it refunds), or on an order never paid, is left out.
         """
+        # amount > 0 is the settle check's _musqet_is_sale_line: Odoo stores a payment's
+        # amount rounded to its currency, so it is never a fraction of a minor unit.
         payments = self.env['pos.payment'].sudo().search([
             ('amount', '>', 0),
             ('pos_order_id.state', 'not in', MUSQET_UNPAID_ORDER_STATES),
@@ -103,6 +93,6 @@ class PosMusqetSale(models.Model):
         count = self._musqet_record_unrecorded(payments, lambda payment: {
             'amount_minor': minor_units(payment.amount, payment.currency_id),
             'currency': payment.currency_id.name,
-            'rail': payment.musqet_rail if payment.musqet_rail in MUSQET_RAILS else False,
+            'rail': parse_rail(payment.musqet_rail),
         })
         _logger.info("pos_musqet: recorded %d sale(s) synced before this version", count)

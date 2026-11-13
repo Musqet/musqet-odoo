@@ -108,28 +108,32 @@ class PosPayment(models.Model):
         """Set musqet_settle_check on these payments, and on every line sharing their saleIds.
 
         A line is checked against the server's done sale or refund record of its
-        (method, saleId), and against the other lines claiming it: one Musqet sale or refund
-        vouches for one paid line, so a saleId copied onto a second line leaves both Not
-        verified. Logs each Musqet line that becomes Not verified, so it can be checked by
-        hand.
+        (method, saleId), and against the other paid lines claiming it: one Musqet sale or
+        refund vouches for one line. When a saleId is copied onto another line, only the line
+        of the order Odoo sent to Musqet (the record's reference) stays Verified; if no single
+        line is that one, all of them are Not verified. Logs each Musqet line that becomes
+        Not verified, so it can be checked by hand.
         """
-        lines = self._musqet_lines()
+        own_lines = self._musqet_lines()
         # Lock first, so a line of the same sale synced at the same time is counted below.
-        lines.filtered(lambda line: line._musqet_is_claiming())._musqet_lock_records()
+        own_lines.filtered(lambda line: line._musqet_order_is_paid())._musqet_lock_records()
         payments = self.sudo() | self._musqet_lines_sharing_sales()
         lines = payments._musqet_lines()
         sales, refunds = lines._musqet_done_records()
-        claims = Counter(line._musqet_claim_key() for line in lines if line._musqet_is_claiming())
+        claimants = defaultdict(list)
+        for line in lines:
+            if line._musqet_order_is_paid():
+                claimants[line._musqet_claim_key()].append(line)
         to_write = defaultdict(lambda: self.sudo().browse())
         for payment in payments:
-            value = payment._musqet_settle_value(sales, refunds, claims)
+            value = payment._musqet_settle_value(sales, refunds, claimants)
             if payment.musqet_settle_check != value:
                 to_write[value] |= payment
         for value, changed in to_write.items():
             if value == 'unverified':
                 for payment in changed:
                     _logger.warning(
-                        "Musqet payment %s (order %s, sale %s, amount %s) has no matching sale or "
+                        "Musqet payment %s (order %r, sale %r, amount %s) has no matching sale or "
                         "refund reported complete by Musqet, or shares it with another line",
                         payment.id, payment.pos_order_id.name, payment.transaction_id, payment.amount)
             changed.write({'musqet_settle_check': value})
@@ -164,9 +168,19 @@ class PosPayment(models.Model):
                     by_key[(record.payment_method_id.id, record.sale_id)] = record
         return sales, refunds
 
-    def _musqet_is_claiming(self):
-        """Whether this Musqet line is checked and claims its sale: its order is paid."""
+    def _musqet_order_is_paid(self):
+        """Whether this payment's order is paid: only then is its Musqet line checked, does it
+        claim its sale, and may it be refunded through the terminal."""
         return self.pos_order_id.state not in MUSQET_UNPAID_ORDER_STATES
+
+    def _musqet_order_references(self):
+        """Both forms of this payment's order reference, leaving out an empty one.
+
+        The POS sends a sale's or refund's reference as order.pos_reference || order.uuid, so
+        a reference may be either one.
+        """
+        order = self.pos_order_id
+        return {reference for reference in (order.pos_reference, order.uuid) if reference}
 
     def _musqet_is_sale_line(self):
         """Whether this line takes money (a sale), rather than gives it back (a refund)."""
@@ -176,22 +190,28 @@ class PosPayment(models.Model):
         """The sale or refund this line claims: (method, saleId, whether it is a sale)."""
         return (self.payment_method_id.id, self.transaction_id, self._musqet_is_sale_line())
 
-    def _musqet_settle_value(self, sales, refunds, claims):
+    def _musqet_settle_value(self, sales, refunds, claimants):
         """This payment's musqet_settle_check, given the done records by (method, saleId) and
-        how many paid lines claim each sale or refund."""
+        the paid lines claiming each sale or refund (by _musqet_claim_key)."""
         self.ensure_one()
-        if self.payment_method_id.use_payment_terminal != MUSQET_TERMINAL or not self._musqet_is_claiming():
+        if self.payment_method_id.use_payment_terminal != MUSQET_TERMINAL or not self._musqet_order_is_paid():
             return False
-        if claims[self._musqet_claim_key()] > 1:
-            return 'unverified'
         key = (self.payment_method_id.id, self.transaction_id)
+        is_sale = self._musqet_is_sale_line()
+        record = (sales if is_sale else refunds).get(key)
+        if not record:
+            return 'unverified'
+        rivals = claimants[self._musqet_claim_key()]
+        if len(rivals) > 1:
+            # Contested: the line of the order the command was sent for wins, if it is alone.
+            sent_for = [line for line in rivals if record.reference in line._musqet_order_references()]
+            if sent_for != [self]:
+                return 'unverified'
         amount = minor_units(self.amount, self.currency_id)
-        if self._musqet_is_sale_line():
-            sale = sales.get(key)
-            verified = sale and sale.amount_minor == amount and sale.currency == self.currency_id.name
+        if is_sale:
+            verified = record.amount_minor == amount and record.currency == self.currency_id.name
         else:
-            refund = refunds.get(key)
-            verified = refund and refund.amount_minor == -amount
+            verified = record.amount_minor == -amount
         return 'verified' if verified else 'unverified'
 
     def _musqet_link_recorded_refunds(self):
@@ -216,4 +236,3 @@ class PosPayment(models.Model):
             # nothing more. (No context flag: an RPC caller sets the context, and could set
             # it to keep a forged link.)
             linked.sudo().write({'musqet_refund_of': original_sale_id})
-

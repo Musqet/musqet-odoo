@@ -15,7 +15,7 @@ from odoo import fields, models, api, _
 from odoo.exceptions import AccessDenied, UserError, ValidationError
 from odoo.tools import SQL, consteq
 
-from .musqet_common import MUSQET_TERMINAL, MUSQET_UNPAID_ORDER_STATES, minor_units, parse_minor_amount
+from .musqet_common import MUSQET_TERMINAL, minor_units, parse_minor_amount
 from .musqet_crypto import (
     ENV_KEY,
     MusqetEncryptionKeyUnavailable,
@@ -560,8 +560,12 @@ class PosPaymentMethod(models.Model):
             "Musqet has not confirmed this sale, so it cannot be refunded here.")}}
         # A paid sale line only. (The check below refuses any other line too; this saves
         # reading a pending sale from Musqet for nothing.)
-        if not payment._musqet_is_sale_line() or payment.pos_order_id.state in MUSQET_UNPAID_ORDER_STATES:
+        if not payment._musqet_is_sale_line() or not payment._musqet_order_is_paid():
             return None, not_confirmed
+        # The slow calls to Musqet go first, before anything below locks the sale's rows
+        # (settling it, checking its line), so they don't hold up other refunds, syncs or
+        # status reads of the sale.
+        self._musqet_reread_pending_refunds(payment.company_id, payment.transaction_id)
         original = self._musqet_resolve_sale(payment)
         # Then the line must be one the sale vouches for, by a check run now: after a pending
         # sale has settled above, and on a line synced before the check existed. A line that
@@ -601,9 +605,9 @@ class PosPaymentMethod(models.Model):
         Every refund decision updates the sale records with the original's saleId in its
         company (to the same values), the same key the cap counts refunds by, so two
         refunds of one sale still meet even through two methods' records of it. A second
-        decision on the same sale waits for the first transaction to end. If the first one committed, the update fails with a serialisation
-        error: Odoo runs a request in REPEATABLE READ, so its snapshot may predate the first
-        refund's record. Odoo then retries the whole request with a fresh snapshot that
+        decision on the same sale waits for the first transaction to end. If the first one
+        committed, the update fails with a serialisation error: Odoo runs a request in
+        REPEATABLE READ, so its snapshot may predate the first refund's record. Odoo then retries the whole request with a fresh snapshot that
         includes the record. A lock alone would not do: the waiting transaction would keep its
         old snapshot. The retry is safe only while nothing has been sent, which is why
         musqet_create_refund flushes every pending write before it sends the refund.
@@ -612,23 +616,25 @@ class PosPaymentMethod(models.Model):
         MUSQET_TIMEOUT). Only the server writes sale records, so nothing else waits on it but
         another refund of the sale, a status read of it, or a check of its payment lines
         (pos.payment._musqet_lock_records). The refund's own check of the original line
-        (_musqet_refundable_original) also holds that line's row if it changed its flag, so a
-        session close touching the line waits too.
+        (_musqet_refundable_original) takes the same lock a little earlier, after its calls
+        to Musqet, and also holds the line's row if it changed its flag, so a session close
+        touching the line waits too.
         """
         self.env.cr.execute(SQL(
             'UPDATE pos_musqet_sale SET write_date = write_date'
             ' WHERE company_id = %s AND sale_id = %s',
             original.company_id.id, original.sale_id))
 
-    def _musqet_reread_pending_refunds(self, original):
-        """Ask Musqet about the sale's oldest pending refunds, so failed ones stop counting.
+    def _musqet_reread_pending_refunds(self, company, sale_id):
+        """Ask Musqet about sale ``sale_id``'s oldest pending refunds, so failed ones stop counting.
 
-        Runs before the claim, so the calls to Musqet don't hold up other refunds of the sale.
-        A refund that can't be re-read stays pending and keeps counting, the safe side for a
-        cap. Only a Musqet method may call the API (_musqet_check_method).
+        Runs before anything locks the sale's rows (see _musqet_refundable_original), so the
+        calls to Musqet don't hold up other refunds of the sale. A refund that can't be
+        re-read stays pending and keeps counting, the safe side for a cap. Only a Musqet
+        method may call the API (_musqet_check_method).
         """
         pending = self.env['pos.musqet.refund'].sudo().search(
-            self._musqet_original_refunds_domain(original) + [
+            self._musqet_original_refunds_domain(company, sale_id) + [
                 ('state', '=', 'pending'),
                 # A refund whose method is no longer a Musqet one can't be re-read, so it
                 # mustn't use up the limit.
@@ -638,22 +644,10 @@ class PosPaymentMethod(models.Model):
         for refund in pending:
             refund.payment_method_id.musqet_get_sale(refund.sale_id)
 
-    def _musqet_original_refunds_domain(self, original):
-        """The domain of the refund records of the ``original`` sale: its company and saleId."""
-        return [
-            ('company_id', '=', original.company_id.id),
-            ('original_sale_id', '=', original.sale_id),
-        ]
-
     @api.model
-    def _musqet_order_references(self, payment):
-        """Both forms of the payment's order reference, leaving out an empty one.
-
-        The POS sends a refund's reference as order.pos_reference || order.uuid, so a
-        reference may be either one.
-        """
-        order = payment.pos_order_id
-        return {reference for reference in (order.pos_reference, order.uuid) if reference}
+    def _musqet_original_refunds_domain(self, company, sale_id):
+        """The domain of the refund records of sale ``sale_id`` in ``company``."""
+        return [('company_id', '=', company.id), ('original_sale_id', '=', sale_id)]
 
     def _musqet_refund_reference_states(self, refunds, original):
         """Map each order reference the recorded ``refunds`` are known by to their state.
@@ -683,7 +677,7 @@ class PosPaymentMethod(models.Model):
             ]):
                 state = state_by_key.get((payment.payment_method_id.id, payment.transaction_id))
                 if state:
-                    for reference in self._musqet_order_references(payment):
+                    for reference in payment._musqet_order_references():
                         note(reference, state)
         return states
 
@@ -693,7 +687,7 @@ class PosPaymentMethod(models.Model):
         Must run after _musqet_claim_original_sale, so it sees every earlier refund's record.
         """
         all_recorded = self.env['pos.musqet.refund'].sudo().search(
-            self._musqet_original_refunds_domain(original))
+            self._musqet_original_refunds_domain(original.company_id, original.sale_id))
         # All records, failed ones too: a synced payment of a refund Musqet reports as failed
         # must not count through the synced branch either.
         unrecorded_payments = self._musqet_unrecorded_synced_refunds(original, all_recorded)
@@ -716,7 +710,7 @@ class PosPaymentMethod(models.Model):
             return {'error': {'message': _(
                 "A refund for this order is still in progress at the terminal.")}}
         if state or any(
-            reference in self._musqet_order_references(payment) for payment in unrecorded_payments
+            reference in payment._musqet_order_references() for payment in unrecorded_payments
         ):
             return {'error': {'message': _("This refund has already been processed.")}}
         return None
@@ -800,9 +794,6 @@ class PosPaymentMethod(models.Model):
         currency = self._musqet_requested_currency(payload)
         if not currency:
             return {'error': {'message': _("The refund currency does not match the company currency.")}}
-        original, error = self._musqet_refundable_original(original_payment_id, currency)
-        if error:
-            return error
         # Validate the requested amount against the captured amount, in the same minor units the
         # POS computed it: a positive whole number here, and no more than the remaining
         # refundable amount below.
@@ -813,7 +804,10 @@ class PosPaymentMethod(models.Model):
         reference = payload.get('reference')
         if not self._musqet_valid_reference(reference):
             return {'error': {'message': _("The refund reference is invalid.")}}
-        self._musqet_reread_pending_refunds(original)
+        # Last of the checks, as it may call Musqet.
+        original, error = self._musqet_refundable_original(original_payment_id, currency)
+        if error:
+            return error
         self._musqet_claim_original_sale(original)
         error = self._musqet_refund_refusal(original, amount, reference)
         if error:

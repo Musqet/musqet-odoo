@@ -55,7 +55,13 @@ class MusqetController(http.Controller):
         # buffer the verified result and ping every open session that can show it. The
         # frontend pulls the buffer and settles the pending line idempotently (a poll may
         # have already settled it — see payment_musqet.js _finishSale).
-        method_sudo._musqet_sync_records(sale.get('saleId'), sale)
+        # In a savepoint, and never raised: the reply must stay [accepted] whatever happens,
+        # and the poll path settles the record later anyway.
+        try:
+            with request.env.cr.savepoint():
+                method_sudo._musqet_sync_records(sale.get('saleId'), sale)
+        except Exception:
+            _logger.exception("Musqet webhook: could not settle sale %r", sale.get('saleId'))
         method_sudo.musqet_latest_response = json.dumps(sale)
         sessions = request.env['pos.session'].sudo().search(
             [('payment_method_ids', 'in', method_sudo.id), ('state', '=', 'opened')])
