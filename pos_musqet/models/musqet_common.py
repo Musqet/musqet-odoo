@@ -44,7 +44,11 @@ def parse_minor_amount(value):
 
 
 def parse_rail(value):
-    """``value`` as a known Musqet rail, or False if it isn't one."""
+    """``value`` as a known Musqet rail, or False if it isn't one.
+
+    False, not None like the other parsers: the result is written straight into a Selection
+    field, whose empty value is False.
+    """
     return value if value in MUSQET_RAILS else False
 
 

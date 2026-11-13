@@ -476,7 +476,7 @@ class PosPaymentMethod(models.Model):
             return {'error': {'message': _("The sale reference is invalid.")}}
         response = self._musqet_send_terminal_command(
             payload, kind='sale', mode=mode, amount=amount, currency=currency, reference=reference)
-        self._musqet_record_sale(response, amount, currency, reference)
+        self._musqet_record_sale(response, amount=amount, currency=currency, reference=reference)
         return response
 
     def _musqet_send_terminal_command(self, payload, *, kind, mode, amount, currency, reference):
@@ -507,7 +507,7 @@ class PosPaymentMethod(models.Model):
         self.env.flush_all()
         return self._musqet_request('POST', '/terminal/sales', payload=outgoing)
 
-    def _musqet_record_sale(self, response, amount, currency, reference):
+    def _musqet_record_sale(self, response, *, amount, currency, reference):
         """Record a sale Musqet accepted, so its settle can be checked against Musqet's word.
 
         Pending until Musqet says otherwise: the create reply is normally PENDING, and a
@@ -765,7 +765,7 @@ class PosPaymentMethod(models.Model):
             if (payment.payment_method_id.id, payment.transaction_id) not in recorded_keys
         ]
 
-    def _musqet_record_refund(self, response, original, amount, reference):
+    def _musqet_record_refund(self, response, *, original, amount, reference):
         """Record a refund Musqet accepted, so the next refund of the sale counts it.
 
         If saving fails (logged), the refund's synced payment counts only if the POS writes
@@ -852,7 +852,7 @@ class PosPaymentMethod(models.Model):
         response = self._musqet_send_terminal_command(
             payload, kind='refund', mode='card', amount=amount, currency=currency,
             reference=reference)
-        self._musqet_record_refund(response, original, amount, reference)
+        self._musqet_record_refund(response, original=original, amount=amount, reference=reference)
         return response
 
     def musqet_get_sale(self, sale_id):
