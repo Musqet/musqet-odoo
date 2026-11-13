@@ -121,9 +121,9 @@ that is intended, and is what keeps a copied database from exposing them.
   and again if the secret recovers and then fails later.
 - **A broken key also blocks editing the payment method**, because the required API
   key field reads as empty. Set a valid key first. Unless you restored the original
-  key (for example, after a typo), the stored secrets are unreadable: re-enter the API
-  key, and the webhook secret if you use one, under the new key. Then edit the method
-  as usual.
+  key (for example, after a typo), the stored secrets are unreadable: re-enter both
+  secrets under the new key, as described under "Rotating the key" below. Then edit
+  the method as usual.
 - **If the key is lost, the stored secrets cannot be recovered.** Re-enter the API key
   and webhook secret on the payment method under a new key.
 - **Rotating the key** means setting the new key and then re-entering **both** secrets
