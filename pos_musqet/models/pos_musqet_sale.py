@@ -8,8 +8,10 @@ from .musqet_common import (
     MUSQET_RAIL_SELECTION,
     MUSQET_RAILS,
     MUSQET_SUCCESS_STATUS,
+    MUSQET_UNCHECKED_ORDER_STATES,
     minor_units,
-    record_unrecorded_payments,
+    parse_iso_currency,
+    parse_minor_amount,
 )
 
 _logger = logging.getLogger(__name__)
@@ -30,18 +32,11 @@ class PosMusqetSale(models.Model):
     (_musqet_record_synced_sales).
     """
     _name = 'pos.musqet.sale'
+    _inherit = ['pos.musqet.record']
     _description = 'Musqet Sale'
-    _order = 'id desc'
 
-    company_id = fields.Many2one('res.company', required=True, readonly=True, index=True)
-    payment_method_id = fields.Many2one(
-        'pos.payment.method', required=True, readonly=True, ondelete='restrict')
-    sale_id = fields.Char(
-        string="Musqet Sale", required=True, readonly=True, index=True,
-        help="The Musqet saleId of the sale.")
-    reference = fields.Char(readonly=True, help="The order reference sent to Musqet.")
+    sale_id = fields.Char(string="Musqet Sale", index=True, help="The Musqet saleId of the sale.")
     amount_minor = fields.Integer(
-        string="Amount (minor units)", required=True, readonly=True,
         help="The amount in minor units of the currency (cents): the amount requested while "
              "pending, the amount Musqet captured once done.")
     currency = fields.Char(required=True, readonly=True, help="The ISO code of the sale currency.")
@@ -49,9 +44,8 @@ class PosMusqetSale(models.Model):
         MUSQET_RAIL_SELECTION, readonly=True,
         help="The rail Musqet reports the sale settled on. Only a card sale can be refunded.")
     state = fields.Selection(
-        [('pending', "Pending"), ('done', "Done"), ('failed', "Failed")],
-        required=True, default='pending', readonly=True,
-        help="Done once Musqet reports the sale complete. Only a done card sale can be refunded.")
+        help="Done once Musqet reports the sale complete, with the amount and currency it "
+             "captured. Only a done card sale can be refunded.")
 
     _unique_sale = models.Constraint(
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet sale is already recorded.')
@@ -60,8 +54,9 @@ class PosMusqetSale(models.Model):
         """Settle the pending sales as a Musqet sale response says; other statuses leave them.
 
         On COMPLETE the record takes the amount, currency and rail from the response, Musqet's
-        own word, over what was requested. Only a pending sale moves, as for refunds, except
-        that a done sale whose rail Musqet hadn't reported yet takes it from a later reply.
+        own word, over what was requested; a COMPLETE without a valid amount and currency
+        leaves it pending. Only a pending sale moves, as for refunds, except that a done sale
+        whose rail Musqet hadn't reported yet takes it from a later reply.
         """
         if not isinstance(response, dict):
             return
@@ -77,16 +72,15 @@ class PosMusqetSale(models.Model):
             return
         if status != MUSQET_SUCCESS_STATUS:
             return
-        vals = {'state': 'done', 'rail': rail}
-        amount = response.get('amountInCents')
-        if isinstance(amount, int) and not isinstance(amount, bool):
-            vals['amount_minor'] = amount
-        currency = response.get('currency')
-        # An ISO 4217 code, compared with res.currency names: upper-cased, and kept only if it
-        # looks like one.
-        if isinstance(currency, str) and len(currency) == 3 and currency.isascii() and currency.isalpha():
-            vals['currency'] = currency.upper()
-        pending.write(vals)
+        amount = parse_minor_amount(response.get('amountInCents'))
+        currency = parse_iso_currency(response.get('currency'))
+        if amount is None or currency is None:
+            # Done means Musqet confirmed what it captured; without that, stay pending.
+            _logger.warning(
+                "Musqet reported sale(s) %s complete without a valid amount and currency",
+                ', '.join(pending.mapped('sale_id')))
+            return
+        pending.write({'state': 'done', 'rail': rail, 'amount_minor': amount, 'currency': currency})
         self.env['pos.payment']._musqet_check_settles_of(pending)
 
     @api.model
@@ -96,15 +90,16 @@ class PosMusqetSale(models.Model):
         For the upgrade to 19.0.1.3.0 (see its post-migration); safe to run again. The
         payment's own amount and rail are the best evidence there is for a sale made before
         sales were recorded on the server. A payment that is a refund (negative, or linked to
-        a sale it refunds) is left out.
+        a sale it refunds), or on an order never paid, is left out.
         """
         payments = self.env['pos.payment'].sudo().search([
             ('amount', '>', 0),
+            ('pos_order_id.state', 'not in', MUSQET_UNCHECKED_ORDER_STATES),
             ('musqet_refund_of', '=', False),
             ('transaction_id', '!=', False),
             ('payment_method_id.use_payment_terminal', '=', 'musqet'),
         ], order='id')
-        count = record_unrecorded_payments(self, payments, lambda payment: {
+        count = self._musqet_record_unrecorded(payments, lambda payment: {
             'amount_minor': minor_units(payment.amount, payment.currency_id),
             'currency': payment.currency_id.name,
             'rail': payment.musqet_rail if payment.musqet_rail in MUSQET_RAILS else False,

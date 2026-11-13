@@ -50,10 +50,10 @@ def make_pos_user(env, login, group='point_of_sale.group_pos_user', **values):
     })
 
 
-def musqet_response(sale_id, status='PENDING', status_code=200):
-    """A stubbed Musqet API response carrying a sale's id and status."""
+def musqet_response(sale_id, status='PENDING', status_code=200, **fields):
+    """A stubbed Musqet API response carrying a sale's id, status and any other ``fields``."""
     response = MagicMock(status_code=status_code)
-    response.json.return_value = {'saleId': sale_id, 'status': status}
+    response.json.return_value = {'saleId': sale_id, 'status': status, **fields}
     return response
 
 

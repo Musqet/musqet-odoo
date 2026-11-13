@@ -1,10 +1,11 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 """Record the sales made before sales were recorded on the server.
 
-Runs after the ORM has created pos.musqet.sale. Each Musqet sale payment already synced gets a
-done sale record from its own amount, currency and rail, so it can still be refunded: a refund
-reads the sale record, not the payment. The payments themselves are left unchecked
-(musqet_settle_check stays empty): nothing but the payment vouches for them.
+Runs after the ORM has created pos.musqet.sale. Each Musqet sale payment of a paid order
+already synced gets a done sale record from its own amount, currency and rail, so it can still
+be refunded: a refund reads the sale record, not the payment. The upgrade checks no payment:
+musqet_settle_check starts empty, until the line, its order's state or a line sharing its
+saleId changes (see pos.payment.musqet_settle_check).
 """
 from odoo import SUPERUSER_ID, api
 
