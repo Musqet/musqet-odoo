@@ -19,13 +19,14 @@ _logger = logging.getLogger(__name__)
 
 ENV_KEY = 'MUSQET_FIELD_ENCRYPTION_KEY'
 
-# (label, reason) pairs already logged by this worker process, so a broken key or value
-# logs one error per secret and reason rather than one per read. A successful decrypt
-# clears the label's entries, so a key that breaks again later is reported again.
-_reported_failures = set()
+# label -> reasons already logged by this worker process (all its threads together, in
+# threaded mode), so a broken key or value logs one error per secret and reason rather than
+# one per read. A successful decrypt drops the label, so a key that breaks again later is
+# reported again. Keyed by label so dropping one is a single atomic dict operation.
+_reported_failures = {}
 
 
-class MusqetEncryptionKeyMissing(Exception):
+class MusqetEncryptionKeyUnavailable(Exception):
     """MUSQET_FIELD_ENCRYPTION_KEY is unset or is not a valid Fernet key.
 
     Raised by encrypt_secret (saving a secret fails loudly); decrypt_secret catches it and
@@ -47,12 +48,12 @@ def _fernet():
     # strip(): an env file or a pasted value often carries a trailing newline or spaces.
     key = (os.environ.get(ENV_KEY) or '').strip()
     if not key:
-        raise MusqetEncryptionKeyMissing('%s is not set.' % ENV_KEY)
+        raise MusqetEncryptionKeyUnavailable('%s is not set.' % ENV_KEY)
     try:
         return Fernet(key.encode())
     except ValueError:
         # Never echo the value: it is (a mangled copy of) the key.
-        raise MusqetEncryptionKeyMissing(
+        raise MusqetEncryptionKeyUnavailable(
             '%s is not a valid Fernet key (32 url-safe base64-encoded bytes).' % ENV_KEY
         ) from None
 
@@ -60,7 +61,7 @@ def _fernet():
 def encrypt_secret(plaintext, label):
     """Return a Fernet ciphertext (text) of a non-empty plaintext bound to label, else False.
 
-    Raises MusqetEncryptionKeyMissing if the key is unset or invalid.
+    Raises MusqetEncryptionKeyUnavailable if the key is unset or invalid.
     """
     if not plaintext:
         return False
@@ -72,15 +73,15 @@ def decrypt_secret(ciphertext, label):
 
     A failure (key unset or invalid, wrong key, corrupted value, or a ciphertext written for
     another record or field) is logged once per label and reason until that label next
-    decrypts, and yields False rather
-    than raising, so a mis-provisioned box degrades instead of crashing on every read.
-    Encryption is the loud path; decryption is the soft one.
+    decrypts, and yields False rather than raising, so a mis-provisioned box degrades
+    instead of crashing on every read. Encryption is the loud path; decryption is the soft
+    one.
     """
     if not ciphertext:
         return False
     try:
         bound = _fernet().decrypt(ciphertext.encode()).decode()
-    except MusqetEncryptionKeyMissing as error:
+    except MusqetEncryptionKeyUnavailable as error:
         reason = str(error)
     except InvalidToken:
         reason = 'wrong key or corrupted value'
@@ -90,12 +91,17 @@ def decrypt_secret(ciphertext, label):
             _forget_failures(label)
             return plaintext
         reason = 'the value was written for another record or field'
-    if (label, reason) not in _reported_failures:
-        _reported_failures.add((label, reason))
+    reasons = _reported_failures.setdefault(label, set())
+    if reason not in reasons:
+        reasons.add(reason)
         _logger.error('Cannot decrypt the Musqet secret %s: %s', label, reason)
     return False
 
 
 def _forget_failures(label):
-    for reported in [entry for entry in _reported_failures if entry[0] == label]:
-        _reported_failures.discard(reported)
+    _reported_failures.pop(label, None)
+
+
+def reset_reported_failures():
+    """Forget every logged decrypt failure, so each is logged again (for tests)."""
+    _reported_failures.clear()

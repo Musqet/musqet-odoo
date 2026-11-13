@@ -16,7 +16,7 @@ from odoo.tools import consteq
 
 from .musqet_crypto import (
     ENV_KEY,
-    MusqetEncryptionKeyMissing,
+    MusqetEncryptionKeyUnavailable,
     decrypt_secret,
     encrypt_secret,
     encrypted_field_name,
@@ -160,21 +160,26 @@ class PosPaymentMethod(models.Model):
     def _musqet_decrypt_into(self, field_name):
         for payment_method in self:
             label = payment_method._musqet_secret_label(field_name)
-            # A record that was never saved has no stored secret to read.
+            if not label:
+                # A record that was never saved has no stored secret to read.
+                payment_method[field_name] = False
+                continue
             payment_method[field_name] = decrypt_secret(
-                payment_method[encrypted_field_name(field_name)], label) if label else False
+                payment_method[encrypted_field_name(field_name)], label)
 
     def _musqet_encrypt_from(self, field_name):
         for payment_method in self:
+            label = payment_method._musqet_secret_label(field_name)
+            if not label and payment_method[field_name]:
+                # Odoo runs inverses on saved records only; never bind a secret to no id.
+                raise UserError(_("Save the payment method before setting its Musqet secrets."))
             try:
-                ciphertext = encrypt_secret(
-                    payment_method[field_name],
-                    payment_method._musqet_secret_label(field_name))
-            except MusqetEncryptionKeyMissing:
+                ciphertext = encrypt_secret(payment_method[field_name], label)
+            except MusqetEncryptionKeyUnavailable:
                 raise UserError(_(
                     "The Musqet secret cannot be saved: the encryption key %(variable)s is "
-                    "not set, or is not valid, on the Odoo host. See the install guide, "
-                    "section 2.1.", variable=ENV_KEY)) from None
+                    "not set, or is not valid, on the Odoo host. See \"Set the "
+                    "secret-encryption key\" in the install guide.", variable=ENV_KEY)) from None
             payment_method[encrypted_field_name(field_name)] = ciphertext
 
     @api.model
@@ -309,7 +314,8 @@ class PosPaymentMethod(models.Model):
     def _musqet_headers(self):
         # The key is read with sudo() because the field is restricted to ERP managers;
         # it lives only in this header and is never logged.
-        return {'Authorization': 'Bearer %s' % (self.sudo().musqet_api_key or '')}
+        # _musqet_request returns an error before calling this when there is no key.
+        return {'Authorization': 'Bearer %s' % self.sudo().musqet_api_key}
 
     def _musqet_url(self, base_url, path):
         return base_url.rstrip('/') + '/' + path.lstrip('/')
@@ -341,10 +347,11 @@ class PosPaymentMethod(models.Model):
         # the API's authentication error.
         if not sudo_method.musqet_api_key:
             if sudo_method.musqet_api_key_encrypted:
+                # Shown to the cashier, so no cause or host detail: the server log names
+                # the secret and why it failed.
                 return {'error': {'message': _(
-                    "The Musqet API key cannot be read: the encryption key %(variable)s on "
-                    "the Odoo host is missing or wrong. Fix the key, or re-enter the API key "
-                    "on the payment method.", variable=ENV_KEY)}}
+                    "The Musqet API key cannot be read. Ask an administrator to check the "
+                    "encryption key or re-enter the API key on the payment method.")}}
             return {'error': {'message': _("No Musqet API key is configured.")}}
         url = self._musqet_url(base_url, path)
         _logger.info("Musqet %s %s by user #%d", method, path, self.env.uid)

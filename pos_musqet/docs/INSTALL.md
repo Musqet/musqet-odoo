@@ -115,6 +115,9 @@ database needs the same key.
   empty: Musqet calls fail with a message saying the API key cannot be read, and
   webhooks are rejected. Each Odoo worker logs the error once per secret and cause,
   and again if the secret recovers and then fails later.
+- **A broken key also blocks editing the payment method**, because the required API
+  key field reads as empty. Fix the key, or re-enter the API key, before changing
+  anything else on the method.
 - **If the key is lost, the stored secrets cannot be recovered.** Re-enter the API key
   and webhook secret on the payment method under a new key.
 - **Rotating the key** means setting the new key and then re-entering **both** secrets

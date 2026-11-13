@@ -38,8 +38,8 @@ def _use_test_encryption_key(test, key=_TEST_FERNET_KEY):
 
 def _reset_decrypt_failure_log(test):
     """Start and end the test with no decrypt failures recorded as already logged."""
-    musqet_crypto._reported_failures.clear()
-    test.addCleanup(musqet_crypto._reported_failures.clear)
+    musqet_crypto.reset_reported_failures()
+    test.addCleanup(musqet_crypto.reset_reported_failures)
 
 
 @tagged('post_install', '-at_install')
@@ -782,9 +782,9 @@ class TestMusqetSecretEncryption(TransactionCase):
     """The API key and webhook secret are stored as Fernet ciphertext, never plaintext.
 
     Guards the defence against a leaked read-only copy of the database: the stored column
-    holds ciphertext bound to its
-    record and field, the plaintext field round-trips through the key in the environment,
-    the plaintext has no column, and a missing or broken key degrades instead of crashing.
+    holds ciphertext bound to its record and field, the plaintext field round-trips through
+    the key in the environment, the plaintext has no column, and a missing or broken key
+    degrades instead of crashing.
     """
 
     def setUp(self):
@@ -818,7 +818,8 @@ class TestMusqetSecretEncryption(TransactionCase):
             'pos.payment.method,%s,musqet_api_key\nsecret-token' % self.method.id)
 
     def test_plaintext_fields_have_no_column(self):
-        for name in ('musqet_api_key', 'musqet_webhook_secret'):
+        # The migration's list of plaintext columns is the list of secret fields.
+        for name in _load_pre_migration().COLUMNS:
             self.assertFalse(self.method._fields[name].store, name)
             self.assertFalse(column_exists(self.env.cr, 'pos_payment_method', name), name)
 
@@ -916,7 +917,9 @@ class TestMusqetSecretEncryption(TransactionCase):
                 self.assertLogs(musqet_crypto.__name__, level='ERROR'):
             result = self.method.musqet_get_sale('sale-123')
         mock_request.assert_not_called()
-        self.assertIn(musqet_crypto.ENV_KEY, result['error']['message'])
+        # The cashier sees no host detail; the server log carries the cause.
+        self.assertIn('cannot be read', result['error']['message'])
+        self.assertNotIn(musqet_crypto.ENV_KEY, result['error']['message'])
 
     def test_onchange_copy_reads_the_secret_without_an_alarm(self):
         # A form onchange computes on an in-memory copy (NewId) of the saved record; the
@@ -931,16 +934,26 @@ class TestMusqetSecretEncryption(TransactionCase):
         with self.assertNoLogs(musqet_crypto.__name__, level='ERROR'):
             self.assertFalse(draft.musqet_api_key)
 
+    def test_unsaved_record_cannot_take_a_secret(self):
+        draft = self.env['pos.payment.method'].new({'musqet_api_key': 'secret-token'})
+        with self.assertRaises(UserError):
+            draft._inverse_musqet_api_key()
+
     def test_decrypt_failure_is_logged_again_after_a_recovery(self):
-        good_key = _TEST_FERNET_KEY
-        for key, expect_log in (('not-a-key', True), (good_key, False), ('not-a-key', True)):
-            _use_test_encryption_key(self, key)
-            self.method.invalidate_recordset()
-            if expect_log:
-                with self.assertLogs(musqet_crypto.__name__, level='ERROR'):
-                    self.assertFalse(self.method.musqet_api_key)
-            else:
-                self.assertEqual(self.method.musqet_api_key, 'secret-token')
+        # 1. The key breaks: logged.
+        _use_test_encryption_key(self, 'not-a-key')
+        self.method.invalidate_recordset()
+        with self.assertLogs(musqet_crypto.__name__, level='ERROR'):
+            self.assertFalse(self.method.musqet_api_key)
+        # 2. The key is fixed: the secret reads again.
+        _use_test_encryption_key(self)
+        self.method.invalidate_recordset()
+        self.assertEqual(self.method.musqet_api_key, 'secret-token')
+        # 3. The key breaks again: logged again.
+        _use_test_encryption_key(self, 'not-a-key')
+        self.method.invalidate_recordset()
+        with self.assertLogs(musqet_crypto.__name__, level='ERROR'):
+            self.assertFalse(self.method.musqet_api_key)
 
     def test_request_without_any_api_key_sends_nothing(self):
         self.method.musqet_api_key = False
@@ -1003,7 +1016,7 @@ class TestMusqetSecretMigration(TransactionCase):
         self.fail('%s not raised' % error_class.__name__)
 
     def _plaintext_columns(self):
-        return [name for name in ('musqet_api_key', 'musqet_webhook_secret')
+        return [name for name in self.migration.COLUMNS
                 if column_exists(self.env.cr, 'pos_payment_method', name)]
 
     def test_encrypts_and_drops_the_plaintext_columns(self):
@@ -1013,19 +1026,24 @@ class TestMusqetSecretMigration(TransactionCase):
         self.assertEqual(self.method.musqet_api_key, 'legacy-token')
         self.assertEqual(self.method.musqet_webhook_secret, 'legacy-whsec')
 
+    def test_migration_binds_to_the_model_name(self):
+        # Every migrated secret's label names this model; a mismatch would make all of
+        # them unreadable after the upgrade.
+        self.assertEqual(self.migration.MODEL, self.env['pos.payment.method']._name)
+
     def test_fresh_install_changes_nothing(self):
         self.migration.migrate(self.env.cr, None)
-        self.assertEqual(self._plaintext_columns(), ['musqet_api_key', 'musqet_webhook_secret'])
+        self.assertEqual(self._plaintext_columns(), list(self.migration.COLUMNS))
 
     def test_missing_key_aborts_before_dropping(self):
         _use_test_encryption_key(self, None)
-        self._migrate_expecting(musqet_crypto.MusqetEncryptionKeyMissing)
-        self.assertEqual(self._plaintext_columns(), ['musqet_api_key', 'musqet_webhook_secret'])
+        self._migrate_expecting(musqet_crypto.MusqetEncryptionKeyUnavailable)
+        self.assertEqual(self._plaintext_columns(), list(self.migration.COLUMNS))
 
     def test_failed_round_trip_aborts_before_dropping(self):
         with patch.object(self.migration, 'decrypt_secret', return_value=False):
             self._migrate_expecting(self.migration.MusqetMigrationError)
-        self.assertEqual(self._plaintext_columns(), ['musqet_api_key', 'musqet_webhook_secret'])
+        self.assertEqual(self._plaintext_columns(), list(self.migration.COLUMNS))
 
     def test_failure_on_a_later_column_keeps_every_plaintext_column(self):
         # The API key passes, then the webhook secret fails: nothing may be dropped yet.
@@ -1036,4 +1054,4 @@ class TestMusqetSecretMigration(TransactionCase):
 
         with patch.object(self.migration, 'decrypt_secret', side_effect=decrypt_failing_webhook_secret):
             self._migrate_expecting(self.migration.MusqetMigrationError)
-        self.assertEqual(self._plaintext_columns(), ['musqet_api_key', 'musqet_webhook_secret'])
+        self.assertEqual(self._plaintext_columns(), list(self.migration.COLUMNS))
