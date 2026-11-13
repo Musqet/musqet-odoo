@@ -88,7 +88,7 @@ def decrypt_secret(ciphertext, label):
     else:
         bound_label, separator, plaintext = bound.partition('\n')
         if separator and bound_label == label:
-            _forget_failures(label)
+            _reported_failures.pop(label, None)
             return plaintext
         reason = 'the value was written for another record or field'
     reasons = _reported_failures.setdefault(label, set())
@@ -96,10 +96,6 @@ def decrypt_secret(ciphertext, label):
         reasons.add(reason)
         _logger.error('Cannot decrypt the Musqet secret %s: %s', label, reason)
     return False
-
-
-def _forget_failures(label):
-    _reported_failures.pop(label, None)
 
 
 def reset_reported_failures():

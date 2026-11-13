@@ -15,10 +15,10 @@ from odoo.addons.pos_musqet.models.pos_payment_method import (
     MUSQET_REFERENCE_MAX_LENGTH,
 )
 from odoo.exceptions import AccessDenied, UserError, ValidationError
-from odoo.tools.misc import file_path
-from odoo.tools.sql import column_exists
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
+from odoo.tools.misc import file_path
+from odoo.tools.sql import column_exists
 
 # The secrets are encrypted at rest with a key from the environment, so every suite that
 # stores a secret patches one in for its duration (see _use_test_encryption_key).
@@ -103,6 +103,7 @@ class TestMusqetBaseUrl(TransactionCase):
         self.assertIn(pos_payment_method.MUSQET_ALLOWED_HOST, error('https://musqet.tech.evil.example/'))
         # urlparse raises on this; the check must still return a message, not raise.
         self.assertIn('not valid', error('https://[::1'))
+        self.assertIn('not valid', error('https://api.musqet.tech:99999/'))
 
     def test_request_rechecks_a_base_url_written_behind_the_orm(self):
         # A direct database write skips the save-time constraint; the bearer token must

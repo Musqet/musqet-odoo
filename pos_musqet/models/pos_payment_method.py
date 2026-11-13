@@ -239,6 +239,10 @@ class PosPaymentMethod(models.Model):
         if parsed.scheme != 'https':
             return _("The Musqet API URL must use https://.")
         host = (parsed.hostname or '').lower()
+        try:
+            parsed.port  # raises on a non-numeric or out-of-range port
+        except ValueError:
+            return _("The Musqet API URL is not valid.")
         if not host:
             return _("The Musqet API URL must include a host.")
         # Reject IP-literal hosts outright: covers the cloud metadata endpoint
