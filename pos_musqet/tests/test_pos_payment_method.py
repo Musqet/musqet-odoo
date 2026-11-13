@@ -124,6 +124,22 @@ class TestMusqetProxyAccess(TransactionCase):
         self.assertFalse(called_kwargs['allow_redirects'])
 
 
+    def test_get_and_cancel_deny_a_non_musqet_payment_method(self):
+        # _musqet_check_access also refuses a method that isn't a Musqet one: no request may go
+        # out for it.
+        plain = self.env['pos.payment.method'].create({'name': 'Plain Method'}).with_user(self.cashier)
+        calls = {
+            'musqet_get_sale': lambda: plain.musqet_get_sale('sale-1'),
+            'musqet_cancel_sale': lambda: plain.musqet_cancel_sale('sale-1'),
+        }
+        for name, call in calls.items():
+            with self.subTest(method=name), \
+                 patch.object(pos_payment_method.requests, 'request') as mock_request:
+                with self.assertRaises(AccessDenied):
+                    call()
+                mock_request.assert_not_called()
+
+
 @tagged('post_install', '-at_install')
 class TestMusqetWebhookVerification(TransactionCase):
     """The webhook HMAC is the only authentication on a public, unauthenticated route.
@@ -211,21 +227,13 @@ class TestMusqetLatestStatus(TransactionCase):
             'musqet_terminal_serial': 'MSQ-WH-002',
         })
 
-    def test_read_and_cancel_paths_deny_a_non_musqet_payment_method(self):
-        # _musqet_check_access also refuses a method that isn't a Musqet one, on every proxy
-        # call, not just create sale/refund. No request may go out for such a method.
-        plain = self.env['pos.payment.method'].create({'name': 'Plain Method'}).with_user(self.cashier)
-        calls = {
-            'musqet_get_latest_status': lambda: plain.musqet_get_latest_status(),
-            'musqet_get_sale': lambda: plain.musqet_get_sale('sale-1'),
-            'musqet_cancel_sale': lambda: plain.musqet_cancel_sale('sale-1'),
-        }
-        for name, call in calls.items():
-            with self.subTest(method=name), \
-                 patch.object(pos_payment_method.requests, 'request') as mock_request:
-                with self.assertRaises(AccessDenied):
-                    call()
-                mock_request.assert_not_called()
+    def test_denies_a_non_musqet_payment_method_and_keeps_its_buffer(self):
+        # The method check guards the buffer itself: a refused read must not consume it.
+        plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
+        plain.musqet_latest_response = '{"status": "COMPLETE"}'
+        with self.assertRaises(AccessDenied):
+            plain.with_user(self.cashier).musqet_get_latest_status()
+        self.assertEqual(plain.musqet_latest_response, '{"status": "COMPLETE"}')
 
     def test_returns_false_when_nothing_buffered(self):
         self.assertFalse(self.method.with_user(self.cashier).musqet_get_latest_status())
