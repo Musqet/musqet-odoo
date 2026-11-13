@@ -109,13 +109,13 @@ class PosMusqetSale(models.Model):
         REPEATABLE READ, so its snapshot may predate the first refund's record. Odoo then
         retries the whole request with a fresh snapshot that includes the record. A lock alone
         would not do: the waiting transaction would keep its old snapshot. The retry is safe
-        only while nothing has been sent, which is why musqet_create_refund flushes every
-        pending write before it sends the refund.
+        only while nothing has been sent, which is why pos.payment.method.musqet_create_refund
+        flushes every pending write before it sends the refund.
 
         The row lock lasts until commit, so it spans the call to Musqet (up to
-        MUSQET_TIMEOUT). Only the server writes sale records, so nothing else waits on it but
-        another refund of the sale, a status read of it, or a check of its payment lines
-        (pos.payment._musqet_lock_records). The refund's own check of the original line
+        MUSQET_TIMEOUT, in models/pos_payment_method.py). Only the server writes sale
+        records, so nothing else waits on it but another refund of the sale, a status read of
+        it, or a check of its payment lines (pos.payment._musqet_lock_records). The refund's own check of the original line
         (pos.payment.method._musqet_settled_original) takes the same lock a little earlier,
         after its calls to Musqet, and also holds the line's row if it changed its flag, so a
         session close touching the line waits too.

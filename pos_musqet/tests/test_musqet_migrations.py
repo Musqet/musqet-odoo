@@ -87,7 +87,7 @@ class TestMusqetUpgradeBackfills(MusqetPosRecordsCase):
 
     def test_backfill_records_linked_refunds_once(self):
         legacy = self._payment(transaction_id='refund-legacy', musqet_refund_of='sale-orig-1', amount=-3.0)
-        self._payment(transaction_id='refund-1')  # already recorded in setUp
+        self._payment(transaction_id='refund-1')  # recorded in MusqetPosRecordsCase.setUp
         self._payment(transaction_id='refund-unlinked')  # no musqet_refund_of: not a refund
         Refund = self.env['pos.musqet.refund']
         load_migration('19.0.1.2.0', 'post-migration').migrate(self.env.cr, '19.0.1.1.0')

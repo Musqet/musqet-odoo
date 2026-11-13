@@ -69,7 +69,7 @@ class PosMusqetRefund(models.Model):
         return None if amount is None else {'amount_minor': amount}
 
     @api.model
-    def _musqet_of_sale_domain(self, company, sale_id):
+    def _musqet_sale_refunds_domain(self, company, sale_id):
         """The domain of the refund records of sale ``sale_id`` in ``company``."""
         return [('company_id', '=', company.id), ('original_sale_id', '=', sale_id)]
 
@@ -77,13 +77,14 @@ class PosMusqetRefund(models.Model):
     def _musqet_reread_pending(self, company, sale_id):
         """Ask Musqet about sale ``sale_id``'s oldest pending refunds, so failed ones stop counting.
 
-        Runs before anything locks the sale's rows (see musqet_create_refund), so the
-        calls to Musqet don't hold up other refunds of the sale. A refund that can't be
-        re-read stays pending and keeps counting, the safe side for a cap. Only a Musqet
-        method may call the API (_musqet_check_method).
+        Runs before anything locks the sale's rows (see
+        pos.payment.method.musqet_create_refund), so the calls to Musqet don't hold up other
+        refunds of the sale. A refund that can't be re-read stays pending and keeps counting,
+        the safe side for a cap. Only a Musqet method may call the API
+        (pos.payment.method._musqet_check_method).
         """
         pending = self.sudo().search(
-            self._musqet_of_sale_domain(company, sale_id) + [
+            self._musqet_sale_refunds_domain(company, sale_id) + [
                 ('state', '=', 'pending'),
                 # A refund whose method is no longer a Musqet one can't be re-read, so it
                 # mustn't use up the limit.
@@ -101,7 +102,7 @@ class PosMusqetRefund(models.Model):
         original._musqet_claim_for_refund, so it sees every earlier refund's record.
         """
         all_recorded = self.sudo().search(
-            self._musqet_of_sale_domain(original.company_id, original.sale_id))
+            self._musqet_sale_refunds_domain(original.company_id, original.sale_id))
         # All records, failed ones too: a synced payment of a refund Musqet reports as failed
         # must not count through the synced branch either.
         unrecorded_payments = all_recorded._musqet_unrecorded_synced(original)

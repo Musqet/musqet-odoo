@@ -108,8 +108,8 @@ def reset_decrypt_failure_log(test):
 
 
 class MusqetPosRecordsCase(TransactionCase):
-    """Real POS payments of a paid order on two Musqet methods and a plain one, with one
-    refund record ('refund-1', 500 minor units) of that order."""
+    """A paid order on two Musqet methods and a plain one, with a factory for real POS
+    payments (_payment); setUp records refund 'refund-1' (500 minor units) of that order."""
 
     def setUp(self):
         super().setUp()

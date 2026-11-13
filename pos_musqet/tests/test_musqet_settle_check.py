@@ -15,7 +15,7 @@ class TestMusqetSettleCheck(MusqetPosRecordsCase):
     def test_the_line_of_the_order_sent_keeps_verified(self):
         # A copy of a real sale's saleId on another order: the line of the order Odoo sent the
         # sale for stays Verified and refundable; the copy is Not verified and refused.
-        record_sale(self.env, self.method, 'sale-sent', reference=self.order.uuid)
+        self._record_sale('sale-sent')
         genuine = self._payment(amount=10.0, transaction_id='sale-sent')
         copy = self._payment(pos_order_id=self._order().id, amount=10.0, transaction_id='sale-sent')
         self.assertEqual((genuine.musqet_settle_check, copy.musqet_settle_check),
