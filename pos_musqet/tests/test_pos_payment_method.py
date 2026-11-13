@@ -1529,6 +1529,20 @@ class TestMusqetRefundWithPosRecords(TransactionCase):
         self.assertEqual(set(lines.mapped('musqet_settle_check')), {'unverified'})
         self.assertEqual(copy.musqet_settle_check, 'unverified')
 
+    def test_a_backfilled_refund_with_its_genuine_line_unpaid_verifies_no_copy(self):
+        # Upgrading from 19.0.1.1.0: the genuine refund line is on an unpaid order and a copy
+        # of its saleId on a paid one. The backfill can't say which was sent (no reference),
+        # so the copy, though the only paid claimant, is not Verified.
+        unpaid = self._order(state='draft')
+        self._payment(pos_order_id=unpaid.id, transaction_id='refund-bf', musqet_refund_of='sale-orig-1')
+        copy = self._payment(pos_order_id=self._order().id, transaction_id='refund-bf',
+                             musqet_refund_of='sale-orig-1')
+        self.env['pos.musqet.refund']._musqet_record_synced_refunds()
+        refund = self.env['pos.musqet.refund'].search([('sale_id', '=', 'refund-bf')])
+        self.assertFalse(refund.reference)
+        copy._musqet_check_settles()
+        self.assertEqual(copy.musqet_settle_check, 'unverified')
+
     def test_sale_backfill_skips_an_amount_too_large_to_store(self):
         self._payment(amount=30000000.0, transaction_id='sale-huge')
         logger = 'odoo.addons.pos_musqet.models.pos_musqet_record'

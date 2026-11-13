@@ -112,8 +112,8 @@ class PosPayment(models.Model):
         Musqet sale or refund vouches for one line, the line of the order Odoo sent the
         command for (the record's reference), alone on it; a saleId copied onto another
         order's line leaves the copy Not verified. A record with no reference (made by the
-        upgrade from lines sharing a saleId) vouches for a line only if no other paid line
-        claims it. Logs each Musqet line that becomes Not verified, so it can be checked by
+        upgrade from lines sharing a saleId) vouches for a line only if no other line, of any
+        order state, carries its claim. Logs each Musqet line that becomes Not verified, so it can be checked by
         hand.
         """
         own_lines = self._musqet_lines()
@@ -122,13 +122,11 @@ class PosPayment(models.Model):
         payments = self.sudo() | self._musqet_lines_sharing_sales()
         lines = payments._musqet_lines()
         sales, refunds = lines._musqet_done_records()
-        claimants = defaultdict(list)
-        for line in lines:
-            if line._musqet_order_is_paid():
-                claimants[line._musqet_claim_key()].append(line)
+        claimants = lines._musqet_claimants(paid_only=True)
+        carriers = lines._musqet_claimants(paid_only=False)
         to_write = defaultdict(lambda: self.sudo().browse())
         for payment in payments:
-            value = payment._musqet_settle_value(sales, refunds, claimants)
+            value = payment._musqet_settle_value(sales, refunds, claimants, carriers)
             if payment.musqet_settle_check != value:
                 to_write[value] |= payment
         for value, changed in to_write.items():
@@ -187,13 +185,23 @@ class PosPayment(models.Model):
         """Whether this line takes money (a sale), rather than gives it back (a refund)."""
         return minor_units(self.amount, self.currency_id) > 0
 
+    def _musqet_claimants(self, paid_only):
+        """These Musqet lines by the sale or refund they claim (_musqet_claim_key): only the
+        lines of paid orders if ``paid_only``, else every one."""
+        by_claim = defaultdict(list)
+        for line in self._musqet_lines():
+            if not paid_only or line._musqet_order_is_paid():
+                by_claim[line._musqet_claim_key()].append(line)
+        return by_claim
+
     def _musqet_claim_key(self):
         """The sale or refund this line claims: (method, saleId, whether it is a sale)."""
         return (self.payment_method_id.id, self.transaction_id, self._musqet_is_sale_line())
 
-    def _musqet_settle_value(self, sales, refunds, claimants):
-        """This payment's musqet_settle_check, given the done records by (method, saleId) and
-        the paid lines claiming each sale or refund (by _musqet_claim_key)."""
+    def _musqet_settle_value(self, sales, refunds, claimants, carriers):
+        """This payment's musqet_settle_check, given the done records by (method, saleId), and
+        the paid lines (``claimants``) and all lines (``carriers``) claiming each sale or refund
+        (by _musqet_claim_key)."""
         self.ensure_one()
         if self.payment_method_id.use_payment_terminal != MUSQET_TERMINAL or not self._musqet_order_is_paid():
             return False
@@ -208,8 +216,10 @@ class PosPayment(models.Model):
             sent_for = [line for line in rivals if record.reference in line._musqet_order_references()]
             if sent_for != [self]:
                 return 'unverified'
-        elif len(rivals) > 1:
-            # No reference to tell them apart (a record the upgrade made from shared lines).
+        elif len(carriers[self._musqet_claim_key()]) > 1:
+            # No reference to tell them apart (a record the upgrade made from shared lines):
+            # it vouches only for a line no other line carries, in any order state, since
+            # the genuine line may be on an order not paid.
             return 'unverified'
         amount = minor_units(self.amount, self.currency_id)
         if is_sale:
