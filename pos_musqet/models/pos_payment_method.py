@@ -889,6 +889,12 @@ class PosPaymentMethod(models.Model):
         for records in self._musqet_records_of(sale_id):
             records._musqet_apply_response(response)
 
+    def _musqet_records_of(self, sale_id):
+        """This method's sale and refund records of ``sale_id`` (each at most one)."""
+        domain = [('payment_method_id', '=', self.id), ('sale_id', '=', str(sale_id))]
+        return (self.env['pos.musqet.sale'].sudo().search(domain),
+                self.env['pos.musqet.refund'].sudo().search(domain))
+
     def musqet_cancel_sale(self, sale_id):
         """POST /terminal/sales/:id/cancel — request cancellation of an in-flight sale.
 
@@ -902,12 +908,6 @@ class PosPaymentMethod(models.Model):
     # reads the sale back from Musqet (musqet_get_sale), buffers that reply here and pings the
     # POS session; the frontend pulls it via musqet_get_latest_status. The pilot is behind NAT
     # and relies on polling instead.
-
-    def _musqet_records_of(self, sale_id):
-        """This method's sale and refund records of ``sale_id`` (each at most one)."""
-        domain = [('payment_method_id', '=', self.id), ('sale_id', '=', str(sale_id))]
-        return (self.env['pos.musqet.sale'].sudo().search(domain),
-                self.env['pos.musqet.refund'].sudo().search(domain))
 
     def _musqet_needs_status_read(self, sale_id):
         """Whether this method has a record of ``sale_id`` that a status read would settle."""

@@ -789,6 +789,15 @@ class TestMusqetWebhookRoute(HttpCase):
         self.assertIsNone(self._buffered())
         self.assertEqual(self.sale.state, 'pending')
 
+    def test_an_unknown_serial_is_logged_escaped(self):
+        # The serial comes from an unauthenticated body: it can't forge a log line.
+        raw = json.dumps({'data': {'saleId': 'sale-wh', 'serial': 'MSQ-NONE\nFORGED LINE'}})
+        with self.assertLogs('odoo.addons.pos_musqet.controllers.main', 'WARNING') as logs:
+            self.url_open('/musqet/webhook', data=raw.encode(),
+                          headers={'Content-Type': 'application/json'})
+        self.assertNotIn('\n', logs.records[0].getMessage())
+        self.assertIn('MSQ-NONE\\nFORGED LINE', logs.records[0].getMessage())
+
     def test_an_unsigned_webhook_reads_nothing(self):
         _, mock_request = self._post(self._body(), secret='whsec_wrong')
         mock_request.assert_not_called()

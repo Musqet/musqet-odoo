@@ -60,8 +60,8 @@ class PosMusqetRecord(models.AbstractModel):
         vals = self._musqet_done_vals(response)
         if vals is None:
             _logger.warning(
-                "Musqet reported %s(s) %s complete without the values Odoo needs to settle it",
-                self._musqet_kind, ', '.join(pending.mapped('sale_id')))
+                "Musqet reported %s(s) %r complete without the values Odoo needs to settle it",
+                self._musqet_kind, pending.mapped('sale_id'))
             return
         pending.write({**vals, 'state': 'done'})
         self.env['pos.payment']._musqet_check_settles_of(pending)
@@ -93,7 +93,7 @@ class PosMusqetRecord(models.AbstractModel):
                 self.sudo().create({'sale_id': str(sale_id), **vals})._musqet_apply_response(response)
         except Exception:
             _logger.exception(
-                "Musqet accepted %s %s (%s) but Odoo could not record it",
+                "Musqet accepted %s %r (%s) but Odoo could not record it",
                 self._musqet_kind, sale_id, details)
 
     @api.model

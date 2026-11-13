@@ -46,12 +46,12 @@ class MusqetController(http.Controller):
         method_sudo = request.env['pos.payment.method'].sudo().search(
             [('musqet_terminal_serial', '=', serial)], limit=1)
         if not method_sudo:
-            _logger.warning("Musqet webhook for an unregistered terminal: %s", serial)
+            _logger.warning("Musqet webhook for an unregistered terminal: %r", serial)
             return self._ack()
 
         signature = request.httprequest.headers.get('x-webhook-signature', '')
         if not method_sudo._musqet_verify_webhook(signature, raw_body):
-            _logger.warning("Musqet webhook: signature verification failed for %s", serial)
+            _logger.warning("Musqet webhook: signature verification failed for %r", serial)
             return self._ack()
 
         # The webhook is only a trigger: Odoo reads the sale back from Musqet's API
