@@ -346,7 +346,7 @@ class PosPaymentMethod(models.Model):
 
     @api.model
     def _musqet_error(self, message):
-        """The ``{error}`` dict every proxy call returns on failure."""
+        """Build the ``{error}`` dict for a failure that carries only a message."""
         return {'error': {'message': message}}
 
     def _musqet_request_target(self):
