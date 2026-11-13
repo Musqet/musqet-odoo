@@ -414,8 +414,9 @@ class TestMusqetCreateRefund(TransactionCase):
     this method must: re-read the (untrusted) original payment by id, refuse anything that
     isn't a card-settled Musqet sale of this company whose captured amount covers the request,
     set type, mode, serial and currency on the server, and require a valid reference, so a
-    tampered payload can't widen the action. The original pos.payment is stubbed (a real one needs a full POS session, left
-    to the live smoke run) so these tests exercise the authorization logic directly.
+    tampered payload can't widen the action. The original pos.payment is stubbed (a real one
+    needs a full POS session, left to the live smoke run) so these tests exercise the
+    authorization logic directly.
     """
 
     def setUp(self):
@@ -608,6 +609,19 @@ class TestMusqetCreateRefund(TransactionCase):
                 result, mock_request = self._call_refund({'amountInCents': amount}, original)
                 self.assertIn('error', result)
                 mock_request.assert_not_called()
+
+    def test_omitted_currency_means_the_company_currency(self):
+        # Same rule as a sale: no currency in the payload means the company currency.
+        with patch.object(pos_payment_method.requests, 'request') as mock_request:
+            mock_request.return_value.status_code = 200
+            mock_request.return_value.json.return_value = {'saleId': 'refund-1'}
+            with patch.object(type(self.env['pos.payment']), 'browse',
+                              return_value=self._stub_original(amount=10.0)), \
+                 patch.object(type(self.env['pos.payment']), 'search', return_value=[]):
+                result = self.method.with_user(self.cashier).musqet_create_refund(
+                    {'amountInCents': 500, 'reference': 'R-1'}, 123)
+        self.assertNotIn('error', result)
+        self.assertEqual(mock_request.mock_calls[0].kwargs['json']['currency'], self.currency)
 
     def test_rejects_an_original_not_in_the_company_currency(self):
         original = self._stub_original(amount=10.0)
