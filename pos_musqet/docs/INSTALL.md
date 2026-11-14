@@ -44,8 +44,10 @@ your Odoo addons path.
 > ```
 >
 > `--ref` is required: use a release tag from
-> [Releases](https://github.com/Musqet/musqet-odoo/releases) (or its commit SHA) in
-> production, and take the script from the same tag. `main` is unreleased development
+> [Releases](https://github.com/Musqet/musqet-odoo/releases) in production, and take
+> the script from the same ref. A tag can be moved, so for a fixed pin use the
+> release's full 40-character commit SHA: the script then refuses anything but that
+> commit. `main` is unreleased development
 > code; until the first release is tagged, it is the only ref there is. The script
 > prints the commit it installed. It needs `git` **or** `curl`/`wget` (no git
 > required). Run with `--help` for options like `--source <dir>` for a local checkout.

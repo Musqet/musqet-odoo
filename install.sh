@@ -120,6 +120,7 @@ fi
 
 # Obtain the source tree (local checkout or a fresh clone).
 CLEANUP=""
+COMMIT=""
 trap '[[ -n "$CLEANUP" ]] && rm -rf "$CLEANUP"' EXIT
 
 if [[ -n "$SOURCE_DIR" ]]; then
@@ -133,7 +134,7 @@ elif command -v git >/dev/null 2>&1; then
   # matches no revision but names a file (e.g. pos_musqet) checks out that path and
   # leaves the default branch in place.
   git -C "$TMP/repo" checkout --quiet "$REF" -- || die "ref not found: $REF"
-  info "Using commit $(git -C "$TMP/repo" rev-parse HEAD)"
+  COMMIT="$(git -C "$TMP/repo" rev-parse HEAD)"
   SRC="$TMP/repo"
 else
   # No git (e.g. the stock odoo:19 image) — download a tarball with curl/wget instead.
@@ -157,11 +158,21 @@ else
   mkdir -p "$TMP/repo"
   tar -xzf "$TMP/src.tgz" -C "$TMP/repo" --strip-components=1 --no-same-owner || die "failed to extract archive"
   # GitHub builds the archive with git archive, which records the commit in the tar's
-  # global header ("comment=<sha>"), so the log shows what a tag or branch resolved to.
-  commit="$( { gzip -dc "$TMP/src.tgz" 2>/dev/null || true; } | head -c 1536 | tr -d '\0' \
+  # global header ("comment=<sha>"). That header is the first entry: a 512-byte header
+  # block, then its pax record padded to 512, so the first 1536 bytes always hold it.
+  COMMIT="$( { gzip -dc "$TMP/src.tgz" 2>/dev/null || true; } | head -c 1536 | tr -d '\0' \
     | grep -ao 'comment=[0-9a-f]\{40\}' | head -n 1 | cut -d= -f2 )" || true
-  info "Using commit ${commit:-(not recorded in the download)}"
   SRC="$TMP/repo"
+fi
+
+if [[ -z "$SOURCE_DIR" ]]; then
+  info "Using commit ${COMMIT:-(not recorded in the download)}"
+  # A tag or branch can be moved; a full commit SHA can't. When --ref is one, insist
+  # on getting exactly that commit, on either fetch path.
+  ref_lower="$(printf '%s' "$REF" | tr 'A-F' 'a-f')"   # not ${REF,,}: bash 3.2 lacks it
+  if [[ "$ref_lower" =~ ^[0-9a-f]{40}$ && "$COMMIT" != "$ref_lower" ]]; then
+    die "fetched commit ${COMMIT:-(unknown)} does not match --ref $REF"
+  fi
 fi
 
 [[ -f "$SRC/$MODULE/__manifest__.py" ]] || die "$MODULE/__manifest__.py not found in source — wrong --repo/--ref?"
