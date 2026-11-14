@@ -37,21 +37,38 @@ your Odoo addons path.
 > a database → optionally restart):
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/Musqet/musqet-odoo/main/install.sh \
->   | bash -s -- --addons-path /opt/odoo/extra-addons --db <your_db> \
+> REF='<release tag>'     # until the first release is tagged: REF=main
+> curl -fsSL "https://raw.githubusercontent.com/Musqet/musqet-odoo/$REF/install.sh" \
+>   | bash -s -- --addons-path /opt/odoo/extra-addons --ref "$REF" --db '<your_db>' \
 >     --restart "sudo systemctl restart odoo"
 > ```
 >
-> It needs `git` **or** `curl`/`wget` (no git required). Run with `--help` for options
-> like `--ref <tag>` to pin a release or `--source <dir>` for a local checkout. The
-> manual steps below are the same thing done by hand.
+> `--ref` is required. In production use a release from the
+> [Releases](https://github.com/Musqet/musqet-odoo/releases) page, and take the script
+> from the same ref. A tag can be moved, so for a fixed pin use the release's full
+> 40-character commit SHA, copied from that page: the script then refuses anything but
+> that commit. Take the SHA only from Musqet's Releases page, since GitHub also serves
+> commits from forks under this repo's URLs. `main` is unreleased development code;
+> until the first release is tagged, it is the only ref there is. The script prints
+> the commit it installed. It needs `git` **or** `curl`/`wget` (no git required). Run
+> with `--help` for options like `--source <dir>` for a local checkout.
+> The manual steps below are the same thing done by hand.
 
 1. **Get the module onto the server.** Clone (or download) this repo so that the
    `pos_musqet/` directory sits in a directory that is on your Odoo `addons_path`:
 
    ```bash
    cd /opt/odoo/extra-addons        # any directory already on addons_path
-   git clone https://github.com/Musqet/musqet-odoo.git
+   # a release tag in production; main is development code (and, until the
+   # first release is tagged, the only branch to use)
+   git clone --branch '<release tag>' https://github.com/Musqet/musqet-odoo.git
+   # optional, for a fixed pin: a tag can be moved, so check out the release's full
+   # commit SHA from the Releases page; it prints "pinned" only if HEAD is that commit
+   SHA="$(printf %s '<full 40-character SHA>' | tr A-F a-f)"   # git prints lowercase
+   git -C musqet-odoo checkout --quiet --detach "$SHA" \
+     && test "$(git -C musqet-odoo rev-parse HEAD)" = "$SHA" \
+     && echo "pinned to $SHA" \
+     || echo "NOT pinned: do not install from this clone; check the SHA and retry" >&2
    # pos_musqet now lives at /opt/odoo/extra-addons/musqet-odoo/pos_musqet
    ```
 

@@ -12,14 +12,14 @@ touching their own machine's Python/Postgres setup.
 ## Prerequisites
 
 - **Docker** with Compose v2 (`docker compose`, not the old `docker-compose`).
-- That's it — Odoo, Postgres, and all Python deps come from the `odoo:19` image.
+- That's it — Odoo, Postgres, and all Python deps come from the Odoo 19 image.
 
 ## What the stack does
 
 `docker-compose.yml` runs two containers:
 
-- **`db`** — `postgres:16`, credentials `odoo` / `odoo`.
-- **`odoo`** — the official `odoo:19` image, published on
+- **`db`** — Postgres 16, credentials `odoo` / `odoo`.
+- **`odoo`** — the official Odoo 19 image, published on
   [http://localhost:8069](http://localhost:8069).
 
 The repo's `pos_musqet/` directory is mounted into the container at
@@ -101,4 +101,10 @@ docker compose down -v     # stop AND delete the database + filestore (clean sla
   addon upgrade (`-u pos_musqet`) if you touched models/views.
 - **POS JavaScript changes** (`pos_musqet/static/src/**`) are served as assets;
   reload the POS with the browser cache disabled, or restart Odoo, to pick them up.
-- The stack pins `odoo:19` and `postgres:16`. The addon targets Odoo **19.0** only.
+- `docker-compose.yml` pins both images by exact tag and digest (Odoo by dated build,
+  Postgres by minor version), so every run gets the same build. The addon targets Odoo
+  **19.0** only. To move to a newer Odoo build, pick a dated tag (`19.0-YYYYMMDD`) on
+  [Docker Hub](https://hub.docker.com/_/odoo/tags), take its digest from the tag page
+  or `docker buildx imagetools inspect odoo:<tag>`, update both in
+  `docker-compose.yml`, and re-run the test suite. Postgres works the same way with a
+  minor version tag (`16.N`).

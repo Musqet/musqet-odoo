@@ -16,23 +16,31 @@ automatically.
 ## Quickstart
 
 The quickest way to side-load onto an existing Odoo 19 server is the install script,
-which fetches the addon from GitHub and drops it on your addons path:
+which fetches the addon from GitHub and drops it on your addons path. Name what you
+install with `--ref`: in production, a release from the
+[Releases](https://github.com/Musqet/musqet-odoo/releases) page, with the script taken
+from the same ref. A tag can be moved, so for a fixed pin use the release's full
+40-character commit SHA, copied from that page: the script then refuses anything but
+that commit. Take the SHA only from Musqet's Releases page, since GitHub also serves
+commits from forks under this repo's URLs. `main` is unreleased development code;
+until the first release is tagged, it is the only ref there is.
 
 ```bash
+REF='<release tag>'     # until the first release is tagged: REF=main
 # place the files only:
-curl -fsSL https://raw.githubusercontent.com/Musqet/musqet-odoo/main/install.sh \
-  | bash -s -- --addons-path /opt/odoo/extra-addons
+curl -fsSL "https://raw.githubusercontent.com/Musqet/musqet-odoo/$REF/install.sh" \
+  | bash -s -- --addons-path /opt/odoo/extra-addons --ref "$REF"
 # or place AND install into a database, then restart Odoo:
-curl -fsSL https://raw.githubusercontent.com/Musqet/musqet-odoo/main/install.sh \
-  | bash -s -- --addons-path /opt/odoo/extra-addons --db live --restart "sudo systemctl restart odoo"
+curl -fsSL "https://raw.githubusercontent.com/Musqet/musqet-odoo/$REF/install.sh" \
+  | bash -s -- --addons-path /opt/odoo/extra-addons --ref "$REF" --db live \
+    --restart "sudo systemctl restart odoo"
 ```
 
-For production, **pin a release** with `--ref <tag>` rather than installing `main`, so
-a rebuild can't silently pull different code. For all options (`--source` for a local
+The script prints the commit it installed. For all options (`--source` for a local
 checkout, `--upgrade`, etc.), append `--help` to the pipe:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Musqet/musqet-odoo/main/install.sh | bash -s -- --help
+curl -fsSL "https://raw.githubusercontent.com/Musqet/musqet-odoo/$REF/install.sh" | bash -s -- --help
 ```
 
 Or do it by hand:
