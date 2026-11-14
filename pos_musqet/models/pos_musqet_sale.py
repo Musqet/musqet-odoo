@@ -197,10 +197,14 @@ class PosMusqetSale(models.Model):
         sale not read (past the read limit, or once MUSQET_SALE_READ_BUDGET seconds of reads
         have passed), still counts as pending.
 
-        Not checked here: that ``reference`` is an order of the caller's session (a done sale
-        of another order resumed onto a line leaves that line Not verified, as the sale's
-        reference names its own order), or that the caller uses the methods whose sales are
-        read; scoping a cashier to their own POS is a separate check.
+        The sales searched and read are those of ``method``'s company, which
+        pos.payment.method._musqet_check_access has already held to one of the caller's
+        companies; they are read with sudo(), across the methods of that company, since a
+        sale of the order may have been started on another till's method. Not checked: that
+        ``reference`` is an order of the caller's session. The POS names a new order before it
+        reaches the server, so there is nothing to check it against; a done sale of another
+        order resumed onto a line leaves that line Not verified, as the sale's reference names
+        its own order.
 
         Requests to start a sale of one order are decided one at a time: a second one while
         the first is still being decided (and sent) is refused. The lock lasts until the

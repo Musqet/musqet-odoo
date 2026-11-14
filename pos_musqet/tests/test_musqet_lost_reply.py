@@ -28,7 +28,9 @@ from .common import (
     create_musqet_method,
     make_pos_user,
     musqet_response,
+    open_session,
     record_sale,
+    write_between_sessions,
 )
 
 
@@ -120,6 +122,7 @@ class TestMusqetLostSaleReply(TransactionCase):
             self.env, 'musqet_manager_lost', group='point_of_sale.group_pos_manager')
         self.method = create_musqet_method(self, 'MSQ-LOST-001')
         self.other_method = create_musqet_method(self, 'MSQ-LOST-002')
+        open_session(self.env, self.method, self.other_method)
 
     def _create(self, outcome, reference='Order-L', amount=1000, method=None):
         """Start a sale of order ``reference``, its create answered by ``outcome``; return the
@@ -251,7 +254,7 @@ class TestMusqetLostSaleReply(TransactionCase):
         # Unlike a sale with a saleId, an unanswered one is never read, so its method's
         # configuration doesn't matter.
         self._lose()
-        self.method.use_payment_terminal = False
+        write_between_sessions(self.method, {'use_payment_terminal': False})
         result, stub = self._create(musqet_response('new-sale'), method=self.other_method)
         self.assertIn(UNANSWERED, result['error']['message'])
         stub.assert_not_called()

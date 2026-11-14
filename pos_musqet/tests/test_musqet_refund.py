@@ -20,8 +20,10 @@ from .common import (
     dirty_field_names,
     make_pos_user,
     musqet_response,
+    open_session,
     record_refund,
     record_sale,
+    write_between_sessions,
 )
 
 
@@ -45,6 +47,7 @@ class TestMusqetCreateRefund(TransactionCase):
         self.manager = make_pos_user(
             self.env, 'musqet_manager_refund', group='point_of_sale.group_pos_manager')
         self.method = create_musqet_method(self, 'MSQ-RF-001')
+        open_session(self.env, self.method)
         self.currency = self.method.company_id.currency_id.name
         self.other_currency = 'EUR' if self.currency != 'EUR' else 'USD'
 
@@ -320,7 +323,7 @@ class TestMusqetCreateRefund(TransactionCase):
         mock_request.assert_not_called()
 
     def test_rejects_when_no_serial_is_configured(self):
-        self.method.musqet_terminal_serial = False
+        write_between_sessions(self.method, {'musqet_terminal_serial': False})
         self.method.musqet_latest_response = json.dumps({'saleId': 'live', 'status': 'PENDING'})
         result, mock_request = self._call_refund({'amountInCents': 500}, self._stub_original())
         self.assertIn('error', result)
@@ -329,6 +332,8 @@ class TestMusqetCreateRefund(TransactionCase):
 
     def test_denies_a_non_musqet_payment_method(self):
         plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
+        # On an open session, so the method check is what refuses it.
+        open_session(self.env, plain)
         with self.assertRaises(AccessDenied):
             plain.with_user(self.cashier).musqet_create_refund(
                 {'amountInCents': 500, 'currency': self.currency, 'reference': 'R-1'}, 123)
@@ -359,11 +364,15 @@ class TestMusqetCreateRefund(TransactionCase):
         self.assertEqual(sent['currency'], self.currency)
         self.assertEqual(sent['reference'], 'REFUND-ORDER-1')
 
-    def test_rejects_cross_company_original(self):
+    def test_rejects_cross_company_original_as_if_it_did_not_exist(self):
+        # The same message as for a missing payment, so a refusal says nothing about which
+        # payment ids another company has.
         other_company = self.env['res.company'].create({'name': 'Other Co'})
         original = self._stub_original(rail='card', amount=10.0, company=other_company)
         result, mock_request = self._call_refund({'amountInCents': 500}, original)
-        self.assertIn('error', result)
+        missing, _mock = self._call_refund({'amountInCents': 500}, self.env['pos.payment'])
+        self.assertIn('could not be found', result['error']['message'])
+        self.assertEqual(result, missing)
         mock_request.assert_not_called()
 
     def test_rejects_unknown_original_payment(self):

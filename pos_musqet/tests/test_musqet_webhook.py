@@ -12,7 +12,14 @@ from odoo.tests import tagged
 from odoo.tests.common import HttpCase, TransactionCase
 from odoo.tools import mute_logger
 
-from .common import create_musqet_method, make_pos_user, musqet_response, record_refund, record_sale
+from .common import (
+    create_musqet_method,
+    make_pos_user,
+    musqet_response,
+    open_session,
+    record_refund,
+    record_sale,
+)
 
 
 @tagged('post_install', '-at_install')
@@ -84,10 +91,13 @@ class TestMusqetLatestStatus(TransactionCase):
         super().setUp()
         self.cashier = make_pos_user(self.env, 'musqet_cashier_status')
         self.method = create_musqet_method(self, 'MSQ-WH-002')
+        open_session(self.env, self.method)
 
     def test_denies_a_non_musqet_payment_method_and_keeps_its_buffer(self):
         # The method check guards the buffer itself: a refused read must not consume it.
         plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
+        # On an open session, so the method check is what refuses it.
+        open_session(self.env, plain)
         plain.musqet_latest_response = '{"status": "COMPLETE"}'
         with self.assertRaises(AccessDenied):
             plain.with_user(self.cashier).musqet_get_latest_status()

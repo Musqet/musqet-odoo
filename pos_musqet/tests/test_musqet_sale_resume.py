@@ -25,7 +25,9 @@ from .common import (
     create_musqet_method,
     make_pos_user,
     musqet_response,
+    open_session,
     record_sale,
+    write_between_sessions,
 )
 
 
@@ -120,6 +122,7 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
         self.caller = make_pos_user(self.env, 'musqet_cashier_resume')
         self.method = create_musqet_method(self, 'MSQ-RES-001')
         self.other_method = create_musqet_method(self, 'MSQ-RES-002')
+        open_session(self.env, self.method, self.other_method)
 
     def _sale(self, sale_id, state='pending', method=None, **values):
         return record_sale(
@@ -217,7 +220,7 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
     def test_ignores_a_sale_of_a_method_no_longer_musqet(self):
         # It can't be read, so it would block the order for good.
         self._sale('sale-p', method=self.other_method, amount_minor=700)
-        self.other_method.use_payment_terminal = False
+        write_between_sessions(self.other_method, {'use_payment_terminal': False})
         fake = FakeMusqet()
         self.assertEqual(self._create(fake)['saleId'], 'new-sale')
         self.assertEqual(fake.calls, [('POST', '/terminal/sales')])
@@ -439,6 +442,7 @@ class TestMusqetCancelSale(TransactionCase):
         super().setUp()
         self.cashier = make_pos_user(self.env, 'musqet_cashier_cancel')
         self.method = create_musqet_method(self, 'MSQ-CAN-001')
+        open_session(self.env, self.method)
         self.sale = record_sale(self.env, self.method, 'sale-c', state='pending', rail=False)
 
     def _cancel(self, **cancel):
