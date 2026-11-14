@@ -45,6 +45,7 @@ umask 022   # ensure placed files are not group/world-writable regardless of cal
 
 REPO_URL="https://github.com/Musqet/musqet-odoo.git"
 REF=""
+ref_lower=""          # REF lowercased, set once REF is checked
 ADDONS_PATH=""
 SOURCE_DIR=""
 DB=""
