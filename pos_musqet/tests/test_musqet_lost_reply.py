@@ -161,6 +161,22 @@ class TestMusqetLostSaleReply(TransactionCase):
         self.assertEqual(result['saleId'], 'sale-ok')
         self.assertEqual(self._sales().sale_id, 'sale-ok')
 
+    def test_a_null_error_in_a_status_read_is_no_error(self):
+        sale = record_sale(self.env, self.method, 'sale-r', state='pending', rail=False)
+
+        def read(sale_id):
+            stub = MagicMock(return_value=reply(
+                200, {'saleId': sale_id, 'status': 'CANCELLED', 'error': None}))
+            with patch.object(pos_payment_method.requests, 'request', stub):
+                return self.method.with_user(self.cashier).musqet_get_sale('sale-r')
+
+        # A reply about another sale still reaches neither the record nor the till.
+        with mute_logger(PROXY_LOGGER):
+            self.assertIn('different sale', read('sale-other')['error']['message'])
+        self.assertEqual(sale.state, 'pending')
+        self.assertEqual(read('sale-r'), {'saleId': 'sale-r', 'status': 'CANCELLED'})
+        self.assertEqual(sale.state, 'failed')
+
     def test_records_nothing_when_musqet_refused_or_never_got_the_request(self):
         for index, (label, outcome) in enumerate(NOT_ACCEPTED):
             reference = 'Order-N%d' % index

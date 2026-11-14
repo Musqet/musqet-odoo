@@ -397,8 +397,9 @@ class PosPaymentMethod(models.Model):
         An error after which the request may still have reached Musqet and been acted on
         carries ``outcome_unknown: True`` (the MUSQET_OUTCOME_UNKNOWN key, see
         reply_outcome_is_unknown): a transport failure after the connection was made, a
-        non-2xx status not in MUSQET_REFUSED_STATUSES, or a 2xx body that isn't a JSON object
-        or carries an error.
+        non-2xx status not in MUSQET_REFUSED_STATUSES, or a 2xx body Odoo can't read, that
+        isn't a JSON object, or that carries a non-null ``error``. A null ``error`` in a 2xx
+        body is no error, and is dropped, so every caller can take an ``error`` key as one.
         """
         self.ensure_one()
         self._musqet_check_access()
@@ -450,13 +451,17 @@ class PosPaymentMethod(models.Model):
                 _("Received an invalid response from the Musqet terminal service."),
                 status_code=response.status_code, **{MUSQET_OUTCOME_UNKNOWN: True})
         # Only an {error} built here may say Musqet refused the request: a 2xx body that isn't
-        # an object, or that carries an error of its own (a gateway's, say), says nothing of
-        # whether Musqet acted on it.
+        # an object, or that carries a non-null error of its own (a gateway's, say), says
+        # nothing of whether Musqet acted on it. The body stays in the server log, not the
+        # reply: it may not be Musqet's, and the reply reaches the cashier's browser.
         if not isinstance(body, dict) or body.get('error') is not None:
-            _logger.warning("Musqet %s %s returned an unexpected 2xx body", method, path)
+            _logger.warning(
+                "Musqet %s %s returned an unexpected 2xx body: %.500r", method, path, body)
             return self._musqet_error(
                 _("Received an invalid response from the Musqet terminal service."),
-                status_code=response.status_code, detail=body, **{MUSQET_OUTCOME_UNKNOWN: True})
+                status_code=response.status_code, **{MUSQET_OUTCOME_UNKNOWN: True})
+        # A null error is none: drop it, so no caller mistakes the key for one.
+        body.pop('error', None)
         return body
 
     def musqet_create_sale(self, payload, line_sale_ids=None):
@@ -482,8 +487,8 @@ class PosPaymentMethod(models.Model):
         another line. The reply is then ``{saleId, reference, resumed: true}``, and the POS
         polls that sale as it would a new one (``resumed`` is for logs and support only).
 
-        A sale whose reply never reached Odoo (a read timeout, a dropped connection, a status
-        outside MUSQET_REFUSED_STATUSES) may have been paid, and Musqet's API can't look it up
+        A sale whose reply never reached Odoo or was unusable (the errors _musqet_request marks
+        MUSQET_OUTCOME_UNKNOWN) may have been paid, and Musqet's API can't look it up
         by reference, so it is recorded unanswered (pos.musqet.record._musqet_record_sent),
         and every later sale of the order is refused until a manager who has checked it in
         the Musqet app marks it failed.
@@ -705,8 +710,8 @@ class PosPaymentMethod(models.Model):
         reference, so a refund order carries at most one Musqet refund of a given sale. The cap
         and the duplicate check are pos.musqet.refund._musqet_refusal_message.
 
-        A refund whose reply never reached Odoo (a read timeout, a dropped connection, a
-        status outside MUSQET_REFUSED_STATUSES) may have gone through, and Musqet's API can't
+        A refund whose reply never reached Odoo or was unusable (the errors _musqet_request
+        marks MUSQET_OUTCOME_UNKNOWN) may have gone through, and Musqet's API can't
         look it up by reference, so it is recorded unanswered
         (pos.musqet.record._musqet_record_sent): it counts against the cap and refuses every
         Musqet refund of its refund order until a manager who has checked it in the Musqet

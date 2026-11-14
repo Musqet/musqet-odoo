@@ -458,6 +458,16 @@ class TestMusqetCancelSale(TransactionCase):
         self.assertIn('error', result)
         self.assertEqual(self.sale.state, 'pending')
 
+    def test_a_null_error_in_a_cancel_reply_is_no_error(self):
+        # Dropped by the proxy: the record syncs, and the different-sale guard still holds.
+        with self.assertLogs(PROXY_LOGGER, 'WARNING'):
+            result = self._cancel(status='CANCELLED_REMOTE', saleId='sale-other', error=None)
+        self.assertIn('different sale', result['error']['message'])
+        self.assertEqual(self.sale.state, 'pending')
+        result = self._cancel(status='CANCELLED_REMOTE', error=None)
+        self.assertEqual(result, {'saleId': 'sale-c', 'status': 'CANCELLED_REMOTE'})
+        self.assertEqual(self.sale.state, 'failed')
+
     def test_a_cancel_reply_about_another_sale_changes_nothing(self):
         # Neither the record nor the till: the POS gets an error, not a cancel to release on.
         with self.assertLogs(PROXY_LOGGER, 'WARNING'):
