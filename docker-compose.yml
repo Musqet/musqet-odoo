@@ -8,9 +8,10 @@
 #   docker compose run --rm odoo \
 #     odoo -d test -i pos_musqet --test-enable --test-tags=/pos_musqet --stop-after-init
 
+# Both images are pinned by dated tag and digest so every run gets the same build;
+# docs/DEV.md says how to move them.
 services:
   db:
-    # Pinned by digest so every run gets the same build; see docs/DEV.md to update.
     image: postgres:16.15@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657
     environment:
       POSTGRES_USER: odoo
