@@ -55,6 +55,10 @@ MUSQET_REFERENCE_MAX_LENGTH = 255
 MUSQET_LANGUAGE_MAX_LENGTH = 16
 # At most this much of a refusal's message is passed on to the POS.
 MUSQET_REFUSAL_MESSAGE_MAX_LENGTH = 500
+# At most this much of an untrusted value from a reply reaches the log: a body (at debug
+# level), and an id (a saleId it names).
+MUSQET_LOG_BODY_MAX_LENGTH = 500
+MUSQET_LOG_ID_MAX_LENGTH = 100
 
 
 class PosPaymentMethod(models.Model):
@@ -441,7 +445,8 @@ class PosPaymentMethod(models.Model):
                     details['detail'] = detail
             else:
                 details[MUSQET_OUTCOME_UNKNOWN] = True
-                self._musqet_log_body_at_debug(response, method, path)
+                self._musqet_log_body_at_debug(
+                    response, method, path, self._musqet_response_json(response))
             return self._musqet_error(_("The Musqet terminal service returned an error."), **details)
         body = self._musqet_2xx_body(response, method, path)
         if body is None:
@@ -460,13 +465,12 @@ class PosPaymentMethod(models.Model):
             return response.text
 
     @api.model
-    def _musqet_log_body_at_debug(self, response, method, path, body=None):
-        """Log the body of a non-2xx ``response`` that may not be Musqet's (a gateway's or a
-        WAF's page, say), at debug only: it is kept out of the reply, which reaches the
-        cashier's browser. ``body`` is the body if already parsed (_musqet_response_json)."""
-        if body is None:
-            body = self._musqet_response_json(response)
-        _logger.debug("Musqet %s %s HTTP %s body: %.500r", method, path, response.status_code, body)
+    def _musqet_log_body_at_debug(self, response, method, path, body):
+        """Log ``body``, the parsed body of a non-2xx ``response`` (_musqet_response_json) that
+        may not be Musqet's (a gateway's or a WAF's page, say), at debug only: it is kept out
+        of the reply, which reaches the cashier's browser."""
+        _logger.debug("Musqet %s %s HTTP %s body: %.*r", method, path, response.status_code,
+                      MUSQET_LOG_BODY_MAX_LENGTH, body)
 
     @api.model
     def _musqet_refusal_detail(self, response, method, path):
@@ -511,9 +515,11 @@ class PosPaymentMethod(models.Model):
             # may hold payment details, so it is logged only at debug level.
             sale_id = body.get('saleId') if isinstance(body, dict) else None
             _logger.warning(
-                "Musqet %s %s returned an unexpected 2xx body (saleId %.100r, a %s)",
-                method, path, sale_id if isinstance(sale_id, str) else None, type(body).__name__)
-            _logger.debug("Musqet %s %s unexpected 2xx body: %.500r", method, path, body)
+                "Musqet %s %s returned an unexpected 2xx body (saleId %.*r, a %s)",
+                method, path, MUSQET_LOG_ID_MAX_LENGTH,
+                sale_id if isinstance(sale_id, str) else None, type(body).__name__)
+            _logger.debug("Musqet %s %s unexpected 2xx body: %.*r",
+                          method, path, MUSQET_LOG_BODY_MAX_LENGTH, body)
             return None
         body.pop('error', None)
         return body
@@ -841,8 +847,9 @@ class PosPaymentMethod(models.Model):
         """
         if isinstance(response, dict) and 'error' not in response and not reply_is_for(sale_id, response):
             echoed = response.get('saleId')
-            _logger.warning("Musqet replied about sale %.100r to a %s of sale %.100r",
-                            echoed if isinstance(echoed, str) else None, action, sale_id)
+            _logger.warning("Musqet replied about sale %.*r to a %s of sale %.*r",
+                            MUSQET_LOG_ID_MAX_LENGTH, echoed if isinstance(echoed, str) else None,
+                            action, MUSQET_LOG_ID_MAX_LENGTH, sale_id)
             return self._musqet_error(_("Musqet replied about a different sale."))
         return response
 

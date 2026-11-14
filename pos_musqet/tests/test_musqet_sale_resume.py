@@ -310,7 +310,7 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
             result = self._create(fake)
         self.assertRefusedInProgress(result, fake)
 
-    def test_a_recent_pending_sale_still_blocks_on_musqets_not_found(self):
+    def test_a_recent_pending_sale_still_blocks_on_a_not_found_in_musqets_shape(self):
         # It may be a sale of the business the API key belonged to before it was changed.
         self._sale('sale-p', amount_minor=700)
         fake = FakeMusqet(statuses={'sale-p': NOT_FOUND})
