@@ -1036,27 +1036,32 @@ class PosPaymentMethod(models.Model):
         # the webhook controller to buffer its result during a session (mirrors pos_adyen).
         return super()._is_write_forbidden(fields - {'musqet_latest_response'})
 
-    def musqet_get_latest_status(self):
-        """Return the latest webhook-buffered sale result for the POS frontend.
+    def musqet_get_latest_status(self, sale_id):
+        """Return the webhook-buffered result of sale ``sale_id`` for the POS frontend.
 
         Named with the ``musqet_`` prefix to match the proxy convention and the JS call site.
         Same access guard as the proxy (_musqet_check_access): a POS cashier of the method's
         company, while a POS session using it is opening, open or being closed, or an
         internal/sudo call, may read it.
         Returns Musqet's reply to the status read a verified webhook triggered (the partner
-        sale shape, with its saleId), or ``False`` if nothing is buffered.
+        sale shape, with its saleId), or ``False`` if nothing is buffered for that sale.
         """
         self.ensure_one()
         self._musqet_check_access()
         latest = self.sudo().musqet_latest_response
         if not latest:
             return False
+        reply = json.loads(latest)
+        # Every till using the method is pinged; only the one waiting on this sale takes the
+        # result, so another till's call can't use up the push meant for it. The controller
+        # always buffers a non-empty saleId string, so nothing else matches it.
+        if reply.get('saleId') != sale_id:
+            return False
         # Consume-once: clear the buffer as we hand it over so a duplicate notification — or a
         # captured-but-still-fresh webhook replayed inside the timestamp window — can't drive a
-        # second settlement. Assumes one terminal per method (see the webhook controller); if a
-        # result is consumed by the wrong session the poll loop remains the backstop.
+        # second settlement. The poll loop remains the backstop.
         self.sudo().musqet_latest_response = ''
-        return json.loads(latest)
+        return reply
 
     def _musqet_verify_webhook(self, signature_header, raw_body):
         """Verify a Musqet webhook signature (§4.5).
@@ -1065,28 +1070,36 @@ class PosPaymentMethod(models.Model):
         ``hmac = HMAC-SHA256("<ts>.<rawBody>", signing_secret)`` (hex). Returns True only if
         the configured signing secret reproduces the signature AND the timestamp is fresh.
         Comparison is constant-time (consteq); a missing secret, malformed header or stale
-        timestamp is rejected. ``raw_body`` must be the exact bytes received — re-encoding a
-        parsed body could change it and break the signature.
+        timestamp is rejected. A header naming ``t`` or ``v1`` more than once, or a timestamp
+        that isn't plain ASCII digits, is malformed: the check reads one unambiguous value
+        of each. ``raw_body`` must be the exact bytes received — re-encoding a parsed body
+        could change it and break the signature.
+
+        A captured request still verifies again inside the tolerance window. That is
+        harmless here: the webhook only triggers a status read from Musqet's API (see the
+        controller), so a replay can at most repeat a read of a sale that still needs one.
         """
         self.ensure_one()
         if not signature_header:
             return False
-        # Parse "t=<ts>,v1=<hmac>" into a dict, tolerant of surrounding spaces.
+        # Parse "t=<ts>,v1=<hmac>", tolerant of surrounding spaces; other keys are ignored.
         parts = {}
         for chunk in signature_header.split(','):
             key, sep, value = chunk.partition('=')
-            if sep:
-                parts[key.strip()] = value.strip()
+            key = key.strip()
+            if sep and key in ('t', 'v1'):
+                if key in parts:
+                    return False
+                parts[key] = value.strip()
         timestamp = parts.get('t')
         signature = parts.get('v1')
         if not timestamp or not signature:
             return False
-        # Reject stale/future timestamps to blunt replay (seconds since the epoch).
-        try:
-            age = abs(time.time() - int(timestamp))
-        except (TypeError, ValueError):
+        # int() also takes '+12', '1_2' and non-ASCII digits: only the plain form is signed.
+        if not (timestamp.isascii() and timestamp.isdigit()):
             return False
-        if age > MUSQET_WEBHOOK_TOLERANCE:
+        # Reject stale/future timestamps to blunt replay (seconds since the epoch).
+        if abs(time.time() - int(timestamp)) > MUSQET_WEBHOOK_TOLERANCE:
             return False
         # Skip the decrypt for malformed or stale headers. This is not a guard: a well-formed,
         # fresh header with a bogus signature still reaches the decrypt.

@@ -6,6 +6,7 @@ import json
 import time
 from unittest.mock import MagicMock, patch
 
+from odoo.addons.pos_musqet.controllers.main import MUSQET_WEBHOOK_MAX_BYTES
 from odoo.addons.pos_musqet.models import pos_payment_method
 from odoo.exceptions import AccessDenied
 from odoo.tests import tagged
@@ -78,6 +79,29 @@ class TestMusqetWebhookVerification(TransactionCase):
         for header in ('', 'garbage', 't=123', 'v1=abc', None):
             self.assertFalse(self.method._musqet_verify_webhook(header, body), msg=header)
 
+    def test_rejects_a_header_naming_t_or_v1_twice(self):
+        # One unambiguous value of each: a repeat isn't resolved by taking either one.
+        body = b'{"status":"COMPLETE"}'
+        header = self._sign(body, int(time.time()))
+        timestamp, signature = header.split(',')
+        # Other keys are ignored, repeated or not.
+        self.assertTrue(self.method._musqet_verify_webhook(header + ',v0=a,v0=b', body))
+        for repeated in ('%s,%s' % (header, timestamp), '%s,%s' % (header, signature),
+                         '%s,%s' % (timestamp, header), 't=1,' + header):
+            with self.subTest(header=repeated):
+                self.assertFalse(self.method._musqet_verify_webhook(repeated, body))
+
+    def test_rejects_a_timestamp_that_is_not_plain_digits(self):
+        # int() reads all of these, but each is signed as written: only plain digits pass.
+        body = b'{"status":"COMPLETE"}'
+        now = int(time.time())
+        arabic = str(now).translate(str.maketrans('0123456789', '٠١٢٣٤٥٦٧٨٩'))
+        for timestamp in ('+%d' % now, '%s_%s' % (str(now)[:5], str(now)[5:]), arabic,
+                          '%d.0' % now, '-%d' % now):
+            with self.subTest(timestamp=timestamp):
+                header = self._sign(body, timestamp)
+                self.assertFalse(self.method._musqet_verify_webhook(header, body))
+
     def test_rejects_when_no_secret_configured(self):
         self.method.musqet_webhook_secret = False
         body = b'{"status":"COMPLETE"}'
@@ -100,18 +124,18 @@ class TestMusqetLatestStatus(TransactionCase):
         plain = open_plain_method(self.env)
         plain.musqet_latest_response = '{"status": "COMPLETE"}'
         with self.assertRaises(AccessDenied):
-            plain.with_user(self.cashier).musqet_get_latest_status()
+            plain.with_user(self.cashier).musqet_get_latest_status('s-9')
         self.assertEqual(plain.musqet_latest_response, '{"status": "COMPLETE"}')
 
     def test_returns_false_when_nothing_buffered(self):
-        self.assertFalse(self.method.with_user(self.cashier).musqet_get_latest_status())
+        self.assertFalse(self.method.with_user(self.cashier).musqet_get_latest_status('s-9'))
 
     def test_returns_parsed_buffer_for_a_cashier(self):
         # The buffer is ERP-manager-restricted, but a cashier must be able to read it via the
         # method's sudo() — same context bug class as the proxy fields.
         sale = {'saleId': 's-9', 'status': 'COMPLETE', 'rail': 'bitcoin'}
         self.method.musqet_latest_response = json.dumps(sale)
-        self.assertEqual(self.method.with_user(self.cashier).musqet_get_latest_status(), sale)
+        self.assertEqual(self.method.with_user(self.cashier).musqet_get_latest_status('s-9'), sale)
 
     def test_consumes_the_buffer_once(self):
         # Consume-once idempotency: the first read returns the result and clears the buffer,
@@ -119,14 +143,26 @@ class TestMusqetLatestStatus(TransactionCase):
         sale = {'saleId': 's-9', 'status': 'COMPLETE'}
         self.method.musqet_latest_response = json.dumps(sale)
         method_as_cashier = self.method.with_user(self.cashier)
-        self.assertEqual(method_as_cashier.musqet_get_latest_status(), sale)
+        self.assertEqual(method_as_cashier.musqet_get_latest_status('s-9'), sale)
         self.assertFalse(self.method.musqet_latest_response)
-        self.assertFalse(method_as_cashier.musqet_get_latest_status())
+        self.assertFalse(method_as_cashier.musqet_get_latest_status('s-9'))
+
+    def test_only_the_till_waiting_on_the_sale_takes_it(self):
+        # Every till using the method is pinged: one waiting on another sale (or on none
+        # yet) gets nothing, and the result stays for the till that is waiting on it.
+        sale = {'saleId': 's-9', 'status': 'COMPLETE'}
+        self.method.musqet_latest_response = json.dumps(sale)
+        method_as_cashier = self.method.with_user(self.cashier)
+        for other in ('s-8', '', None, False, ['s-9'], {'saleId': 's-9'}):
+            with self.subTest(sale_id=other):
+                self.assertFalse(method_as_cashier.musqet_get_latest_status(other))
+                self.assertEqual(json.loads(self.method.musqet_latest_response), sale)
+        self.assertEqual(method_as_cashier.musqet_get_latest_status('s-9'), sale)
 
     def test_denies_a_non_pos_user(self):
         public = self.env.ref('base.public_user')
         with self.assertRaises(AccessDenied):
-            self.method.with_user(public).musqet_get_latest_status()
+            self.method.with_user(public).musqet_get_latest_status('s-9')
 
     def test_create_sale_clears_a_stale_buffer(self):
         # A new sale must drop any buffered result from a previous one so a late notification
@@ -154,14 +190,16 @@ class TestMusqetWebhookRoute(HttpCase):
         self.sale = record_sale(self.env, self.method, 'sale-wh', state='pending', rail=False)
 
     def _post(self, body, secret=None, read=None):
-        """Post ``body`` signed; a status read it triggers gets ``read`` (by default, the
-        sale complete at 9.00 on card). Returns the response and the stubbed API calls."""
-        raw = json.dumps(body).encode()
+        """Post ``body`` (bytes as they are, anything else as JSON) signed; a status read it
+        triggers gets ``read`` (by default, the sale complete at 9.00 on card). Returns the
+        response and the stubbed API calls."""
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
         timestamp = str(int(time.time()))
         digest = hmac.new((secret or self.SECRET).encode(), timestamp.encode() + b'.' + raw,
                           hashlib.sha256).hexdigest()
+        data = body.get('data') if isinstance(body, dict) else None
         read = read or musqet_response(
-            body['data']['saleId'], 'COMPLETE', amountInCents=900, currency=self.sale.currency,
+            data['saleId'] if data else 'sale-wh', 'COMPLETE', amountInCents=900, currency=self.sale.currency,
             rail='card')
         with patch.object(pos_payment_method.requests, 'request', return_value=read) as mock_request:
             response = self.url_open('/musqet/webhook', data=raw, headers={
@@ -177,6 +215,12 @@ class TestMusqetWebhookRoute(HttpCase):
             'saleId': 'sale-wh', 'status': 'COMPLETE', 'amountInCents': 99999,
             'currency': self.sale.currency, 'rail': 'card', 'serial': 'MSQ-WHR-001',
         }}
+
+    def assertAccepted(self, response):
+        # Musqet gets the same plain answer whatever happened, never a JSON-RPC envelope.
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b'[accepted]')
+        self.assertEqual(response.headers['Content-Type'], 'text/plain; charset=utf-8')
 
     def _buffered(self):
         self.method.invalidate_recordset()
@@ -295,10 +339,46 @@ class TestMusqetWebhookRoute(HttpCase):
         with patch.object(Method, 'musqet_get_sale', side_effect=Exception('boom')), \
              mute_logger('odoo.addons.pos_musqet.controllers.main'):
             response, _ = self._post(self._body())
-        # Answered as normal (no error); nothing to buffer, the poll covers the till.
-        self.assertEqual(response.status_code, 200)
-        self.assertNotIn('error', response.json())
+        # Answered as normal; nothing to buffer, the poll covers the till.
+        self.assertAccepted(response)
         self.assertIsNone(self._buffered())
+        self.assertEqual(self.sale.state, 'pending')
+
+    def test_every_answer_is_a_plain_accepted(self):
+        # Signed or not, whatever the body: the answer says nothing about the request.
+        jsonrpc = {'jsonrpc': '2.0', 'method': 'call', 'params': self._body(), 'id': 1}
+        cases = {
+            'settled': (self._body(), None),
+            'unsigned': (self._body(), 'whsec_wrong'),
+            'not json': (b'{"data": ', None),
+            'not an object': (b'[1, 2]', None),
+            'json-rpc call': (jsonrpc, None),
+        }
+        for name, (body, secret) in cases.items():
+            with self.subTest(name), mute_logger('odoo.addons.pos_musqet.controllers.main'):
+                response, _ = self._post(body, secret=secret)
+                self.assertAccepted(response)
+        self.assertEqual(self.sale.state, 'done')
+
+    def test_a_serial_that_is_not_a_string_reads_nothing(self):
+        # Signed, but the serial must name one terminal: a list, say, isn't looked up.
+        for serial in (['MSQ-WHR-001'], {'serial': 'MSQ-WHR-001'}, 1):
+            with self.subTest(serial=serial), \
+                 mute_logger('odoo.addons.pos_musqet.controllers.main'):
+                body = self._body()
+                body['data']['serial'] = serial
+                response, mock_request = self._post(body)
+                self.assertAccepted(response)
+                mock_request.assert_not_called()
+        self.assertEqual(self.sale.state, 'pending')
+
+    def test_an_oversized_body_is_refused_unread(self):
+        body = self._body()
+        body['data']['padding'] = 'x' * MUSQET_WEBHOOK_MAX_BYTES
+        with mute_logger('odoo.http'):
+            response, mock_request = self._post(body)
+        self.assertEqual(response.status_code, 413)
+        mock_request.assert_not_called()
         self.assertEqual(self.sale.state, 'pending')
 
     def test_an_unknown_serial_is_logged_escaped(self):

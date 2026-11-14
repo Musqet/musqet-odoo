@@ -10,12 +10,18 @@ from ..models.pos_payment_method import MUSQET_LIVE_SESSION_STATES
 
 _logger = logging.getLogger(__name__)
 
+# A sale notification is a few hundred bytes; anything far larger is refused (HTTP 413) before
+# the body is read, so an unauthenticated caller can't make Odoo parse megabytes of JSON.
+MUSQET_WEBHOOK_MAX_BYTES = 64 * 1024
+
 
 class MusqetController(http.Controller):
 
-    @http.route('/musqet/webhook', type='jsonrpc', methods=['POST'], auth='public',
-                csrf=False, save_session=False)
-    def musqet_webhook(self):
+    # type='http', not 'jsonrpc': Musqet posts a plain JSON body, not a JSON-RPC call, and a
+    # jsonrpc route wraps whatever the handler returns in a JSON-RPC envelope.
+    @http.route('/musqet/webhook', type='http', methods=['POST'], auth='public', csrf=False,
+                save_session=False, max_content_length=MUSQET_WEBHOOK_MAX_BYTES)
+    def musqet_webhook(self, **_params):
         """Receive a signed Musqet sale notification; read the sale back and push the reply.
 
         For publicly-reachable deployments only: the pilot is behind NAT and settles via
@@ -23,7 +29,9 @@ class MusqetController(http.Controller):
         body is the only authentication — an unverified, stale or malformed request is
         dropped — and a verified one only triggers a status read from Musqet's API. We
         always reply 200 ``[accepted]`` so the response never doubles as an oracle for
-        signature validity and forged traffic can't trigger a retry storm.
+        signature validity and forged traffic can't trigger a retry storm. Only a body over
+        MUSQET_WEBHOOK_MAX_BYTES is refused (HTTP 413), before anything else is checked.
+        Query or form parameters are ignored: the signed body is the only input.
         """
         raw_body = request.httprequest.data  # exact bytes — needed to verify the HMAC.
         try:
@@ -40,7 +48,7 @@ class MusqetController(http.Controller):
         # wrapped as {event, data}. Unwrap to the sale object either way.
         sale = payload['data'] if isinstance(payload.get('data'), dict) else payload
         serial = sale.get('serial')
-        if not serial:
+        if not serial or not isinstance(serial, str):
             _logger.warning("Musqet webhook: no terminal serial in payload")
             return self._ack()
 
@@ -93,4 +101,5 @@ class MusqetController(http.Controller):
         return self._ack()
 
     def _ack(self):
-        return request.make_json_response('[accepted]')
+        return request.make_response(
+            '[accepted]', headers=[('Content-Type', 'text/plain; charset=utf-8')])
