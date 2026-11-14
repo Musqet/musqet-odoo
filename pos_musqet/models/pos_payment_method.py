@@ -41,6 +41,9 @@ MUSQET_TIMEOUT = 10
 # blunt replay of a captured-but-stale notification (§4.5). Generous enough to absorb
 # clock skew between Musqet and the merchant host.
 MUSQET_WEBHOOK_TOLERANCE = 300
+# Epoch seconds are 10 digits until the year 2286. A far longer timestamp would make int() or
+# the float age check raise instead of being rejected, so the header allows a little more.
+MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS = 12
 # The base URL must point at the Musqet cloud. The field stays configurable (prod vs
 # staging) but is locked to this domain so an ERP manager can't repoint it at an
 # internal host and exfiltrate the bearer token (SSRF). See _check_musqet_base_url.
@@ -1072,10 +1075,11 @@ class PosPaymentMethod(models.Model):
         ``hmac = HMAC-SHA256("<ts>.<rawBody>", signing_secret)`` (hex). Returns True only if
         the configured signing secret reproduces the signature AND the timestamp is fresh.
         Comparison is constant-time (consteq); a missing secret, malformed header or stale
-        timestamp is rejected. A header naming ``t`` or ``v1`` more than once, or a timestamp
-        that isn't 1 to 12 plain ASCII digits, is malformed: the check reads one unambiguous
-        value of each. ``raw_body`` must be the exact bytes received — re-encoding a parsed body
-        could change it and break the signature.
+        timestamp is rejected. A header naming ``t`` or ``v1`` more than once, a timestamp that
+        isn't 1 to 12 plain ASCII digits, or a ``v1`` that isn't ASCII is
+        malformed: the check reads one unambiguous value of each. ``raw_body`` must be the
+        exact bytes received — re-encoding a parsed body could change it and break the
+        signature.
 
         A captured request still verifies again inside the tolerance window. That is
         harmless here: the webhook only triggers a status read from Musqet's API (see the
@@ -1098,9 +1102,12 @@ class PosPaymentMethod(models.Model):
         if not timestamp or not signature:
             return False
         # int() also takes '+12', '1_2' and non-ASCII digits: only the plain form is signed.
-        # Epoch seconds are 10 digits until the year 2286; a far longer value would make int()
-        # or the float subtraction below raise instead of being rejected.
-        if not (timestamp.isascii() and timestamp.isdigit()) or len(timestamp) > 12:
+        if (not (timestamp.isascii() and timestamp.isdigit())
+                or len(timestamp) > MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS):
+            return False
+        # consteq raises on a non-ASCII string, so such a v1 is rejected before it (one of
+        # another length just doesn't match).
+        if not signature.isascii():
             return False
         # Reject stale/future timestamps to blunt replay (seconds since the epoch).
         if abs(time.time() - int(timestamp)) > MUSQET_WEBHOOK_TOLERANCE:

@@ -12,7 +12,7 @@ _logger = logging.getLogger(__name__)
 
 # A sale notification is a few hundred bytes; anything far larger is refused (HTTP 413) before
 # the body is read, so an unauthenticated caller can't make Odoo parse megabytes of JSON.
-# docs/INSTALL.md §5 states this limit too.
+# pos_musqet/docs/INSTALL.md §5 states this limit too.
 MUSQET_WEBHOOK_MAX_BYTES = 64 * 1024
 # Odoo parses these as form fields before the handler runs, leaving no raw body to verify.
 FORM_MIMETYPES = ('application/x-www-form-urlencoded', 'multipart/form-data')
@@ -33,7 +33,8 @@ class MusqetController(http.Controller):
         dropped — and a verified one only triggers a status read from Musqet's API. We
         always reply 200 ``[accepted]`` so the response never doubles as an oracle for
         signature validity and forged traffic can't trigger a retry storm. Only a body over
-        MUSQET_WEBHOOK_MAX_BYTES is refused (HTTP 413), before anything else is checked.
+        MUSQET_WEBHOOK_MAX_BYTES is refused (HTTP 413), before anything else is checked; any
+        other failure is logged and still answered [accepted].
         Query or form parameters are ignored: the signed body is the only input.
         """
         if request.httprequest.mimetype in FORM_MIMETYPES:
@@ -70,10 +71,10 @@ class MusqetController(http.Controller):
         try:
             verified = method_sudo._musqet_verify_webhook(signature, raw_body)
         except Exception:
-            # Never expected; caught so that a failure here still answers [accepted], not an
-            # error only a registered serial could reach.
-            _logger.exception("Musqet webhook: signature check failed for %r", serial)
-            verified = False
+            # The check rejects malformed headers itself, so this would be a bug in it; caught
+            # so it still answers [accepted], not an error only a registered serial reaches.
+            _logger.warning("Musqet webhook: signature check raised for %r", serial)
+            return self._ack()
         if not verified:
             _logger.warning("Musqet webhook: signature verification failed for %r", serial)
             return self._ack()
@@ -107,10 +108,16 @@ class MusqetController(http.Controller):
         # may still have the sale in progress). The frontend pulls the buffer and settles the
         # pending line idempotently (a poll may have already settled it — see
         # payment_musqet.js _finishSale).
-        method_sudo.musqet_latest_response = json.dumps({**reply, 'saleId': sale_id})
-        sessions = method_sudo._musqet_sessions(MUSQET_LIVE_SESSION_STATES)
-        for config in sessions.config_id:
-            config._notify("MUSQET_LATEST_RESPONSE", config.id)
+        # The record is already settled, so a failure here costs only the push: the poll
+        # loop still settles the till.
+        try:
+            with request.env.cr.savepoint():
+                method_sudo.musqet_latest_response = json.dumps({**reply, 'saleId': sale_id})
+                sessions = method_sudo._musqet_sessions(MUSQET_LIVE_SESSION_STATES)
+                for config in sessions.config_id:
+                    config._notify("MUSQET_LATEST_RESPONSE", config.id)
+        except Exception:
+            _logger.exception("Musqet webhook: could not push sale %r to the till", sale_id)
         return self._ack()
 
     def _ack(self):

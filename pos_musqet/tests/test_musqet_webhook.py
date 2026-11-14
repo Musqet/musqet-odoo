@@ -113,6 +113,15 @@ class TestMusqetWebhookVerification(TransactionCase):
                 header = self._sign(body, timestamp)
                 self.assertFalse(self.method._musqet_verify_webhook(header, body))
 
+    def test_rejects_a_v1_that_is_not_ascii_or_not_a_digest(self):
+        # Rejected, not raised: the constant-time compare refuses non-ASCII strings.
+        body = b'{"status":"COMPLETE"}'
+        t_part = self._sign(body, int(time.time())).split(',')[0]
+        for v1 in ('é', 'é' * 64, 'a' * 63, 'a' * 65):
+            with self.subTest(v1=v1):
+                header = '%s,v1=%s' % (t_part, v1)
+                self.assertFalse(self.method._musqet_verify_webhook(header, body))
+
     def test_rejects_when_no_secret_configured(self):
         self.method.musqet_webhook_secret = False
         body = b'{"status":"COMPLETE"}'
@@ -197,11 +206,12 @@ class TestMusqetWebhookRoute(HttpCase):
     record and the till take that reply, never the body."""
 
     SECRET = 'whsec_route_0123456789'
+    SALE_ID = 'sale-wh'
 
     def setUp(self):
         super().setUp()
         self.method = create_musqet_method(self, 'MSQ-WHR-001', musqet_webhook_secret=self.SECRET)
-        self.sale = record_sale(self.env, self.method, 'sale-wh', state='pending', rail=False)
+        self.sale = record_sale(self.env, self.method, self.SALE_ID, state='pending', rail=False)
 
     def _post(self, body, secret=None, read=None):
         """Post ``body`` (bytes as they are, anything else as JSON) signed; a status read it
@@ -213,7 +223,7 @@ class TestMusqetWebhookRoute(HttpCase):
                           hashlib.sha256).hexdigest()
         data = body.get('data') if isinstance(body, dict) else None
         read = read or musqet_response(
-            data['saleId'] if data else 'sale-wh', 'COMPLETE', amountInCents=900,
+            data['saleId'] if data else self.SALE_ID, 'COMPLETE', amountInCents=900,
             currency=self.sale.currency, rail='card')
         with patch.object(pos_payment_method.requests, 'request', return_value=read) as mock_request:
             response = self.url_open('/musqet/webhook', data=raw, headers={
@@ -226,7 +236,7 @@ class TestMusqetWebhookRoute(HttpCase):
     def _body(self):
         # What the body claims never settles anything: only the status read does.
         return {'data': {
-            'saleId': 'sale-wh', 'status': 'COMPLETE', 'amountInCents': 99999,
+            'saleId': self.SALE_ID, 'status': 'COMPLETE', 'amountInCents': 99999,
             'currency': self.sale.currency, 'rail': 'card', 'serial': 'MSQ-WHR-001',
         }}
 
@@ -372,6 +382,7 @@ class TestMusqetWebhookRoute(HttpCase):
             with self.subTest(name), mute_logger('odoo.addons.pos_musqet.controllers.main'):
                 response, _ = self._post(body, secret=secret)
                 self.assertAccepted(response)
+        # The signed case settled the sale; the rest only had to be answered.
         self.assertEqual(self.sale.state, 'done')
 
     def test_a_failing_signature_check_still_answers(self):
@@ -383,6 +394,15 @@ class TestMusqetWebhookRoute(HttpCase):
         self.assertAccepted(response)
         mock_request.assert_not_called()
         self.assertEqual(self.sale.state, 'pending')
+
+    def test_a_failed_push_still_answers(self):
+        # The record is settled; only the push to the till is lost, and its poll covers it.
+        Method = type(self.env['pos.payment.method'])
+        with patch.object(Method, '_musqet_sessions', side_effect=Exception('boom')), \
+             mute_logger('odoo.addons.pos_musqet.controllers.main'):
+            response, _ = self._post(self._body())
+        self.assertAccepted(response)
+        self.assertEqual(self.sale.state, 'done')
 
     def test_a_form_body_is_dropped(self):
         # Odoo reads a form body as fields, leaving nothing to verify.

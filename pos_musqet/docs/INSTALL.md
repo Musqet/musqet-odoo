@@ -329,7 +329,8 @@ Security notes (already enforced by the addon):
 - Every inbound webhook is **HMAC-verified** (`x-webhook-signature: t=<ts>,v1=<hmac>`,
   HMAC-SHA256 over `"<ts>.<rawbody>"`) using a constant-time compare; timestamps more
   than **±300s** from now are rejected to blunt replay. A header naming `t` or `v1`
-  twice, or a timestamp that isn't plain digits, is rejected.
+  twice, or a timestamp that isn't 1 to 12 plain digits, is rejected. A form-encoded
+  body is dropped: Musqet sends JSON.
 - The route always answers `200` with the plain-text body `[accepted]`, so it can't be
   used as a signature oracle. Only a body over 64 KB is refused (`413`), unread.
 - The webhook body is never trusted as the result: a verified webhook makes Odoo read
