@@ -254,7 +254,7 @@ class TestMusqetLostSaleReply(TransactionCase):
         # Unlike a sale with a saleId, an unanswered one is never read, so its method's
         # configuration doesn't matter.
         self._lose()
-        write_between_sessions(self.method, {'use_payment_terminal': False})
+        write_between_sessions(self.method, {'payment_provider': False})
         result, stub = self._create(musqet_response('new-sale'), method=self.other_method)
         self.assertIn(UNANSWERED, result['error']['message'])
         stub.assert_not_called()

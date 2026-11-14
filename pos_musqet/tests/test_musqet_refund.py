@@ -76,7 +76,7 @@ class TestMusqetCreateRefund(TransactionCase):
         original = MagicMock(spec=type(self.env['pos.payment']))
         original.exists.return_value = original
         original.company_id = company if company is not None else self.method.company_id
-        original.payment_method_id.use_payment_terminal = terminal
+        original.payment_method_id.payment_provider = terminal
         original.payment_method_id.id = self.method.id
         # A paid sale line its sale vouches for. The check itself (_musqet_check_settles) is
         # a stub here; TestMusqetRefundWithPosRecords runs it on real rows.
@@ -666,7 +666,7 @@ class TestMusqetCreateRefund(TransactionCase):
         self.assertEqual(self._recorded_refunds().state, 'pending')
 
     def test_a_refund_on_a_method_no_longer_musqet_counts_without_a_reread(self):
-        plain = self.env['pos.payment.method'].create({'name': 'Former Musqet Method'})
+        plain = self.env['pos.payment.method'].create({'type': 'bank', 'name': 'Former Musqet Method'})
         record_refund(self.env, plain, 'refund-old', amount_minor=1000)
         result, mock_request = self._call_refund(
             {'amountInCents': 1}, self._stub_original(amount=10.0), get_status='CANCELLED')

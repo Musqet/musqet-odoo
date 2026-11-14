@@ -101,7 +101,7 @@ class PosMusqetRefund(models.Model):
                 ('sale_id', '!=', False),
                 # A refund whose method is no longer a Musqet one can't be re-read, so it
                 # mustn't use up the limit.
-                ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
+                ('payment_method_id.payment_provider', '=', MUSQET_TERMINAL),
             ],
             order='id', limit=MUSQET_REFUND_REREAD_LIMIT)
         for refund in pending:
@@ -198,7 +198,7 @@ class PosMusqetRefund(models.Model):
                 ('company_id', '=', original.company_id.id),
                 # Only a settled Musqet refund (it has a saleId) can be a refund of a Musqet
                 # sale, as in the backfill and the link hook.
-                ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
+                ('payment_method_id.payment_provider', '=', MUSQET_TERMINAL),
                 ('transaction_id', '!=', False),
             ])
             if (payment.payment_method_id.id, payment.transaction_id) not in recorded_keys
@@ -252,7 +252,7 @@ class PosMusqetRefund(models.Model):
         payments = self.env['pos.payment'].sudo().search([
             ('musqet_refund_of', '!=', False),
             ('transaction_id', '!=', False),
-            ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
+            ('payment_method_id.payment_provider', '=', MUSQET_TERMINAL),
         ])
         count = self._musqet_record_unrecorded(payments, lambda payment: {
             'original_sale_id': payment.musqet_refund_of,

@@ -87,7 +87,7 @@ class PosPayment(models.Model):
         """These payments that are Musqet lines with a saleId."""
         return self.filtered(
             lambda payment: payment.transaction_id
-            and payment.payment_method_id.use_payment_terminal == MUSQET_TERMINAL)
+            and payment.payment_method_id.payment_provider == MUSQET_TERMINAL)
 
     def _musqet_lines_sharing_sales(self):
         """Every payment with the (method, saleId) of one of these Musqet lines, these included."""
@@ -210,7 +210,7 @@ class PosPayment(models.Model):
         the paid lines (``claimants``) and all lines (``carriers``) claiming each sale or refund
         (by _musqet_claim_key)."""
         self.ensure_one()
-        if self.payment_method_id.use_payment_terminal != MUSQET_TERMINAL or not self._musqet_order_is_paid():
+        if self.payment_method_id.payment_provider != MUSQET_TERMINAL or not self._musqet_order_is_paid():
             return False
         key = (self.payment_method_id.id, self.transaction_id)
         is_sale = self._musqet_is_sale_line()

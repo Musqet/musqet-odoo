@@ -14,6 +14,6 @@ class PosOrder(models.Model):
         # order's reference; see pos.payment.musqet_settle_check.
         if {'state', 'pos_reference', 'uuid'} & vals.keys():
             self.payment_ids.filtered(
-                lambda payment: payment.payment_method_id.use_payment_terminal == MUSQET_TERMINAL,
+                lambda payment: payment.payment_method_id.payment_provider == MUSQET_TERMINAL,
             )._musqet_check_settles()
         return result

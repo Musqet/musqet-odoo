@@ -221,7 +221,7 @@ class TestMusqetRefundWithPosRecords(MusqetPosRecordsCase):
 
     def test_manager_sees_only_their_companies_refunds(self):
         other = self.env['res.company'].create({'name': 'Other Co'})
-        plain_other = self.env['pos.payment.method'].create({'name': 'Other Method', 'company_id': other.id})
+        plain_other = self.env['pos.payment.method'].create({'type': 'bank', 'name': 'Other Method', 'company_id': other.id})
         record_refund(self.env, plain_other, 'refund-other', original_sale_id='sale-other')
         manager = make_pos_user(self.env, 'musqet_manager', group='point_of_sale.group_pos_manager', company_id=self.method.company_id.id,
             company_ids=[(6, 0, self.method.company_id.ids)])
@@ -230,7 +230,7 @@ class TestMusqetRefundWithPosRecords(MusqetPosRecordsCase):
 
     def test_manager_sees_only_their_companies_sales(self):
         other = self.env['res.company'].create({'name': 'Other Co'})
-        plain_other = self.env['pos.payment.method'].create({'name': 'Other Method', 'company_id': other.id})
+        plain_other = self.env['pos.payment.method'].create({'type': 'bank', 'name': 'Other Method', 'company_id': other.id})
         record_sale(self.env, plain_other, 'sale-other')
         record_sale(self.env, self.method, 'sale-mine')
         manager = make_pos_user(

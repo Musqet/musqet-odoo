@@ -1,10 +1,11 @@
 # pos_musqet — Install & Onboarding Guide
 
-This guide takes a new merchant or operator from a bare Odoo 19 install to taking a
+This guide takes a new merchant or operator from a bare Odoo 20 install to taking a
 test dual-rail (card + Bitcoin Lightning) payment through a Musqet terminal, using
 only this repository.
 
-> **Compatibility:** Odoo **19.0** (Community or Enterprise), Point of Sale module.
+> **Compatibility:** Odoo **20.0** (Community or Enterprise), Point of Sale module. For
+> Odoo 19.0, use the `19.0` branch and its releases.
 > The addon's technical name is **`pos_musqet`**.
 
 ---
@@ -37,7 +38,7 @@ your Odoo addons path.
 > a database → optionally restart):
 >
 > ```bash
-> REF='<release tag>'     # until the first release is tagged: REF=main
+> REF='<release tag>'     # until the first release is tagged: REF=20.0
 > curl -fsSL "https://raw.githubusercontent.com/Musqet/musqet-odoo/$REF/install.sh" \
 >   | bash -s -- --addons-path /opt/odoo/extra-addons --ref "$REF" --db '<your_db>' \
 >     --restart "sudo systemctl restart odoo"
@@ -48,8 +49,9 @@ your Odoo addons path.
 > from the same ref. A tag can be moved, so for a fixed pin use the release's full
 > 40-character commit SHA, copied from that page: the script then refuses anything but
 > that commit. Take the SHA only from Musqet's Releases page, since GitHub also serves
-> commits from forks under this repo's URLs. `main` is unreleased development code;
-> until the first release is tagged, it is the only ref there is. The script prints
+> commits from forks under this repo's URLs. The `20.0` branch is unreleased
+> development code for Odoo 20 (`19.0` for Odoo 19); until the first release is tagged,
+> it is the only ref there is. The script prints
 > the commit it installed. It needs `git` **or** `curl`/`wget` (no git required). Run
 > with `--help` for options like `--source <dir>` for a local checkout.
 > The manual steps below are the same thing done by hand.
@@ -59,8 +61,8 @@ your Odoo addons path.
 
    ```bash
    cd /opt/odoo/extra-addons        # any directory already on addons_path
-   # a release tag in production; main is development code (and, until the
-   # first release is tagged, the only branch to use)
+   # a release tag in production; the 20.0 branch is development code (and, until
+   # the first release is tagged, the only branch to use)
    git clone --branch '<release tag>' https://github.com/Musqet/musqet-odoo.git
    # optional, for a fixed pin: a tag can be moved, so check out the release's full
    # commit SHA from the Releases page; it prints "pinned" only if HEAD is that commit
@@ -111,12 +113,16 @@ your Odoo addons path.
    new code takes a payment, or every Musqet sale fails until you do. The upgrade to
    19.0.1.5.0 lets a sale or refund record have no Musqet saleId (see *Lost replies* in
    §4); until it runs, Odoo can't record a request whose reply was lost. From
-   19.0.1.6.0 a Musqet method must have a company, and a cashier can drive its terminal
-   only on its company's POS sessions (§3). The upgrade gives a method with no company the
-   company of the POS configs it is on; one it can't place (on no config, or on configs of
-   several companies) is named in the log, starts no sale or refund, and its cashiers get
-   an access error, until a manager sets its company. Odoo refuses that company while
-   another company's POS still lists the method: remove it from there first.
+   19.0.1.6.0 a cashier can drive a Musqet terminal only on its company's POS sessions
+   (§3), and Odoo refuses a Musqet method's company while another company's POS still
+   lists the method: remove it from there first.
+
+   **Moving from Odoo 19 to 20** is Odoo's own database upgrade; upgrade pos_musqet to
+   19.0.1.7.0 on Odoo 19 first. Odoo 20 requires every payment method to have a company
+   (Odoo's upgrade sets any that are missing) and replaces *Use a Payment Terminal* with
+   *Integration* and *Integrate with*: check each Musqet method afterwards shows
+   **Terminal** and **Musqet** there (§3). Close every POS session first, and reload each
+   till afterwards.
 
 ---
 
@@ -196,8 +202,9 @@ the database.
 
 1. Go to **Point of Sale → Configuration → Payment Methods** and create a new method
    (or open an existing one).
-2. Set **Use a Payment Terminal** to **Musqet**. Several Musqet fields appear; three
-   are **required** (the two webhook fields are optional — see section 5):
+2. Set **Integration** to **Terminal** and **Integrate with** to **Musqet**. A
+   **Musqet** tab appears with the Musqet fields; three are **required** (the two
+   webhook fields are optional — see section 5):
 
    | Field | What to enter | Notes |
    |---|---|---|
@@ -241,7 +248,8 @@ and make your **company currency match it** (and keep each POS on the company cu
 ## 4. Take a test payment (smoke test)
 
 1. Open the POS session for the config that has the Musqet method.
-2. Ring up a small test order and choose **Musqet** as the payment.
+2. Ring up a small test order, choose **Musqet** as the payment, check the amount and
+   press **Send**.
 3. The terminal prompts the customer for **card** or **Lightning**. Complete the
    payment on the device.
 4. Odoo polls until the terminal reports **COMPLETE**, then marks the payment done and
@@ -292,7 +300,8 @@ and make your **company currency match it** (and keep each POS on the company cu
    - a refund that was made: open it and click **Mark as Refunded** (never Mark as
      Failed). It keeps counting against the sale, and the rest of its refund order can
      be refunded.
-5. **Refund test:** from the order, create a Refund and pay it with Musqet. A
+5. **Refund test:** from the order, create a Refund, choose Musqet and press
+   **Refund**. A
    card-settled original refunds back to the card through the terminal. A
    Lightning-settled original shows a *manual refund* message and makes **no** API
    call (Lightning can't be reversed on the device). Odoo refunds only a sale Musqet

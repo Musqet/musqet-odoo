@@ -1,0 +1,5 @@
+id,name,model_id,group_id/id,operation,domain
+access_pos_musqet_sale_manager,pos.musqet.sale manager,pos.musqet.sale,point_of_sale.group_pos_manager,r,
+access_pos_musqet_refund_manager,pos.musqet.refund manager,pos.musqet.refund,point_of_sale.group_pos_manager,r,
+rule_pos_musqet_sale_company,Musqet sale: multi-company,pos.musqet.sale,,crud,"[('company_id', 'in', company_ids)]"
+rule_pos_musqet_refund_company,Musqet refund: multi-company,pos.musqet.refund,,crud,"[('company_id', 'in', company_ids)]"

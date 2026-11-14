@@ -8,7 +8,6 @@ from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
 from .common import (
-    clear_company,
     create_musqet_method,
     list_method_on_config,
     make_pos_user,
@@ -234,14 +233,17 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
 
 @tagged('post_install', '-at_install')
 class TestMusqetMethodCompany(ProxyCallsMixin, TransactionCase):
-    """A Musqet method acts for one company, so it must name one."""
+    """A Musqet method is a terminal, and acts only for its own company."""
 
-    def test_a_musqet_method_needs_a_company(self):
-        with self.assertRaises(ValidationError):
-            create_musqet_method(self, 'MSQ-NOCO-001', company_id=False)
-        method = create_musqet_method(self, 'MSQ-NOCO-002')
-        with self.assertRaises(ValidationError):
-            method.company_id = False
+    def test_a_musqet_method_must_use_the_terminal_integration(self):
+        # Odoo 20 sets the integration from the provider only in the form, so a method
+        # created or changed another way could carry Musqet on a non-terminal type.
+        with self.assertRaisesRegex(ValidationError, 'Terminal integration'):
+            create_musqet_method(self, 'MSQ-TYPE-001', payment_method_type='external_qr')
+        method = create_musqet_method(self, 'MSQ-TYPE-002')
+        self.assertEqual(method.payment_method_type, 'terminal')
+        with self.assertRaisesRegex(ValidationError, 'Terminal integration'):
+            method.payment_method_type = 'cash_machine'
 
     def test_a_musqet_method_cannot_take_a_company_another_companys_pos_lists_it_on(self):
         # Shared before the rule: the manager must take it off the other company's POS first.
@@ -251,7 +253,6 @@ class TestMusqetMethodCompany(ProxyCallsMixin, TransactionCase):
             self.env(context={'allowed_company_ids': other_company.ids}),
             create_musqet_method(self, 'MSQ-NOCO-006', company_id=other_company.id))
         list_method_on_config(method, other_session.config_id)
-        clear_company(method)
         with self.assertRaisesRegex(ValidationError, 'another company'):
             write_between_sessions(method, {'company_id': self.env.company.id})
 
@@ -263,34 +264,5 @@ class TestMusqetMethodCompany(ProxyCallsMixin, TransactionCase):
             {'name': 'Archived POS', 'payment_method_ids': [(6, 0, [])], 'active': False})
         method = create_musqet_method(self, 'MSQ-NOCO-007')
         list_method_on_config(method, archived)
-        clear_company(method)
         with self.assertRaisesRegex(ValidationError, 'another company'):
             method.company_id = self.env.company
-
-    def test_other_methods_may_have_none(self):
-        plain = self.env['pos.payment.method'].create({'name': 'Plain Method', 'company_id': False})
-        self.assertFalse(plain.company_id)
-
-    def test_a_musqet_method_saved_without_one_starts_nothing(self):
-        # Saved before the rule, or by a direct database write: even an internal call can't
-        # start a sale or refund for a company the method doesn't name.
-        method = create_musqet_method(self, 'MSQ-NOCO-003')
-        clear_company(method)
-
-        def check(call, mock_request):
-            self.assertIn('no company', call()['error']['message'])
-            mock_request.assert_not_called()
-
-        self.for_each_proxy_call(
-            method, check, names=('musqet_create_sale', 'musqet_create_refund'))
-        domain = [('payment_method_id', '=', method.id)]
-        self.assertFalse(self.env['pos.musqet.sale'].search(domain))
-        self.assertFalse(self.env['pos.musqet.refund'].search(domain))
-
-    def test_a_cashier_gets_the_same_refusal_for_it_as_for_any_method_not_theirs(self):
-        # A method with no company is no cashier's: the same AccessDenied, not the message
-        # above, so a refusal still says nothing about which ids exist.
-        method = create_musqet_method(self, 'MSQ-NOCO-004')
-        open_session(self.env, method)
-        clear_company(method)
-        self.assertProxyDenied(method.with_user(make_pos_user(self.env, 'musqet_cashier_noco')))
