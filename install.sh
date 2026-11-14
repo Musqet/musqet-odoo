@@ -56,6 +56,14 @@ err()  { printf 'install.sh: %s\n' "$*" >&2; }
 die()  { err "$*"; exit 1; }
 info() { printf '==> %s\n' "$*"; }
 
+# The ref goes on git's command line and into a download URL: accept only ASCII
+# letters, digits and ._/+- (never first, and no ".."), so it can't read as an option
+# or change the URL. LC_ALL=C keeps [[:alnum:]] to ASCII whatever the caller's locale.
+plain_ref() {
+  local LC_ALL=C
+  [[ "$1" =~ ^[[:alnum:]][[:alnum:]._/+-]*$ && "$1" != *..* ]]
+}
+
 usage() {
   cat >&2 <<'EOF'
 Usage: install.sh --addons-path DIR [options] [-- <extra odoo args>]
@@ -102,10 +110,7 @@ if [[ -n "$SOURCE_DIR" ]]; then
 else
   [[ -n "$REF" ]] || { err "missing required --ref: a release tag from" \
     "https://github.com/Musqet/musqet-odoo/releases, a commit SHA, or main for development code"; usage 1; }
-  # The ref goes on git's command line and into a download URL: refuse anything that
-  # could read as an option or change the URL.
-  [[ "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && "$REF" != *..* ]] \
-    || die "--ref '$REF' is not a plain tag, branch or commit name"
+  plain_ref "$REF" || die "--ref '$REF' is not a plain tag, branch or commit name"
 fi
 
 # --upgrade and any `-- <extra odoo args>` are only meaningful with --db; don't let
@@ -124,7 +129,10 @@ elif command -v git >/dev/null 2>&1; then
   TMP="$(mktemp -d)"; CLEANUP="$TMP"
   info "Cloning $REPO_URL @ $REF (git)"
   git clone --quiet "$REPO_URL" "$TMP/repo" || die "clone failed: $REPO_URL"
-  git -C "$TMP/repo" checkout --quiet "$REF" || die "ref not found: $REF"
+  # The trailing -- makes git read REF only as a revision: without it, a ref that
+  # matches no revision but names a file (e.g. pos_musqet) checks out that path and
+  # leaves the default branch in place.
+  git -C "$TMP/repo" checkout --quiet "$REF" -- || die "ref not found: $REF"
   info "Using commit $(git -C "$TMP/repo" rev-parse HEAD)"
   SRC="$TMP/repo"
 else
@@ -148,6 +156,11 @@ else
   command -v tar >/dev/null 2>&1 || die "tar is required to extract the download"
   mkdir -p "$TMP/repo"
   tar -xzf "$TMP/src.tgz" -C "$TMP/repo" --strip-components=1 --no-same-owner || die "failed to extract archive"
+  # GitHub builds the archive with git archive, which records the commit in the tar's
+  # global header ("comment=<sha>"), so the log shows what a tag or branch resolved to.
+  commit="$( { gzip -dc "$TMP/src.tgz" 2>/dev/null || true; } | head -c 1536 | tr -d '\0' \
+    | grep -ao 'comment=[0-9a-f]\{40\}' | head -n 1 | cut -d= -f2 )" || true
+  info "Using commit ${commit:-(not recorded in the download)}"
   SRC="$TMP/repo"
 fi
 

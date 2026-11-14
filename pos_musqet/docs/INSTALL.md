@@ -37,7 +37,7 @@ your Odoo addons path.
 > a database → optionally restart):
 >
 > ```bash
-> REF=<release tag>
+> REF=<release tag>       # until the first release is tagged: REF=main
 > curl -fsSL "https://raw.githubusercontent.com/Musqet/musqet-odoo/$REF/install.sh" \
 >   | bash -s -- --addons-path /opt/odoo/extra-addons --ref "$REF" --db <your_db> \
 >     --restart "sudo systemctl restart odoo"
@@ -56,7 +56,8 @@ your Odoo addons path.
 
    ```bash
    cd /opt/odoo/extra-addons        # any directory already on addons_path
-   # a release tag in production; main is development code
+   # a release tag in production; main is development code (and, until the
+   # first release is tagged, the only branch to use)
    git clone --branch <release tag> https://github.com/Musqet/musqet-odoo.git
    # pos_musqet now lives at /opt/odoo/extra-addons/musqet-odoo/pos_musqet
    ```

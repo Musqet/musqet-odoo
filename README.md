@@ -24,7 +24,7 @@ tag. `main` is unreleased development code; until the first release is tagged, i
 is the only ref there is.
 
 ```bash
-REF=<release tag>
+REF=<release tag>       # until the first release is tagged: REF=main
 # place the files only:
 curl -fsSL "https://raw.githubusercontent.com/Musqet/musqet-odoo/$REF/install.sh" \
   | bash -s -- --addons-path /opt/odoo/extra-addons --ref "$REF"

@@ -18,8 +18,8 @@ touching their own machine's Python/Postgres setup.
 
 `docker-compose.yml` runs two containers:
 
-- **`db`** — `postgres:16.15`, credentials `odoo` / `odoo`.
-- **`odoo`** — the official Odoo 19 image (`odoo:19.0-20261015`), published on
+- **`db`** — Postgres 16, credentials `odoo` / `odoo`.
+- **`odoo`** — the official Odoo 19 image, published on
   [http://localhost:8069](http://localhost:8069).
 
 The repo's `pos_musqet/` directory is mounted into the container at
@@ -101,7 +101,7 @@ docker compose down -v     # stop AND delete the database + filestore (clean sla
   addon upgrade (`-u pos_musqet`) if you touched models/views.
 - **POS JavaScript changes** (`pos_musqet/static/src/**`) are served as assets;
   reload the POS with the browser cache disabled, or restart Odoo, to pick them up.
-- The stack pins both images by dated tag and digest, so every run gets the same
+- `docker-compose.yml` pins both images by dated tag and digest, so every run gets the same
   build. The addon targets Odoo **19.0** only. To move to a newer Odoo build, pick a
   dated tag (`19.0-YYYYMMDD`) on [Docker Hub](https://hub.docker.com/_/odoo/tags),
   take its digest from the tag page or `docker buildx imagetools inspect odoo:<tag>`,
