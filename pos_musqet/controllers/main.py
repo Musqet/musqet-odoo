@@ -87,9 +87,7 @@ class MusqetController(http.Controller):
         # pending line idempotently (a poll may have already settled it — see
         # payment_musqet.js _finishSale).
         method_sudo.musqet_latest_response = json.dumps({**reply, 'saleId': sale_id})
-        sessions = request.env['pos.session'].sudo().search(
-            [('payment_method_ids', 'in', method_sudo.id),
-             ('state', 'in', tuple(MUSQET_LIVE_SESSION_STATES))])
+        sessions = method_sudo._musqet_sessions(MUSQET_LIVE_SESSION_STATES)
         for config in sessions.config_id:
             config._notify("MUSQET_LATEST_RESPONSE", config.id)
         return self._ack()

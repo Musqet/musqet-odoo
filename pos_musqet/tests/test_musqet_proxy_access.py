@@ -6,11 +6,11 @@ from odoo.addons.pos_musqet.models import pos_payment_method
 from odoo.exceptions import AccessDenied, MissingError, ValidationError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
-from odoo.tools import SQL
 
 from .common import (
     clear_company,
     create_musqet_method,
+    list_method_on_config,
     make_pos_user,
     open_plain_method,
     open_session,
@@ -223,10 +223,7 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
         self.session.state = 'closed'
         other_session = self._open_session_in(
             self.other_company, self._other_company_method('MSQ-SCOPE-B04'))
-        self.env.cr.execute(SQL(
-            'INSERT INTO pos_config_pos_payment_method_rel (pos_config_id, pos_payment_method_id)'
-            ' VALUES (%s, %s)', other_session.config_id.id, self.method.id))
-        self.env.invalidate_all()
+        list_method_on_config(self.method, other_session.config_id)
         self.assertDenied(self.method)
 
     def test_an_internal_call_on_a_missing_method_fails_at_the_check(self):
@@ -253,13 +250,22 @@ class TestMusqetMethodCompany(ProxyCallsMixin, TransactionCase):
         other_session = open_session(
             self.env(context={'allowed_company_ids': other_company.ids}),
             create_musqet_method(self, 'MSQ-NOCO-006', company_id=other_company.id))
-        self.env.cr.execute(SQL(
-            'INSERT INTO pos_config_pos_payment_method_rel (pos_config_id, pos_payment_method_id)'
-            ' VALUES (%s, %s)', other_session.config_id.id, method.id))
+        list_method_on_config(method, other_session.config_id)
         clear_company(method)
-        method.invalidate_recordset(['config_ids'])
-        with self.assertRaises(ValidationError):
+        with self.assertRaisesRegex(ValidationError, 'another company'):
             write_between_sessions(method, {'company_id': self.env.company.id})
+
+    def test_an_archived_pos_of_another_company_counts_too(self):
+        # It may be restored, and the upgrade counts it.
+        other_company = self.env['res.company'].create({'name': 'Other Archive Co'})
+        env_other = self.env(context={'allowed_company_ids': other_company.ids})
+        archived = env_other['pos.config'].create(
+            {'name': 'Archived POS', 'payment_method_ids': [(6, 0, [])], 'active': False})
+        method = create_musqet_method(self, 'MSQ-NOCO-007')
+        list_method_on_config(method, archived)
+        clear_company(method)
+        with self.assertRaisesRegex(ValidationError, 'another company'):
+            method.company_id = self.env.company
 
     def test_other_methods_may_have_none(self):
         plain = self.env['pos.payment.method'].create({'name': 'Plain Method', 'company_id': False})

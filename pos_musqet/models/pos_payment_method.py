@@ -247,7 +247,9 @@ class PosPaymentMethod(models.Model):
                 raise ValidationError(_(
                     "Musqet payment method %(payment_method)s must have a company.",
                     payment_method=method.name))
-            if method.sudo().config_ids.company_id - method.company_id:
+            # Archived configs too: one may be restored, and the upgrade counts them.
+            configs = method.sudo().with_context(active_test=False).config_ids
+            if configs.company_id - method.company_id:
                 raise ValidationError(_(
                     "Musqet payment method %(payment_method)s is on a point of sale of another "
                     "company. Remove it from there first.", payment_method=method.name))
@@ -366,8 +368,9 @@ class PosPaymentMethod(models.Model):
         Passes: a sudo or internal call (the webhook, the server's own reads), on Musqet
         methods. Any other caller must be a POS user (as pos_adyen.proxy_adyen_request
         requires), and each method must exist, be a Musqet one, belong to one of the caller's
-        companies and be on a POS session in MUSQET_LIVE_SESSION_STATES. The session's user
-        isn't checked: Odoo lets any POS user of the company join a session.
+        companies and be on a POS session in MUSQET_LIVE_SESSION_STATES of a config in the
+        method's own company (_musqet_sessions). The session's user isn't checked: Odoo lets
+        any POS user of the company join a session.
 
         Why: the caller picks the method's id over RPC, and the proxy reads the method's
         restricted fields with sudo(), which skips the multi-company record rule, so this
@@ -393,25 +396,30 @@ class PosPaymentMethod(models.Model):
             raise AccessDenied()
         return session_states
 
-    def _musqet_session_states(self, states):
-        """``{method id: set of states}``: for each of these methods on a POS session in one
-        of ``states``, the states of those sessions.
+    def _musqet_sessions(self, states):
+        """This method's POS sessions in one of ``states``: the tills using it.
 
-        Only sessions of a config in the method's own company count. Odoo keeps a config's
-        methods to its company, and _check_musqet_company a Musqet method's configs to the
-        method's, but a method listed on another company's config by a direct database write
-        must not count that company's tills as its own.
+        The one rule for which tills use a method (the access check, the webhook's ping): only
+        sessions of a config in the method's own company count. Odoo keeps a config's methods
+        to its company, and _check_musqet_company a Musqet method's configs to the method's,
+        but a method listed on another company's config by a direct database write must not
+        count that company's tills as its own.
         """
-        sessions = self.env['pos.session'].sudo().search([
+        self.ensure_one()
+        return self.env['pos.session'].sudo().search([
             ('state', 'in', tuple(states)),
             ('config_id.payment_method_ids', 'in', self.ids),
+            ('config_id.company_id', '=', self.sudo().company_id.id),
         ])
-        company_of = {method.id: method.company_id for method in self.sudo().exists()}
+
+    def _musqet_session_states(self, states):
+        """``{method id: set of states}``: for each of these methods with a session in one of
+        ``states`` (_musqet_sessions), the states of those sessions."""
         session_states = {}
-        for session in sessions:
-            for method_id in company_of.keys() & set(session.config_id.payment_method_ids.ids):
-                if session.config_id.company_id == company_of[method_id]:
-                    session_states.setdefault(method_id, set()).add(session.state)
+        for method in self.sudo().exists():
+            sessions = method._musqet_sessions(states)
+            if sessions:
+                session_states[method.id] = set(sessions.mapped('state'))
         return session_states
 
     def _musqet_check_method(self):

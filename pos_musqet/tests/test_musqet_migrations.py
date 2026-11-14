@@ -1,13 +1,13 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 """The upgrade backfills of sale and refund records, and of Musqet methods' companies."""
 from odoo.tests import tagged
-from odoo.tools import SQL
 
 from .common import (
     RECORD_LOGGER,
     MusqetPosRecordsCase,
     clear_company,
     create_musqet_method,
+    list_method_on_config,
     load_migration,
 )
 
@@ -190,10 +190,7 @@ class TestMusqetUpgradeCompanies(MusqetPosRecordsCase):
         env_other = self.env(context={'allowed_company_ids': other_company.ids})
         other_config = env_other['pos.config'].create(
             {'name': 'Other Upgrade POS', 'payment_method_ids': [(6, 0, [])]})
-        # Raw SQL: Odoo keeps a config's methods to its company, as the upgrade can't assume.
-        self.env.cr.execute(SQL(
-            'INSERT INTO pos_config_pos_payment_method_rel (pos_config_id, pos_payment_method_id)'
-            ' VALUES (%s, %s)', other_config.id, self.method.id))
+        list_method_on_config(self.method, other_config)
         clear_company(self.method)
         with self.assertLogs(METHOD_LOGGER, 'WARNING') as logs:
             self._migrate()
