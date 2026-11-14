@@ -5,12 +5,13 @@ from unittest.mock import patch
 
 from odoo import fields
 from odoo.addons.pos_musqet.models import pos_payment_method
+from odoo.addons.pos_musqet.models.musqet_common import reply_is_not_found
 from odoo.addons.pos_musqet.models.pos_musqet_sale import (
+    MUSQET_LINE_SALE_IDS_LIMIT,
     MUSQET_SALE_ID_MAX_LENGTH,
     MUSQET_SALE_REREAD_LIMIT,
     MUSQET_SALE_STALE_AFTER,
     MUSQET_SALE_START_LOCK,
-    MUSQET_LINE_SALE_IDS_LIMIT,
 )
 from odoo.sql_db import db_connect
 from odoo.tests import tagged
@@ -30,14 +31,26 @@ from .common import (
 PROXY_LOGGER = 'odoo.addons.pos_musqet.models.pos_payment_method'
 
 
+# The logger of the sale records, which warns of a stale sale Musqet no longer knows.
+SALE_LOGGER = 'odoo.addons.pos_musqet.models.pos_musqet_sale'
+# Musqet's own answer for a saleId it doesn't know, and a bare 404 from something else.
+NOT_FOUND = {'status_code': 404, 'body': {'error': {'code': 404, 'message': 'Terminal sale not found.'}}}
+BARE_404 = {'status_code': 404, 'body': 'Not Found'}
+
+
 def stub_reply(sale_id, reply):
     """A stubbed response about ``sale_id`` from ``reply``: a status, or a dict of a
-    ``status``, an optional ``status_code`` and any other fields."""
+    ``status``, an optional ``status_code`` and any other fields, or of a ``status_code``
+    and the whole JSON ``body``."""
     if isinstance(reply, str):
         reply = {'status': reply}
     reply_fields = dict(reply)
-    return musqet_response(
-        sale_id, reply_fields.pop('status'), reply_fields.pop('status_code', 200), **reply_fields)
+    status_code = reply_fields.pop('status_code', 200)
+    if 'body' in reply_fields:
+        response = musqet_response(sale_id, status_code=status_code)
+        response.json.return_value = reply_fields['body']
+        return response
+    return musqet_response(sale_id, reply_fields.pop('status'), status_code, **reply_fields)
 
 
 class FakeMusqet:
@@ -78,8 +91,8 @@ class ResumeHelpers:
             return method.musqet_create_sale(
                 {'amountInCents': amount, 'reference': reference}, line_sale_ids)
 
-    def assertResumed(self, result, fake, sale_id, reference='Order-R'):
-        self.assertEqual(result, {'saleId': sale_id, 'reference': reference, 'resumed': True})
+    def assertResumed(self, result, fake, sale_id):
+        self.assertEqual(result, {'saleId': sale_id, 'reference': 'Order-R', 'resumed': True})
         self.assertFalse(fake.sent)
 
     def assertRefusedInProgress(self, result, fake):
@@ -212,34 +225,45 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
 
     def test_line_sale_ids_of_the_wrong_type_are_ignored(self):
         self._sale('sale-d', state='done', rail='card')
-        for settled in ('sale-d', [['sale-d']], [1], {'sale-d': 1}):
-            with self.subTest(settled=settled):
+        for line_sale_ids in ('sale-d', [['sale-d']], [1], {'sale-d': 1}):
+            with self.subTest(line_sale_ids=line_sale_ids):
                 fake = FakeMusqet()
-                self.assertResumed(self._create(fake, line_sale_ids=settled), fake, 'sale-d')
+                self.assertResumed(self._create(fake, line_sale_ids=line_sale_ids), fake, 'sale-d')
 
     def test_takes_at_most_the_limit_of_line_sale_ids(self):
         self._sale('sale-d', state='done', rail='card')
-        settled = ['other-%d' % index for index in range(MUSQET_LINE_SALE_IDS_LIMIT)]
+        others = ['other-%d' % index for index in range(MUSQET_LINE_SALE_IDS_LIMIT)]
         fake = FakeMusqet()
-        self.assertResumed(self._create(fake, line_sale_ids=settled + ['sale-d']), fake, 'sale-d')
+        self.assertResumed(self._create(fake, line_sale_ids=others + ['sale-d']), fake, 'sale-d')
 
-    def test_ignores_an_overlong_settled_sale_id(self):
+    def test_ignores_an_overlong_line_sale_id(self):
         long_id = 'x' * (MUSQET_SALE_ID_MAX_LENGTH + 1)
         self._sale(long_id, state='done', rail='card')
         fake = FakeMusqet()
         self.assertResumed(self._create(fake, line_sale_ids=[long_id]), fake, long_id)
 
     def test_a_stale_pending_sale_musqet_no_longer_has_does_not_block_the_order(self):
-        # Musqet answers 404 for it, and it is long past the terminal's expiry, so it can't
-        # still be paid.
+        # Musqet says it has no such sale, and it is long past the terminal's expiry, so it
+        # can't still be paid.
         sale = self._sale('sale-p', amount_minor=700)
         self._age(sale, MUSQET_SALE_STALE_AFTER + timedelta(minutes=1))
-        fake = FakeMusqet(statuses={'sale-p': {'status': 'PENDING', 'status_code': 404}})
-        with self.assertLogs(PROXY_LOGGER, 'WARNING'):
+        fake = FakeMusqet(statuses={'sale-p': NOT_FOUND})
+        with self.assertLogs(PROXY_LOGGER, 'WARNING'), self.assertLogs(SALE_LOGGER, 'WARNING') as logs:
             result = self._create(fake)
         self.assertEqual(result['saleId'], 'new-sale')
-        # Failed, so later requests don't spend a read on it.
-        self.assertEqual(sale.state, 'failed')
+        # Logged for reconciliation, and left pending: it may have been paid (say, under the
+        # business the API key belonged to before).
+        self.assertIn("'sale-p'", logs.output[0])
+        self.assertEqual(sale.state, 'pending')
+
+    def test_a_bare_404_says_nothing_about_a_stale_sale(self):
+        # A wrong base URL answers 404 for every route, without Musqet's error body.
+        sale = self._sale('sale-p', amount_minor=700)
+        self._age(sale, MUSQET_SALE_STALE_AFTER + timedelta(minutes=1))
+        fake = FakeMusqet(statuses={'sale-p': BARE_404})
+        with self.assertLogs(PROXY_LOGGER, 'WARNING'):
+            result = self._create(fake)
+        self.assertRefusedInProgress(result, fake)
 
     def test_a_stale_pending_sale_still_blocks_if_the_read_fails_otherwise(self):
         # A 5xx says nothing about the sale: it may have been paid.
@@ -253,7 +277,7 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
     def test_a_recent_pending_sale_still_blocks_on_a_404(self):
         # It may be a sale of the business the API key belonged to before it was changed.
         self._sale('sale-p', amount_minor=700)
-        fake = FakeMusqet(statuses={'sale-p': {'status': 'PENDING', 'status_code': 404}})
+        fake = FakeMusqet(statuses={'sale-p': NOT_FOUND})
         with self.assertLogs(PROXY_LOGGER, 'WARNING'):
             result = self._create(fake)
         self.assertRefusedInProgress(result, fake)
@@ -261,7 +285,7 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
     def test_a_recent_matching_sale_musqet_has_not_got_is_not_resumed(self):
         # Polling it would fail at once; it refuses until it is stale.
         sale = self._sale('sale-p')
-        fake = FakeMusqet(statuses={'sale-p': {'status': 'PENDING', 'status_code': 404}})
+        fake = FakeMusqet(statuses={'sale-p': NOT_FOUND})
         with self.assertLogs(PROXY_LOGGER, 'WARNING'):
             result = self._create(fake)
         self.assertRefusedInProgress(result, fake)
@@ -289,7 +313,7 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
         for index in range(MUSQET_SALE_REREAD_LIMIT):
             self._sale('sale-%d' % index, amount_minor=700)
         fake = FakeMusqet(statuses={
-            'sale-old': {'status': 'PENDING', 'status_code': 404},
+            'sale-old': NOT_FOUND,
             **{'sale-%d' % index: 'CANCELLED' for index in range(MUSQET_SALE_REREAD_LIMIT)}})
         result = self._create(fake)
         self.assertRefusedInProgress(result, fake)
@@ -337,6 +361,29 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
 
 
 @tagged('post_install', '-at_install')
+class TestMusqetReplyIsNotFound(TransactionCase):
+    """reply_is_not_found takes only Musqet's own 404 body as "no such sale"."""
+
+    def test_only_musqets_own_not_found(self):
+        def proxy_error(status_code, detail):
+            return {'error': {'message': 'x', 'status_code': status_code, 'detail': detail}}
+
+        musqet_404 = {'error': {'code': 404, 'message': 'Terminal sale not found.'}}
+        for reply, expected in (
+            (proxy_error(404, musqet_404), True),
+            (proxy_error(404, 'Not Found'), False),
+            (proxy_error(404, {'error': {'code': 401, 'message': 'x'}}), False),
+            (proxy_error(404, {'error': 'Not Found'}), False),
+            (proxy_error(503, musqet_404), False),
+            ({'error': {'message': 'No Musqet API key is configured.'}}, False),
+            ({'saleId': 'sale-1', 'status': 'PENDING'}, False),
+            (None, False),
+        ):
+            with self.subTest(reply=reply):
+                self.assertIs(reply_is_not_found(reply), expected)
+
+
+@tagged('post_install', '-at_install')
 class TestMusqetCancelSale(TransactionCase):
     """musqet_cancel_sale fails the server's record of a sale Musqet cancelled."""
 
@@ -375,8 +422,12 @@ class TestMusqetCancelSale(TransactionCase):
 class TestMusqetSaleResumeSynced(ResumeHelpers, MusqetPosRecordsCase):
     """A sale already on a synced payment line is never resumed, whatever the POS sends."""
 
+    def setUp(self):
+        super().setUp()
+        self.caller = make_pos_user(self.env, 'musqet_cashier_resume_synced')
+
     def test_a_sale_on_a_synced_line_is_not_resumed(self):
-        record_sale(self.env, self.method, 'sale-s', reference='Order-R', rail='card')
+        self._record_sale('sale-s', reference='Order-R')
         self._payment(amount=10.0, transaction_id='sale-s', musqet_rail='card')
         fake = FakeMusqet()
         self.assertEqual(self._create(fake)['saleId'], 'new-sale')
@@ -384,14 +435,15 @@ class TestMusqetSaleResumeSynced(ResumeHelpers, MusqetPosRecordsCase):
     def test_a_line_takes_only_the_sale_of_its_own_method(self):
         # The line carries sale-t on self.method; the pending sale-t is on self.second, so it
         # is still open (and still blocks), not on a line.
-        record_sale(self.env, self.method, 'sale-s', reference='Order-R', rail='card')
-        record_sale(self.env, self.second, 'sale-t', reference='Order-R', state='pending', rail=False)
+        self._record_sale('sale-s', reference='Order-R')
+        self._record_sale('sale-t', reference='Order-R', state='pending', rail=False,
+                          payment_method_id=self.second.id)
         self._payment(amount=10.0, transaction_id='sale-t')
         fake = FakeMusqet()
         self.assertRefusedInProgress(self._create(fake), fake)
 
     def test_a_line_of_another_method_with_the_sale_id_does_not_count(self):
-        record_sale(self.env, self.method, 'sale-s', reference='Order-R', rail='card')
+        self._record_sale('sale-s', reference='Order-R')
         self._payment(amount=10.0, transaction_id='sale-s', payment_method_id=self.second.id)
         fake = FakeMusqet()
         self.assertResumed(self._create(fake), fake, 'sale-s')

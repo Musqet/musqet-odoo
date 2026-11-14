@@ -452,7 +452,7 @@ class PosPaymentMethod(models.Model):
         or lost it to a page refresh, can't charge the customer twice. ``line_sale_ids`` are
         the saleIds already on the order's payment lines, which are never resumed onto
         another line. The reply is then ``{saleId, reference, resumed: true}``, and the POS
-        polls that sale.
+        polls that sale as it would a new one (``resumed`` is for logs and support only).
         """
         error = self._musqet_check_terminal_request(payload)
         if error:
