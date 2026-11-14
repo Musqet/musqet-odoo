@@ -9,7 +9,7 @@ from odoo.tools import SQL
 from .musqet_common import (
     MUSQET_RAIL_SELECTION,
     MUSQET_SUCCESS_STATUS,
-    MUSQET_TERMINAL,
+    MUSQET_PROVIDER,
     MUSQET_UNPAID_ORDER_STATES,
     minor_units,
     parse_iso_currency,
@@ -311,7 +311,7 @@ class PosMusqetSale(models.Model):
             ('company_id', '=', company.id),
             ('reference', '=', reference),
             ('state', '!=', 'failed'),
-            ('payment_method_id.payment_provider', '=', MUSQET_TERMINAL),
+            ('payment_method_id.payment_provider', '=', MUSQET_PROVIDER),
             ('not_found_at', '=', False),
         ], order='id')
         on_lines = {
@@ -362,7 +362,7 @@ class PosMusqetSale(models.Model):
             ('pos_order_id.state', 'not in', MUSQET_UNPAID_ORDER_STATES),
             ('musqet_refund_of', '=', False),
             ('transaction_id', '!=', False),
-            ('payment_method_id.payment_provider', '=', MUSQET_TERMINAL),
+            ('payment_method_id.payment_provider', '=', MUSQET_PROVIDER),
         ], order='id')
         count = self._musqet_record_unrecorded(payments, lambda payment: {
             'amount_minor': minor_units(payment.amount, payment.currency_id),

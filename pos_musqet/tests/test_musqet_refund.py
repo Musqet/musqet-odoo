@@ -17,6 +17,7 @@ from .common import (
     RECORD_LOGGER,
     UNANSWERED,
     create_musqet_method,
+    create_plain_method,
     dirty_field_names,
     make_pos_user,
     musqet_response,
@@ -665,7 +666,7 @@ class TestMusqetCreateRefund(TransactionCase):
         self.assertEqual(self._recorded_refunds().state, 'pending')
 
     def test_a_refund_on_a_method_no_longer_musqet_counts_without_a_reread(self):
-        plain = self.env['pos.payment.method'].create({'type': 'bank', 'name': 'Former Musqet Method'})
+        plain = create_plain_method(self.env, 'Former Musqet Method')
         record_refund(self.env, plain, 'refund-old', amount_minor=1000)
         result, mock_request = self._call_refund(
             {'amountInCents': 1}, self._stub_original(amount=10.0), get_status='CANCELLED')

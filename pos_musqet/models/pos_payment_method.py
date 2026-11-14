@@ -18,7 +18,7 @@ from odoo.tools import consteq
 from .musqet_common import (
     MUSQET_OUTCOME_UNKNOWN,
     MUSQET_REFUSED_STATUSES,
-    MUSQET_TERMINAL,
+    MUSQET_PROVIDER,
     parse_minor_amount,
     reply_is_for,
     request_may_have_arrived,
@@ -75,7 +75,7 @@ class PosPaymentMethod(models.Model):
     _inherit = 'pos.payment.method'
 
     def _get_terminal_provider_selection(self):
-        return super()._get_terminal_provider_selection() + [(MUSQET_TERMINAL, 'Musqet')]
+        return super()._get_terminal_provider_selection() + [(MUSQET_PROVIDER, 'Musqet')]
 
     # Musqet
     # Secrets are encrypted at rest: `*_encrypted` holds a Fernet ciphertext (key in the
@@ -245,7 +245,7 @@ class PosPaymentMethod(models.Model):
         # type. The POS treats only "terminal" methods as card terminals (a refused cancel
         # puts the line back to waiting for the card), which the driver relies on.
         for method in self:
-            if method.payment_provider == MUSQET_TERMINAL and method.payment_method_type != 'terminal':
+            if method.payment_provider == MUSQET_PROVIDER and method.payment_method_type != 'terminal':
                 raise ValidationError(_(
                     "Musqet payment method %(payment_method)s must use the Terminal integration.",
                     payment_method=method.name))
@@ -259,7 +259,7 @@ class PosPaymentMethod(models.Model):
         # company that config doesn't share: refused here. sudo(): the writer may not see the
         # other company's configs.
         for method in self:
-            if method.payment_provider != MUSQET_TERMINAL:
+            if method.payment_provider != MUSQET_PROVIDER:
                 continue
             # Archived configs too: one may be restored.
             configs = method.sudo().with_context(active_test=False).config_ids
@@ -402,7 +402,7 @@ class PosPaymentMethod(models.Model):
     def _musqet_check_method(self):
         # Only a Musqet payment method drives a Musqet terminal: refuse to run the proxy on
         # any other method record a caller points it at.
-        if any(method.payment_provider != MUSQET_TERMINAL for method in self):
+        if any(method.payment_provider != MUSQET_PROVIDER for method in self):
             raise AccessDenied()
 
     def _musqet_company(self):
@@ -784,7 +784,7 @@ class PosPaymentMethod(models.Model):
         if not payment or payment.company_id != self._musqet_company():
             return None, self._musqet_error(_(
                 "The original payment to refund could not be found."))
-        if payment.payment_method_id.payment_provider != MUSQET_TERMINAL or not payment.transaction_id:
+        if payment.payment_method_id.payment_provider != MUSQET_PROVIDER or not payment.transaction_id:
             return None, self._musqet_card_only_error()
         # A paid sale line only. (The settle check refuses any other line too; this saves
         # reading the sale from Musqet for nothing.)

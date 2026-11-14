@@ -5,7 +5,7 @@ from collections import defaultdict
 from odoo import api, fields, models
 from odoo.tools import SQL
 
-from .musqet_common import MUSQET_TERMINAL, MUSQET_UNPAID_ORDER_STATES, minor_units, sale_key_domain
+from .musqet_common import MUSQET_PROVIDER, MUSQET_UNPAID_ORDER_STATES, minor_units, sale_key_domain
 
 _logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ class PosPayment(models.Model):
         """These payments that are Musqet lines with a saleId."""
         return self.filtered(
             lambda payment: payment.transaction_id
-            and payment.payment_method_id.payment_provider == MUSQET_TERMINAL)
+            and payment.payment_method_id.payment_provider == MUSQET_PROVIDER)
 
     def _musqet_lines_sharing_sales(self):
         """Every payment with the (method, saleId) of one of these Musqet lines, these included."""
@@ -210,7 +210,7 @@ class PosPayment(models.Model):
         the paid lines (``claimants``) and all lines (``carriers``) claiming each sale or refund
         (by _musqet_claim_key)."""
         self.ensure_one()
-        if self.payment_method_id.payment_provider != MUSQET_TERMINAL or not self._musqet_order_is_paid():
+        if self.payment_method_id.payment_provider != MUSQET_PROVIDER or not self._musqet_order_is_paid():
             return False
         key = (self.payment_method_id.id, self.transaction_id)
         is_sale = self._musqet_is_sale_line()

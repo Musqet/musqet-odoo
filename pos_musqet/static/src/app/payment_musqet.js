@@ -606,13 +606,12 @@ export class PaymentMusqet extends PaymentInterface {
      * Handle an inbound webhook (push path) for ``line``, the pending Musqet line. Invoked by
      * the websocket subscription in setup once the backend controller has verified a
      * signature and buffered the result. Asks for the buffered result of this line's saleId
-     * and settles the line with it; with no saleId yet
-     * (or after a page reload) it does nothing and the poll loop settles the line. Only fires
-     * on publicly-reachable deployments; the pilot settles via the poll loop and never
-     * reaches here.
+     * and settles the line with it; with no saleId yet (or after a page reload) it does
+     * nothing and the poll loop settles the line. Only fires on publicly-reachable
+     * deployments; the pilot settles via the poll loop and never reaches here.
      */
     async handleMusqetStatusResponse(line) {
-        const state = line && this.pollState[line.uuid];
+        const state = this.pollState[line.uuid];
         // Only the sale this line is waiting on: before our own create has returned
         // (state.saleId still null) we can't name it, so the poll loop settles it. With no
         // poll state (the page was reloaded mid-payment) this tab has no sale to take a

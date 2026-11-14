@@ -9,6 +9,7 @@ from odoo.tests.common import TransactionCase
 
 from .common import (
     create_musqet_method,
+    create_plain_method,
     list_method_on_config,
     make_pos_user,
     open_plain_method,
@@ -231,7 +232,7 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
 
 
 @tagged('post_install', '-at_install')
-class TestMusqetMethodCompany(ProxyCallsMixin, TransactionCase):
+class TestMusqetMethodCompany(TransactionCase):
     """A Musqet method is a terminal, and acts only for its own company."""
 
     def test_a_musqet_method_must_use_the_terminal_integration(self):
@@ -244,13 +245,13 @@ class TestMusqetMethodCompany(ProxyCallsMixin, TransactionCase):
         with self.assertRaisesRegex(ValidationError, 'Terminal integration'):
             method.payment_method_type = 'cash_machine'
         # From the other side: Musqet given to a method that isn't a terminal.
-        plain = self.env['pos.payment.method'].create({'type': 'bank', 'name': 'Plain Type'})
+        plain = create_plain_method(self.env, 'Plain Type')
         with self.assertRaisesRegex(ValidationError, 'Terminal integration'):
             plain.payment_provider = 'musqet'
 
     def _listed_on_another_companys_pos(self, serial, archived=False):
         """A Musqet method of a third company, listed (by a direct database write) on a POS
-        of another company, and that POS's company."""
+        of another company, and that POS."""
         third_company = self.env['res.company'].create({'name': 'Third Co %s' % serial})
         method = create_musqet_method(self, serial, company_id=third_company.id)
         other_company = self.env['res.company'].create({'name': 'Other Co %s' % serial})
@@ -258,25 +259,23 @@ class TestMusqetMethodCompany(ProxyCallsMixin, TransactionCase):
         config = env_other['pos.config'].create(
             {'name': 'Other POS', 'payment_method_ids': [(6, 0, [])], 'active': not archived})
         list_method_on_config(method, config)
-        return method, other_company
+        return method, config
 
     def test_a_musqet_method_cannot_take_a_company_another_companys_pos_lists_it_on(self):
         # The manager must take it off the other company's POS first.
-        method, _other = self._listed_on_another_companys_pos('MSQ-CO-001')
+        method, _config = self._listed_on_another_companys_pos('MSQ-CO-001')
         with self.assertRaisesRegex(ValidationError, 'another company'):
             method.company_id = self.env.company
 
     def test_an_archived_pos_of_another_company_counts_too(self):
         # It may be restored.
-        method, _other = self._listed_on_another_companys_pos('MSQ-CO-002', archived=True)
+        method, _config = self._listed_on_another_companys_pos('MSQ-CO-002', archived=True)
         with self.assertRaisesRegex(ValidationError, 'another company'):
             method.company_id = self.env.company
 
     def test_a_method_on_another_companys_pos_cannot_become_a_musqet_one(self):
-        method, _other = self._listed_on_another_companys_pos('MSQ-CO-003')
-        plain = self.env['pos.payment.method'].create({
-            'type': 'bank', 'name': 'Plain Terminal', 'payment_method_type': 'terminal'})
-        other_config = method.sudo().with_context(active_test=False).config_ids
-        list_method_on_config(plain, other_config)
+        _method, config = self._listed_on_another_companys_pos('MSQ-CO-003')
+        plain = create_plain_method(self.env, 'Plain Terminal', payment_method_type='terminal')
+        list_method_on_config(plain, config)
         with self.assertRaisesRegex(ValidationError, 'another company'):
             plain.write({'payment_provider': 'musqet', 'musqet_terminal_serial': 'MSQ-CO-004'})

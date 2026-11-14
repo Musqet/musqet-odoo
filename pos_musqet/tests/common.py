@@ -71,10 +71,15 @@ def open_session(env, *methods):
     return env['pos.session'].create({'config_id': config.id, 'user_id': env.uid})
 
 
+def create_plain_method(env, name, **vals):
+    """A payment method that isn't a Musqet one (Odoo 20 requires its type)."""
+    return env['pos.payment.method'].create({'type': 'bank', 'name': name, **vals})
+
+
 def open_plain_method(env):
     """A payment method that isn't a Musqet one, on an open POS session: so the method check
     (pos.payment.method._musqet_check_method), not the session check, is what refuses it."""
-    plain = env['pos.payment.method'].create({'type': 'bank', 'name': 'Plain Method'})
+    plain = create_plain_method(env, 'Plain Method')
     open_session(env, plain)
     return plain
 
@@ -151,7 +156,7 @@ class MusqetPosRecordsCase(TransactionCase):
     def setUp(self):
         super().setUp()
         self.method = create_musqet_method(self, 'MSQ-LINK-001')
-        self.plain = self.env['pos.payment.method'].create({'type': 'bank', 'name': 'Plain Method'})
+        self.plain = create_plain_method(self.env, 'Plain Method')
         self.second = create_musqet_method(self, 'MSQ-LINK-002')
         self.session = open_session(self.env, self.method, self.plain, self.second)
         self.order = self._order()

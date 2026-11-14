@@ -61,8 +61,8 @@ your Odoo addons path.
 
    ```bash
    cd /opt/odoo/extra-addons        # any directory already on addons_path
-   # a release tag in production; the 20.0 branch is development code (and, until
-   # the first release is tagged, the only branch to use)
+   # a release tag in production; until the first release is tagged, the branch
+   # for your Odoo version (20.0, or 19.0 for Odoo 19)
    git clone --branch '<release tag>' https://github.com/Musqet/musqet-odoo.git
    # optional, for a fixed pin: a tag can be moved, so check out the release's full
    # commit SHA from the Releases page; it prints "pinned" only if HEAD is that commit
@@ -122,9 +122,10 @@ your Odoo addons path.
    (Odoo's upgrade sets any that are missing) and replaces *Use a Payment Terminal* with
    *Integration* and *Integrate with*: check each Musqet method afterwards shows
    **Terminal** and **Musqet** there (§3). Close every POS session first, and reload each
-   till afterwards. The 19.0 upgrade steps above still ship, so a database left on an
-   older 19.0 version is brought up to date on the way; only the 19.0.1.6.0 company step
-   is gone, since Odoo 20 requires every method's company itself.
+   till afterwards. Upgrading to 19.0.1.7.0 first is required, not optional: it gives a
+   Musqet method the company of the POS configs it is on, and Odoo's own upgrade does
+   not look at those. If a database skipped it, check afterwards that no Musqet method is
+   listed on another company's POS (its cashiers are refused until it is removed there).
 
 ---
 

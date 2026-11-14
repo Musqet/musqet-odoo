@@ -8,6 +8,7 @@ from .common import (
     load_migration,
 )
 
+
 @tagged('post_install', '-at_install')
 class TestMusqetUpgradeBackfills(MusqetPosRecordsCase):
     """The 19.0.1.2.0 and 19.0.1.3.0 backfills, and the clearing of guessed references."""
