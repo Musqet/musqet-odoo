@@ -94,7 +94,8 @@ class MusqetController(http.Controller):
         method_sudo = request.env['pos.payment.method'].sudo().search(
             [('musqet_terminal_serial', '=', serial)], limit=1)
         if not method_sudo:
-            # Sent unsigned, so cut like every other logged id: it can't fill the log.
+            # Unsigned and unmatched, so its length is the sender's to choose: cut it like the
+            # other logged ids. (Once matched, a serial is one a manager entered.)
             _logger.warning("Musqet webhook for an unregistered terminal: %.*r",
                             MUSQET_LOG_ID_MAX_LENGTH, serial)
             return self._ack()

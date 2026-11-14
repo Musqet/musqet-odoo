@@ -65,8 +65,8 @@ MUSQET_REFERENCE_MAX_LENGTH = 255
 MUSQET_LANGUAGE_MAX_LENGTH = 16
 # At most this much of a refusal's message is passed on to the POS.
 MUSQET_REFUSAL_MESSAGE_MAX_LENGTH = 500
-# At most this much of an untrusted value from a reply reaches the log: a body (at debug
-# level), and an id (a saleId it names).
+# At most this much of an untrusted value reaches the log: a reply body (at debug level),
+# and an id (a saleId a reply names, or a serial or saleId from a webhook body).
 MUSQET_LOG_BODY_MAX_LENGTH = 500
 MUSQET_LOG_ID_MAX_LENGTH = 100
 
