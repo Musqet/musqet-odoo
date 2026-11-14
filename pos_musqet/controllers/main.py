@@ -15,7 +15,7 @@ _logger = logging.getLogger(__name__)
 # pos_musqet/docs/INSTALL.md §5 states this limit too.
 MUSQET_WEBHOOK_MAX_BYTES = 64 * 1024
 # Odoo parses these as form fields before the handler runs, leaving no raw body to verify.
-FORM_MIMETYPES = ('application/x-www-form-urlencoded', 'multipart/form-data')
+MUSQET_WEBHOOK_FORM_MIMETYPES = ('application/x-www-form-urlencoded', 'multipart/form-data')
 
 
 def _plain_string(value):
@@ -43,7 +43,7 @@ class MusqetController(http.Controller):
         other failure is logged and still answered [accepted].
         Query or form parameters are ignored: the signed body is the only input.
         """
-        if request.httprequest.mimetype in FORM_MIMETYPES:
+        if request.httprequest.mimetype in MUSQET_WEBHOOK_FORM_MIMETYPES:
             _logger.warning("Musqet webhook: body sent as a form, not JSON")
             return self._ack()
         raw_body = request.httprequest.data  # exact bytes — needed to verify the HMAC.
