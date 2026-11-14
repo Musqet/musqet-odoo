@@ -6,6 +6,7 @@ import json
 import time
 from unittest.mock import MagicMock, patch
 
+from odoo.addons.pos_musqet.controllers import main as controllers_main
 from odoo.addons.pos_musqet.controllers.main import MUSQET_WEBHOOK_MAX_BYTES, MusqetController
 from odoo.addons.pos_musqet.models import pos_payment_method
 from odoo.exceptions import AccessDenied
@@ -454,19 +455,32 @@ class TestMusqetWebhookRoute(HttpCase):
         mock_request.assert_not_called()
         self.assertEqual(self.sale.state, 'pending')
 
+    def test_the_handler_refuses_a_declared_oversized_body_itself(self):
+        # Not left to the route's max_content_length, which Werkzeug before 2.3 applies only
+        # to form data. Lowering the module's limit leaves the route's (bound at import) as
+        # it was, so only the handler's own check can refuse this body.
+        with patch.object(controllers_main, 'MUSQET_WEBHOOK_MAX_BYTES', 16), \
+             mute_logger('odoo.http'):
+            response, mock_request = self._post(self._body())
+        self.assertEqual(response.status_code, 413)
+        mock_request.assert_not_called()
+        self.assertEqual(self.sale.state, 'pending')
+
     def test_an_oversized_chunked_body_is_read_no_further_than_the_limit(self):
         # No Content-Length to refuse up front: the body is cut at the limit as it is read
-        # (Werkzeug 2.3+), so it fails verification and is answered like any other.
+        # (Werkzeug 2.3+), so it is dropped and answered [accepted] like any other bad body
+        # (here, as not JSON).
         chunk = b' ' * 4096
         chunks = (chunk for _ in range(MUSQET_WEBHOOK_MAX_BYTES // len(chunk) + 2))
         handle = MusqetController._musqet_handle_webhook
         with patch.object(MusqetController, '_musqet_handle_webhook', autospec=True,
                           side_effect=handle) as handled, \
              patch.object(pos_payment_method.requests, 'request') as mock_request, \
-             mute_logger('odoo.addons.pos_musqet.controllers.main'):
+             self.assertLogs('odoo.addons.pos_musqet.controllers.main', 'WARNING') as logs:
             response = self.url_open('/musqet/webhook', data=chunks,
                                      headers={'Content-Type': 'application/json'})
         self.assertAccepted(response)
+        self.assertIn('not valid JSON', logs.output[0])
         self.assertEqual(len(handled.call_args.args[1]), MUSQET_WEBHOOK_MAX_BYTES)
         mock_request.assert_not_called()
 

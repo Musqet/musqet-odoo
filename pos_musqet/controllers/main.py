@@ -2,6 +2,8 @@
 import json
 import logging
 
+from werkzeug.exceptions import RequestEntityTooLarge
+
 from odoo import http
 from odoo.http import request
 
@@ -10,9 +12,9 @@ from ..models.pos_payment_method import MUSQET_LIVE_SESSION_STATES
 
 _logger = logging.getLogger(__name__)
 
-# A sale notification is a few hundred bytes; anything far larger is refused (HTTP 413) before
-# the body is read, so an unauthenticated caller can't make Odoo parse megabytes of JSON.
-# pos_musqet/docs/INSTALL.md §5 states this limit too.
+# A sale notification is a few hundred bytes; a body whose Content-Length is over this is
+# refused (HTTP 413) unread. A chunked one is cut at this size as it is read (see the note on
+# reading the body). pos_musqet/docs/INSTALL.md §5 states this limit too.
 MUSQET_WEBHOOK_MAX_BYTES = 64 * 1024
 # Odoo parses these as form fields before the handler runs, leaving no raw body to verify.
 MUSQET_WEBHOOK_FORM_MIMETYPES = ('application/x-www-form-urlencoded', 'multipart/form-data')
@@ -38,20 +40,25 @@ class MusqetController(http.Controller):
         body is the only authentication — an unverified, stale or malformed request is
         dropped — and a verified one only triggers a status read from Musqet's API. We
         always reply 200 ``[accepted]`` so the response never doubles as an oracle for
-        signature validity and forged traffic can't trigger a retry storm. Only a body over
-        MUSQET_WEBHOOK_MAX_BYTES with a Content-Length is refused (HTTP 413), before anything
-        else is checked (a chunked one: see the note on reading the body); any other failure
-        is logged and still answered [accepted].
+        signature validity and forged traffic can't trigger a retry storm.
+        The one exception: a body whose Content-Length is over MUSQET_WEBHOOK_MAX_BYTES is
+        refused (HTTP 413) before anything else is checked. Any other failure is logged and
+        still answered [accepted].
         Query or form parameters are ignored: the signed body is the only input.
         """
+        # The route's max_content_length refuses this as the body is read only on Werkzeug
+        # 2.3+; checked here too so the 413 holds on older Werkzeug (and before the guard).
+        length = request.httprequest.content_length
+        if length is not None and length > MUSQET_WEBHOOK_MAX_BYTES:
+            raise RequestEntityTooLarge()
         if request.httprequest.mimetype in MUSQET_WEBHOOK_FORM_MIMETYPES:
             _logger.warning("Musqet webhook: body sent as a form, not JSON")
             return self._ack()
         # The exact bytes, needed to verify the HMAC. A chunked body (no Content-Length) can't
         # be refused up front: Werkzeug 2.3+ (Odoo's packages on Python 3.12) stops reading it
-        # at max_content_length, so it fails verification and is answered [accepted]. Older
-        # Werkzeug doesn't bound that read, and Odoo's request doesn't expose the raw stream
-        # to bound it here, so INSTALL §5 has the proxy cap the body size.
+        # at max_content_length, so it is dropped and answered [accepted] like any other bad
+        # body. Older Werkzeug doesn't bound that read, and Odoo's request doesn't expose the
+        # raw stream to bound it here, so INSTALL §5 has the proxy cap the body size.
         raw_body = request.httprequest.data
         # The one guard behind every step below: whatever raises, the answer is [accepted].
         # The push catches its own, so a failure there doesn't undo the settled record.
