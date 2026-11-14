@@ -39,14 +39,20 @@ class MusqetController(http.Controller):
         dropped — and a verified one only triggers a status read from Musqet's API. We
         always reply 200 ``[accepted]`` so the response never doubles as an oracle for
         signature validity and forged traffic can't trigger a retry storm. Only a body over
-        MUSQET_WEBHOOK_MAX_BYTES is refused (HTTP 413), before anything else is checked; any
-        other failure is logged and still answered [accepted].
+        MUSQET_WEBHOOK_MAX_BYTES with a Content-Length is refused (HTTP 413), before anything
+        else is checked (a chunked one: see the note on reading the body); any other failure
+        is logged and still answered [accepted].
         Query or form parameters are ignored: the signed body is the only input.
         """
         if request.httprequest.mimetype in MUSQET_WEBHOOK_FORM_MIMETYPES:
             _logger.warning("Musqet webhook: body sent as a form, not JSON")
             return self._ack()
-        raw_body = request.httprequest.data  # exact bytes — needed to verify the HMAC.
+        # The exact bytes, needed to verify the HMAC. A chunked body (no Content-Length) can't
+        # be refused up front: Werkzeug 2.3+ (Odoo's packages on Python 3.12) stops reading it
+        # at max_content_length, so it fails verification and is answered [accepted]. Older
+        # Werkzeug doesn't bound that read, and Odoo's request doesn't expose the raw stream
+        # to bound it here, so INSTALL §5 has the proxy cap the body size.
+        raw_body = request.httprequest.data
         # The one guard behind every step below: whatever raises, the answer is [accepted].
         # The push catches its own, so a failure there doesn't undo the settled record.
         try:
@@ -113,9 +119,9 @@ class MusqetController(http.Controller):
         if not reply_is_for(sale_id, reply):
             return self._ack()
         # Buffer Musqet's reply and ping every live session that can show it (one being closed
-        # may still have the sale in progress). The frontend pulls the buffer and settles the
-        # pending line idempotently (a poll may have already settled it — see
-        # payment_musqet.js _finishSale).
+        # may still have the sale in progress). Each pinged till asks for the buffered result
+        # of its own saleId; only the one waiting on this sale takes it and settles its line
+        # idempotently (a poll may have already settled it, see payment_musqet.js _finishSale).
         # The record is already settled, so a failure here costs only the push: the poll
         # loop still settles the till.
         try:

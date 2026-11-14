@@ -6,7 +6,7 @@ import json
 import time
 from unittest.mock import MagicMock, patch
 
-from odoo.addons.pos_musqet.controllers.main import MUSQET_WEBHOOK_MAX_BYTES
+from odoo.addons.pos_musqet.controllers.main import MUSQET_WEBHOOK_MAX_BYTES, MusqetController
 from odoo.addons.pos_musqet.models import pos_payment_method
 from odoo.exceptions import AccessDenied
 from odoo.tests import tagged
@@ -453,6 +453,22 @@ class TestMusqetWebhookRoute(HttpCase):
         self.assertEqual(response.status_code, 413)
         mock_request.assert_not_called()
         self.assertEqual(self.sale.state, 'pending')
+
+    def test_an_oversized_chunked_body_is_read_no_further_than_the_limit(self):
+        # No Content-Length to refuse up front: the body is cut at the limit as it is read
+        # (Werkzeug 2.3+), so it fails verification and is answered like any other.
+        chunk = b' ' * 4096
+        chunks = (chunk for _ in range(MUSQET_WEBHOOK_MAX_BYTES // len(chunk) + 2))
+        handle = MusqetController._musqet_handle_webhook
+        with patch.object(MusqetController, '_musqet_handle_webhook', autospec=True,
+                          side_effect=handle) as handled, \
+             patch.object(pos_payment_method.requests, 'request') as mock_request, \
+             mute_logger('odoo.addons.pos_musqet.controllers.main'):
+            response = self.url_open('/musqet/webhook', data=chunks,
+                                     headers={'Content-Type': 'application/json'})
+        self.assertAccepted(response)
+        self.assertEqual(len(handled.call_args.args[1]), MUSQET_WEBHOOK_MAX_BYTES)
+        mock_request.assert_not_called()
 
     def test_an_unknown_serial_is_logged_escaped(self):
         # The serial comes from an unauthenticated body: it can't forge a log line.
