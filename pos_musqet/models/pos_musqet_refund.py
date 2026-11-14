@@ -57,7 +57,7 @@ class PosMusqetRefund(models.Model):
         """
         # As action_musqet_mark_failed: managers only, within their companies.
         self.check_access('read')
-        self.filtered(lambda refund: refund._musqet_is_unanswered()).sudo().write({'state': 'done'})
+        self.filtered(lambda refund: refund._musqet_is_unanswered())._musqet_mark_by_manager('done')
 
     def _musqet_unanswered_message(self):
         return _(

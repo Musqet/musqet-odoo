@@ -438,36 +438,42 @@ class PosPaymentMethod(models.Model):
                 # Any error, as for a 2xx below: an unreadable body doesn't change the outcome.
                 detail = response.text
             details = {'status_code': response.status_code}
-            if response.status_code in MUSQET_REFUSED_STATUSES:
-                # Musqet's own refusal: its body says why (reply_is_not_found reads it).
-                details['detail'] = detail
-            else:
-                # Maybe not Musqet's (a gateway's page, say): kept out of the reply, which
-                # reaches the cashier's browser.
+            if response.status_code not in MUSQET_REFUSED_STATUSES:
                 details[MUSQET_OUTCOME_UNKNOWN] = True
+            if (response.status_code in MUSQET_REFUSED_STATUSES and isinstance(detail, dict)
+                    and isinstance(detail.get('error'), dict)):
+                # Musqet's own refusal, in its error shape: it says why (reply_is_not_found
+                # reads it). Only its error object is kept.
+                details['detail'] = {'error': detail['error']}
+            else:
+                # Maybe not Musqet's (a gateway's or a WAF's page, say): kept out of the reply,
+                # which reaches the cashier's browser.
                 _logger.debug("Musqet %s %s HTTP %s body: %.500r",
                               method, path, response.status_code, detail)
             return self._musqet_error(_("The Musqet terminal service returned an error."), **details)
+        # Only an {error} built here may say Musqet refused the request: a 2xx body Odoo can't
+        # read, that isn't an object, or that carries a non-null error of its own (a
+        # gateway's, say), says nothing of whether Musqet acted on it. The body is kept out of
+        # the reply: it may not be Musqet's, and the reply reaches the cashier's browser.
         try:
             body = response.json()
         except Exception as error:
             # Not only ValueError: a hostile body can raise anything (RecursionError on deep
             # nesting), and Musqet may have acted on the request all the same.
             _logger.warning("Musqet %s %s returned a body Odoo can't read: %r", method, path, error)
-            body = None
+            unusable = True
         else:
-            if not isinstance(body, dict) or body.get('error') is not None:
-                # The saleId, if any, helps reconcile it in the Musqet app; the body itself
-                # may hold payment details, so it is logged only at debug level.
+            unusable = not isinstance(body, dict) or body.get('error') is not None
+            if unusable:
+                # A string saleId, if any, helps reconcile it in the Musqet app; the body
+                # itself may hold payment details, so it is logged only at debug level.
+                sale_id = body.get('saleId') if isinstance(body, dict) else None
                 _logger.warning(
-                    "Musqet %s %s returned an unexpected 2xx body (saleId %r, a %s)", method, path,
-                    body.get('saleId') if isinstance(body, dict) else None, type(body).__name__)
+                    "Musqet %s %s returned an unexpected 2xx body (saleId %.100r, a %s)",
+                    method, path, sale_id if isinstance(sale_id, str) else None,
+                    type(body).__name__)
                 _logger.debug("Musqet %s %s unexpected 2xx body: %.500r", method, path, body)
-        # Only an {error} built here may say Musqet refused the request: a 2xx body Odoo can't
-        # read, that isn't an object, or that carries a non-null error of its own (a
-        # gateway's, say), says nothing of whether Musqet acted on it. The body is kept out of
-        # the reply: it may not be Musqet's, and the reply reaches the cashier's browser.
-        if not isinstance(body, dict) or body.get('error') is not None:
+        if unusable:
             details = {'status_code': response.status_code, MUSQET_OUTCOME_UNKNOWN: True}
             return self._musqet_error(
                 _("Received an invalid response from the Musqet terminal service."), **details)

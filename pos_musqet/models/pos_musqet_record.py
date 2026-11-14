@@ -62,7 +62,20 @@ class PosMusqetRecord(models.AbstractModel):
         # Explicit, not left to the read of `state`. Read access is POS managers' only
         # (ir.model.access.csv), within their companies (pos_musqet_security.xml).
         self.check_access('read')
-        self.filtered(lambda record: record._musqet_may_mark_failed()).sudo().write({'state': 'failed'})
+        self.filtered(lambda record: record._musqet_may_mark_failed())._musqet_mark_by_manager('failed')
+
+    def _musqet_mark_by_manager(self, state):
+        """Set these records' ``state`` for the manager action that called this, and log who.
+
+        Written with sudo (managers have no write access, so nothing else can change a record),
+        which leaves the superuser as write_uid: the log line is the record of who did it.
+        """
+        if not self:
+            return
+        self.sudo().write({'state': state})
+        _logger.info(
+            "Musqet %s(s) %s (references %r) marked %s by user #%d", self._musqet_kind, self.ids,
+            self.mapped('reference'), state, self.env.uid)
 
     def _musqet_is_unanswered(self):
         """Whether this record is unanswered and still pending: the reply to its request never

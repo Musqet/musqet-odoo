@@ -181,9 +181,16 @@ class TestMusqetLostSaleReply(TransactionCase):
         # A gateway's page (an unknown outcome) stays out of the reply, which reaches the
         # cashier's browser; Musqet's refusal keeps its body (reply_is_not_found reads it).
         record_sale(self.env, self.method, 'sale-r', state='pending', rail=False)
-        for status_code, has_detail in ((502, False), (404, True)):
-            with self.subTest(status_code=status_code), mute_logger(PROXY_LOGGER):
-                stub = MagicMock(return_value=reply(status_code, {'error': {'code': status_code}}))
+        cases = (
+            (reply(502, {'error': {'code': 502}}), False),
+            (reply(404, {'error': {'code': 404}}), True),
+            # A refusal status, but not Musqet's body (a wrong base URL, a WAF's page).
+            (reply(404, unreadable=True), False),
+            (reply(403, {'message': 'blocked'}), False),
+        )
+        for response, has_detail in cases:
+            with self.subTest(status_code=response.status_code), mute_logger(PROXY_LOGGER):
+                stub = MagicMock(return_value=response)
                 with patch.object(pos_payment_method.requests, 'request', stub):
                     result = self.method.with_user(self.cashier).musqet_get_sale('sale-r')
                 self.assertEqual('detail' in result['error'], has_detail)
@@ -254,6 +261,13 @@ class TestMusqetLostSaleReply(TransactionCase):
         # hide a sale the customer paid.
         self.assertEqual(pending.state, 'pending')
         self.assertEqual(done.state, 'done')
+
+    def test_logs_who_marked_a_sale_failed(self):
+        self._lose()
+        with self.assertLogs(RECORD_LOGGER, 'INFO') as logs:
+            self._sales().with_user(self.manager).action_musqet_mark_failed()
+        self.assertIn('Order-L', logs.output[0])
+        self.assertIn('user #%d' % self.manager.id, logs.output[0])
 
     def test_a_cashier_cannot_mark_a_sale_failed(self):
         self._lose()
