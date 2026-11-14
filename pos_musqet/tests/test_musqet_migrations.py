@@ -175,6 +175,14 @@ class TestMusqetUpgradeCompanies(MusqetPosRecordsCase):
         self.assertFalse(lone.company_id)
         self.assertIn('[%d]' % lone.id, '\n'.join(logs.output))
 
+    def test_logs_an_archived_method_it_cannot_place_too(self):
+        # It may be restored later, and would then start nothing without saying why.
+        archived = create_musqet_method(self, 'MSQ-UPG-ARCH', active=False)
+        clear_company(archived)
+        with self.assertLogs(METHOD_LOGGER, 'WARNING') as logs:
+            self._migrate()
+        self.assertIn('[%d]' % archived.id, '\n'.join(logs.output))
+
     def test_leaves_other_methods_alone(self):
         clear_company(self.plain)
         self._migrate()

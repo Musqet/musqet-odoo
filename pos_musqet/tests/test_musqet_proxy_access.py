@@ -122,6 +122,11 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
         if method.exists():
             self.assertEqual(method.musqet_latest_response, self.BUFFERED)
 
+    def _missing_method(self):
+        """A payment method id no record has."""
+        Method = self.env['pos.payment.method'].with_context(active_test=False)
+        return Method.browse(Method.search([], order='id desc', limit=1).id + 1000)
+
     def _other_company_method(self, serial):
         return create_musqet_method(self, serial, company_id=self.other_company.id)
 
@@ -175,8 +180,7 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
 
     def test_denies_a_missing_method_as_it_denies_another_companys(self):
         # The same AccessDenied, so a refusal says nothing about which ids exist.
-        missing = self.env['pos.payment.method'].browse(
-            self.env['pos.payment.method'].search([], order='id desc', limit=1).id + 1000)
+        missing = self._missing_method()
         self.assertDenied(missing)
 
     def test_a_user_of_both_companies_drives_the_other_only_while_it_is_enabled(self):
@@ -193,8 +197,7 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
                          {'saleId': 's-1', 'status': 'COMPLETE'})
 
     def test_an_internal_call_on_a_missing_method_fails_at_the_check(self):
-        missing = self.env['pos.payment.method'].browse(
-            self.env['pos.payment.method'].search([], order='id desc', limit=1).id + 1000)
+        missing = self._missing_method()
         with self.assertRaises(MissingError):
             missing.sudo()._musqet_check_access()
 

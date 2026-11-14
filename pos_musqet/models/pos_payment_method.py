@@ -45,14 +45,13 @@ MUSQET_WEBHOOK_TOLERANCE = 300
 # staging) but is locked to this domain so an ERP manager can't repoint it at an
 # internal host and exfiltrate the bearer token (SSRF). See _check_musqet_base_url.
 MUSQET_ALLOWED_HOST = 'musqet.tech'
+# The POS session states in which a cashier may start a sale or refund on a method's terminal
+# (MUSQET_PAYING_SESSION_STATES), and may drive it at all (MUSQET_LIVE_SESSION_STATES,
+# _musqet_check_access): a session being closed may still poll or cancel a sale in progress.
+MUSQET_PAYING_SESSION_STATES = ('opening_control', 'opened')
+MUSQET_LIVE_SESSION_STATES = (*MUSQET_PAYING_SESSION_STATES, 'closing_control')
 # Rails a sale may be started on (the API's TerminalCommandMode). "any" lets the terminal
 # prompt the customer for card or Bitcoin.
-# The POS session states in which a cashier may drive a method's terminal (_musqet_check_access):
-# a session being closed may still poll or cancel a sale in progress, but starts no new sale or
-# refund (MUSQET_PAYING_SESSION_STATES).
-MUSQET_LIVE_SESSION_STATES = ('opening_control', 'opened', 'closing_control')
-MUSQET_PAYING_SESSION_STATES = ('opening_control', 'opened')
-
 MUSQET_SALE_MODES = ('any', 'card', 'bitcoin')
 MUSQET_DEFAULT_SALE_MODE = 'any'
 # Upper bounds on the free-text request fields. reference: the API schema's max(255).
@@ -252,6 +251,7 @@ class PosPaymentMethod(models.Model):
         is logged, and starts no sale or refund until a manager sets one. Raw SQL: a write
         through the ORM is refused while a session using the method is open.
         """
+        self.env.flush_all()
         self.env.cr.execute(SQL("""
             UPDATE pos_payment_method method SET company_id = configs.company_id
               FROM (SELECT rel.pos_payment_method_id AS method_id,
@@ -270,7 +270,8 @@ class PosPaymentMethod(models.Model):
         if updated:
             _logger.info("pos_musqet: set the company of Musqet payment method(s) %s from "
                          "their POS configs", updated)
-        missing = self.sudo().search(
+        # Archived ones too: the UPDATE above covers them, and one may be restored later.
+        missing = self.sudo().with_context(active_test=False).search(
             [('use_payment_terminal', '=', MUSQET_TERMINAL), ('company_id', '=', False)])
         if missing:
             _logger.warning(
@@ -632,7 +633,8 @@ class PosPaymentMethod(models.Model):
         must be the company currency, ``reference`` is required, and the remaining fields are
         checked before they are sent. The caller chooses which payment method record this
         runs on, so _musqet_check_access keeps it to a method of the caller's own companies on
-        a POS session that is opening or open.
+        a live POS session, and _musqet_check_terminal_request refuses a new sale on a till
+        being closed.
 
         A sale of the same order already open at Musqet is resumed rather than sent again
         (pos.musqet.sale._musqet_sale_to_resume), so a retry after the POS gave up on a sale,

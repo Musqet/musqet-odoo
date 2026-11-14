@@ -192,6 +192,18 @@ class TestMusqetWebhookRoute(HttpCase):
         # The till gets the reply, not the body.
         self.assertEqual(self._buffered()['amountInCents'], 900)
 
+    def test_pings_every_live_session_of_the_method(self):
+        # A till being closed may still have the sale in progress; a closed one is gone.
+        sessions = {state: open_session(self.env, self.method) for state in (
+            'opening_control', 'opened', 'closing_control', 'closed')}
+        for state, session in sessions.items():
+            session.state = state
+        with patch.object(type(self.env['pos.config']), '_notify', autospec=True) as notify:
+            self._post(self._body())
+        pinged = {call.args[0].id for call in notify.mock_calls}
+        self.assertEqual(pinged, {sessions[state].config_id.id for state in (
+            'opening_control', 'opened', 'closing_control')})
+
     def test_the_body_alone_settles_nothing(self):
         # Musqet still reports the sale in progress: the body's COMPLETE reaches neither the
         # record nor the till.
