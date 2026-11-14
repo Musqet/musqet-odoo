@@ -9,6 +9,7 @@ import time
 import urllib.parse
 
 import requests
+from urllib3.exceptions import NewConnectionError
 from urllib3.util import parse_url
 
 from odoo import fields, models, api, _
@@ -46,6 +47,19 @@ MUSQET_DEFAULT_SALE_MODE = 'any'
 # language: a short locale code ("en", "pt"); the API checks it against its own list.
 MUSQET_REFERENCE_MAX_LENGTH = 255
 MUSQET_LANGUAGE_MAX_LENGTH = 16
+# The request errors raised before anything reached the server: the connection was never
+# made (or never secured), or the request was never built. Any other request error may come
+# after the server got the request (_musqet_request_may_have_arrived).
+MUSQET_NOT_SENT_ERRORS = (
+    requests.exceptions.ConnectTimeout,
+    requests.exceptions.SSLError,
+    requests.exceptions.ProxyError,
+    requests.exceptions.InvalidURL,
+    requests.exceptions.InvalidSchema,
+    requests.exceptions.MissingSchema,
+    requests.exceptions.InvalidHeader,
+    requests.exceptions.InvalidJSONError,
+)
 
 
 class PosPaymentMethod(models.Model):
@@ -380,12 +394,32 @@ class PosPaymentMethod(models.Model):
             return None, None, self._musqet_error(_("No Musqet API key is configured."))
         return base_url, api_key, None
 
+    @api.model
+    def _musqet_request_may_have_arrived(self, error):
+        """Whether the request that raised ``error`` (a requests error) may have reached Musqet.
+
+        No for an error raised before the connection was made (MUSQET_NOT_SENT_ERRORS, or a
+        connection refused or a host not found, which requests wraps as a ConnectionError);
+        yes for any other, a read timeout or a connection dropped mid-request, say.
+        """
+        if isinstance(error, MUSQET_NOT_SENT_ERRORS):
+            return False
+        if isinstance(error, requests.exceptions.ConnectionError) and error.args:
+            # requests wraps urllib3's MaxRetryError, whose reason is the error itself.
+            reason = getattr(error.args[0], 'reason', error.args[0])
+            return not isinstance(reason, NewConnectionError)
+        return True
+
     def _musqet_request(self, method, path, payload=None):
         """Make one server-side call to the Musqet API.
 
         Returns the parsed JSON body on success, or a clean ``{'error': {...}}`` dict on
         a configuration problem, a transport failure or a non-2xx response: never raises
         the raw error, and never puts the API key in a log line.
+
+        An error after which the request may still have reached Musqet and been acted on
+        carries ``outcome_unknown: True`` (see reply_outcome_unknown): a transport failure
+        after the connection was made, a 5xx, or a 2xx body that isn't JSON.
         """
         self.ensure_one()
         self._musqet_check_access()
@@ -411,8 +445,10 @@ class PosPaymentMethod(models.Model):
         except requests.exceptions.RequestException as error:
             # str(error) may include the URL but never the headers, so no key leaks.
             _logger.warning("Musqet %s %s failed: %s", method, path, error)
-            return self._musqet_error(
-                _("Could not reach the Musqet terminal service."), exception=str(error))
+            details = {'exception': str(error)}
+            if self._musqet_request_may_have_arrived(error):
+                details['outcome_unknown'] = True
+            return self._musqet_error(_("Could not reach the Musqet terminal service."), **details)
         if response.status_code // 100 != 2:
             _logger.warning("Musqet %s %s returned HTTP %s", method, path, response.status_code)
             # Prefer the structured JSON error body; fall back to raw text as a detail.
@@ -420,16 +456,19 @@ class PosPaymentMethod(models.Model):
                 detail = response.json()
             except ValueError:
                 detail = response.text
-            return self._musqet_error(
-                _("The Musqet terminal service returned an error."),
-                status_code=response.status_code, detail=detail)
+            details = {'status_code': response.status_code, 'detail': detail}
+            # A server error (or a gateway timing out) may come after Musqet acted on the
+            # request; a 4xx is Musqet refusing it.
+            if response.status_code >= 500:
+                details['outcome_unknown'] = True
+            return self._musqet_error(_("The Musqet terminal service returned an error."), **details)
         try:
             return response.json()
         except ValueError:
             _logger.warning("Musqet %s %s returned a non-JSON body", method, path)
             return self._musqet_error(
                 _("Received an invalid response from the Musqet terminal service."),
-                status_code=response.status_code)
+                status_code=response.status_code, outcome_unknown=True)
 
     def musqet_create_sale(self, payload, line_sale_ids=None):
         """POST /terminal/sales — start a sale on the bound terminal.
@@ -453,6 +492,11 @@ class PosPaymentMethod(models.Model):
         the saleIds already on the order's payment lines, which are never resumed onto
         another line. The reply is then ``{saleId, reference, resumed: true}``, and the POS
         polls that sale as it would a new one (``resumed`` is for logs and support only).
+
+        A sale whose reply never reached Odoo (a read timeout, a dropped connection, a 5xx)
+        may have been paid, and Musqet's API can't look it up by reference, so it is recorded
+        unanswered (pos.musqet.record._musqet_record_sent), and every later sale of the order
+        is refused until a manager who has checked it in the Musqet app marks it failed.
         """
         error = self._musqet_check_terminal_request(payload)
         if error:
@@ -481,8 +525,7 @@ class PosPaymentMethod(models.Model):
             return {'saleId': resumed.sale_id, 'reference': reference, 'resumed': True}
         response = self._musqet_send_terminal_command(
             payload, kind='sale', mode=mode, amount=amount, currency=currency, reference=reference)
-        self._musqet_record_sale(response, amount=amount, currency=currency, reference=reference)
-        return response
+        return self._musqet_record_sale(response, amount=amount, currency=currency, reference=reference)
 
     def _musqet_send_terminal_command(self, payload, *, kind, mode, amount, currency, reference):
         """POST a sale or refund (``kind``) to this method's terminal; return Musqet's reply.
@@ -513,20 +556,31 @@ class PosPaymentMethod(models.Model):
         return self._musqet_request('POST', '/terminal/sales', payload=outgoing)
 
     def _musqet_record_sale(self, response, *, amount, currency, reference):
-        """Record a sale Musqet accepted, so its settle can be checked against Musqet's word.
+        """Record a sale sent to Musqet, so its settle can be checked against Musqet's word;
+        return the reply for the POS.
 
         Pending until Musqet says otherwise: the create reply is normally PENDING, and a
         status read settles it (_musqet_sync_records), polled or triggered by a signed webhook.
         If saving fails (logged), the sale can't be refunded here and its synced payment is Not
-        verified.
+        verified. A sale whose reply was lost is recorded unanswered
+        (pos.musqet.record._musqet_record_sent), and the POS told so.
         """
-        self.env['pos.musqet.sale']._musqet_record_accepted(response, {
+        return self._musqet_reply_to_sent('pos.musqet.sale', response, {
             'company_id': self._musqet_company().id,
             'payment_method_id': self.id,
             'reference': reference,
             'amount_minor': amount,
             'currency': currency,
         }, "reference %r, %s minor units" % (reference, amount))
+
+    def _musqet_reply_to_sent(self, model, response, vals, details):
+        """Record the request sent to Musqet in ``model`` (_musqet_record_sent); return the reply
+        for the POS: ``response``, or an ``{error}`` saying why the order is now blocked if the
+        outcome is unknown."""
+        Records = self.env[model]
+        if Records._musqet_record_sent(response, vals, details):
+            return self._musqet_error(Records._musqet_unanswered_message())
+        return response
 
     @api.model
     def _musqet_valid_reference(self, reference):
@@ -618,12 +672,14 @@ class PosPaymentMethod(models.Model):
         return original, None
 
     def _musqet_record_refund(self, response, *, original, amount, reference):
-        """Record a refund Musqet accepted, so the next refund of the sale counts it.
+        """Record a refund sent to Musqet, so the next refund of the sale counts it; return the
+        reply for the POS.
 
         If saving fails (logged), the refund's synced payment counts only if the POS writes
-        its musqet_refund_of link (see pos.musqet.refund._musqet_unrecorded_synced).
+        its musqet_refund_of link (see pos.musqet.refund._musqet_unrecorded_synced). A refund
+        whose reply was lost is recorded unanswered, and the POS told so.
         """
-        self.env['pos.musqet.refund']._musqet_record_accepted(response, {
+        return self._musqet_reply_to_sent('pos.musqet.refund', response, {
             'company_id': original.company_id.id,
             'payment_method_id': self.id,
             'original_sale_id': original.sale_id,
@@ -661,12 +717,15 @@ class PosPaymentMethod(models.Model):
         reference, so a refund order carries at most one Musqet refund of a given sale. The cap
         and the duplicate check are pos.musqet.refund._musqet_refusal_message.
 
-        Not covered: a refund Musqet accepted but whose response never reached Odoo (a
-        timeout), or whose record Odoo failed to save. Neither has a record, and until its
+        A refund whose reply never reached Odoo (a read timeout, a dropped connection, a 5xx)
+        may have gone through, and Musqet's API can't look it up by reference, so it is
+        recorded unanswered (pos.musqet.record._musqet_record_sent): it counts against the cap
+        and refuses a retry of the same refund order until a manager who has checked it in the
+        Musqet app marks it failed.
+
+        Not covered: a refund whose record Odoo failed to save. It has no record, and until its
         refund order syncs with a musqet_refund_of link a retry of the same order is not
-        stopped here. Closing the first needs the abandoned-payment handling (look the
-        refund up at Musqet by reference before sending another); the second is logged for
-        reconciliation.
+        stopped here. It is logged for reconciliation.
         """
         error = self._musqet_check_terminal_request(payload)
         if error:
@@ -707,8 +766,8 @@ class PosPaymentMethod(models.Model):
         response = self._musqet_send_terminal_command(
             payload, kind='refund', mode='card', amount=amount, currency=currency,
             reference=reference)
-        self._musqet_record_refund(response, original=original, amount=amount, reference=reference)
-        return response
+        return self._musqet_record_refund(
+            response, original=original, amount=amount, reference=reference)
 
     def musqet_get_sale(self, sale_id):
         """GET /terminal/sales/:id — poll a sale's status.

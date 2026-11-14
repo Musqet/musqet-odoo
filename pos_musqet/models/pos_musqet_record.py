@@ -9,6 +9,7 @@ from .musqet_common import (
     MUSQET_FAILURE_STATUSES,
     MUSQET_MAX_MINOR_AMOUNT,
     MUSQET_SUCCESS_STATUS,
+    reply_outcome_unknown,
     sale_key_domain,
 )
 
@@ -21,6 +22,12 @@ class PosMusqetRecord(models.AbstractModel):
     Each record is one Musqet saleId taken on one payment method, created only by the
     server (sudo) and settled only from Musqet's own replies. pos.musqet.sale and
     pos.musqet.refund add what their kind needs.
+
+    A record with no saleId is unanswered: a request whose reply never reached Odoo, so
+    Musqet may have accepted it (_musqet_record_sent). Nothing can read it from Musqet (the
+    API has no lookup by reference), so it stays pending, blocking its order's next request
+    and counting as a pending one would, until a POS manager who has checked it in the
+    Musqet app marks it failed (action_musqet_mark_failed).
     """
     _name = 'pos.musqet.record'
     _description = 'Musqet Sale or Refund Record'
@@ -31,12 +38,38 @@ class PosMusqetRecord(models.AbstractModel):
     company_id = fields.Many2one('res.company', required=True, readonly=True, index=True)
     payment_method_id = fields.Many2one(
         'pos.payment.method', required=True, readonly=True, ondelete='restrict')
-    sale_id = fields.Char(required=True, readonly=True, index=True, help="The Musqet saleId.")
+    sale_id = fields.Char(
+        readonly=True, index=True,
+        help="The Musqet saleId. Empty if Musqet's reply to the request never reached Odoo.")
     reference = fields.Char(readonly=True, help="The order reference sent to Musqet.")
     amount_minor = fields.Integer(string="Amount (minor units)", required=True, readonly=True)
     state = fields.Selection(
         [('pending', "Pending"), ('done', "Done"), ('failed', "Failed")],
         required=True, default='pending', readonly=True)
+
+    def action_musqet_mark_failed(self):
+        """Mark these records failed, for a POS manager who has checked them in the Musqet app.
+
+        A pending record keeps counting (and an unanswered one keeps blocking its order) until
+        Musqet reports how it ended. If that can never happen (Musqet doesn't know the saleId,
+        the method has lost its Musqet configuration, or the reply to the request was lost),
+        this is the way out. Only the records _musqet_may_mark_failed allows move.
+
+        It can't be undone: a failed record is never re-read.
+        """
+        # Explicit, not left to the read of `state`. Read access is POS managers' only
+        # (ir.model.access.csv), within their companies (pos_musqet_security.xml).
+        self.check_access('read')
+        self.filtered(lambda record: record._musqet_may_mark_failed()).sudo().write({'state': 'failed'})
+
+    def _musqet_may_mark_failed(self):
+        """Whether a POS manager may mark this record failed: it is pending."""
+        self.ensure_one()
+        return self.state == 'pending'
+
+    def _musqet_unanswered_message(self):
+        """The message refusing a request of an order with an unanswered record of this kind."""
+        raise NotImplementedError
 
     def _musqet_apply_response(self, response):
         """Settle the pending records as Musqet's ``response`` (its own word about them) says.
@@ -76,25 +109,41 @@ class PosMusqetRecord(models.AbstractModel):
         raise NotImplementedError
 
     @api.model
-    def _musqet_record_accepted(self, response, vals, details):
-        """Record a sale or refund Musqet accepted (its create ``response``), with ``vals``.
+    def _musqet_record_sent(self, response, vals, details):
+        """Record a sale or refund request sent to Musqet, as its create ``response`` says.
 
-        An {error} response carries no saleId, so nothing is recorded for it. Runs in a
-        savepoint, and never raises: Musqet already has the command, so the POS must still
-        get the saleId to poll it, and failing the request would leave the terminal armed
-        with a command Odoo knows nothing about. A failure is logged with ``details``, enough
-        to reconcile it by hand.
+        Returns whether the outcome is unknown (reply_outcome_unknown), else False.
+
+        A response with a saleId is recorded under it, with ``vals``. A response that leaves
+        unknown whether Musqet accepted the request is recorded unanswered: with ``vals`` but
+        no saleId, pending until a manager marks it failed. Musqet's refusal records nothing.
+
+        Runs in a savepoint, and never raises: Musqet may already have the command, so the POS
+        must still get the saleId to poll it, and failing the request would leave the terminal
+        armed with a command Odoo knows nothing about. A failure is logged with ``details``,
+        enough to reconcile it by hand.
         """
         sale_id = response.get('saleId') if isinstance(response, dict) else None
-        if not sale_id:
-            return
+        unknown = not sale_id and reply_outcome_unknown(response)
+        if not sale_id and not unknown:
+            return False
         try:
             with self.env.cr.savepoint():
-                self.sudo().create({'sale_id': str(sale_id), **vals})._musqet_apply_response(response)
+                if sale_id:
+                    self.sudo().create({'sale_id': str(sale_id), **vals})._musqet_apply_response(response)
+                else:
+                    self.sudo().create(vals)
         except Exception:
             _logger.exception(
-                "Musqet accepted %s %r (%s) but Odoo could not record it",
+                "Odoo could not record the Musqet %s %r (%s), which Musqet accepted or may have",
                 self._musqet_kind, sale_id, details)
+        else:
+            if unknown:
+                _logger.warning(
+                    "Musqet's reply to a %s request (%s) was lost or unreadable: recorded it "
+                    "unanswered, blocking the order until a manager checks it in the Musqet app",
+                    self._musqet_kind, details)
+        return unknown
 
     @api.model
     def _musqet_lock(self, condition):

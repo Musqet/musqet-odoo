@@ -20,8 +20,9 @@ class PosMusqetRefund(models.Model):
     cumulative limit (Musqet/musqet#2094), so the over-refund cap and the duplicate check
     in ``pos.payment.method.musqet_create_refund`` read these records. They are created
     only by the server (sudo), and exist as soon as Musqet accepts the refund, before the
-    refund order reaches Odoo (except in the cases the "Not covered" paragraph of
-    musqet_create_refund names). A POS manager can mark a pending one failed
+    refund order reaches Odoo (except in the case the "Not covered" paragraph of
+    musqet_create_refund names), or as soon as its reply is lost (unanswered, with no
+    saleId). A POS manager can mark a pending one failed
     (action_musqet_mark_failed); nothing else changes them from the browser. The upgrade
     to 19.0.1.2.0 also created done records for the refunds synced before it
     (_musqet_record_synced_refunds).
@@ -44,20 +45,16 @@ class PosMusqetRefund(models.Model):
     _unique_sale = models.Constraint(
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet refund is already recorded.')
 
-    def action_musqet_mark_failed(self):
-        """Mark pending refunds failed, for a POS manager who has checked them in Musqet.
+    # action_musqet_mark_failed (pos.musqet.record) moves any pending refund. A failed refund
+    # is never re-read, and its synced payment doesn't count either, so the amount leaves the
+    # cap for good.
 
-        A pending refund keeps counting against its sale until Musqet reports how it ended.
-        If that read can never succeed (Musqet doesn't know the saleId, or the method has
-        lost its Musqet configuration), this is the way out. Only pending refunds move.
-
-        It can't be undone: a failed refund is never re-read, and its synced payment doesn't
-        count either, so the amount leaves the cap for good.
-        """
-        # Explicit, not left to the read of `state`. Read access is POS managers' only
-        # (ir.model.access.csv), within their companies (pos_musqet_security.xml).
-        self.check_access('read')
-        self.filtered(lambda refund: refund.state == 'pending').sudo().write({'state': 'failed'})
+    def _musqet_unanswered_message(self):
+        return _(
+            "Odoo did not get a clear answer from Musqet to a refund request for this order, so "
+            "it can't tell whether the card was refunded. A manager must check it in the Musqet "
+            "app and clear it under Musqet Refunds before this order can send another Musqet "
+            "refund.")
 
     def _musqet_done_vals(self, response):
         """A refund settles at the amount Musqet reports refunded.
@@ -86,6 +83,8 @@ class PosMusqetRefund(models.Model):
         pending = self.sudo().search(
             self._musqet_sale_refunds_domain(company, sale_id) + [
                 ('state', '=', 'pending'),
+                # An unanswered refund has no saleId to read.
+                ('sale_id', '!=', False),
                 # A refund whose method is no longer a Musqet one can't be re-read, so it
                 # mustn't use up the limit.
                 ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
@@ -108,6 +107,10 @@ class PosMusqetRefund(models.Model):
         unrecorded_payments = all_recorded._musqet_unrecorded_synced(original)
         # A failed refund moved no money, so it neither counts nor blocks a retry.
         counting = all_recorded.filtered(lambda refund: refund.state != 'failed')
+        # A refund of this order whose reply was lost may have gone through: refuse before
+        # the cap (which counts it), so the cashier is told why.
+        if any(not refund.sale_id and refund.reference == reference for refund in counting):
+            return self._musqet_unanswered_message()
         # Cumulative cap: the Musqet API enforces no limit across refunds (Musqet/musqet#2094),
         # so cap against what is left after every refund already sent for this sale.
         captured = original.amount_minor
@@ -152,7 +155,9 @@ class PosMusqetRefund(models.Model):
             note(refund.reference, refund.state)
         if self:
             for payment in self.env['pos.payment'].sudo().search([
-                ('transaction_id', 'in', self.mapped('sale_id')),
+                # Not an unanswered refund's empty saleId, which would match every payment
+                # with none.
+                ('transaction_id', 'in', [sale_id for sale_id in self.mapped('sale_id') if sale_id]),
                 ('payment_method_id', 'in', self.payment_method_id.ids),
                 ('company_id', '=', original.company_id.id),
             ]):

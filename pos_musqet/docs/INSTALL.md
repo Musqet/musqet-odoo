@@ -91,7 +91,9 @@ your Odoo addons path.
    synced; a sale started before it but synced after it has no record, so Odoo can't
    refund it and marks its payment *Not verified* (see §8). The upgrade to 19.0.1.4.0
    adds a column to the Musqet Sales records (*Not Found at Musqet*); run it before the
-   new code takes a payment, or every Musqet sale fails until you do.
+   new code takes a payment, or every Musqet sale fails until you do. The upgrade to
+   19.0.1.5.0 lets a sale or refund record have no Musqet saleId (see *Lost replies* in
+   §4); until it runs, Odoo can't record a request whose reply was lost.
 
 ---
 
@@ -245,6 +247,18 @@ and make your **company currency match it** (and keep each POS on the company cu
    so a retry never charges the customer twice, even after the POS page was reloaded.
    While a sale of the order for another amount, or on another terminal, is still in
    progress, a new one is refused until it ends.
+
+   **Lost replies.** If Musqet's reply to a payment or refund request never reaches Odoo
+   (the connection drops or times out, or Musqet answers with a server error), the
+   terminal may have taken it all the same, and Musqet can't look a request up by order
+   reference. So Odoo records it with no Musqet saleId, tells the cashier, and refuses
+   another Musqet payment of that order (or another refund in that refund order) until a
+   manager clears it. A lost refund also counts against the original sale until then. To
+   clear one, find it under **Musqet Sales** or **Musqet Refunds** (filter *Reply lost*)
+   and check the Musqet app for a request with its reference:
+   - nothing taken: open it and click **Mark as Failed**;
+   - a payment taken: refund it in the Musqet app, then mark it failed;
+   - a refund made: leave it *Pending*, so it keeps counting against the sale.
 5. **Refund test:** from the order, create a Refund and pay it with Musqet. A
    card-settled original refunds back to the card through the terminal. A
    Lightning-settled original shows a *manual refund* message and makes **no** API
@@ -252,16 +266,16 @@ and make your **company currency match it** (and keep each POS on the company cu
    reported complete, and caps the refund at the amount Musqet captured, on the rail
    Musqet reported, whatever the original payment line says.
 
-   Odoo records every refund Musqet accepts, straight away (except in the two cases
+   Odoo records every refund Musqet accepts, straight away (except in the case
    below). So the refunds of one sale can't add up to more than the sale, even before
    the refund orders sync, and a refund order sent twice by mistake is refused. A refund
    that fails at the terminal stops counting once Musqet reports it as failed. One refund
    order takes one Musqet refund of a given sale: to refund more of that sale later, make
    a new refund order.
 
-   Two cases Odoo can't record: the connection drops after Musqet accepted a refund, or
-   Odoo fails to save the record (the server log then names the refund). If a refund
-   fails with a connection error, check the Musqet app before trying again.
+   A refund whose reply was lost is recorded with no saleId (see *Lost replies* above).
+   The case Odoo can't record: it fails to save the record (the server log then names the
+   refund).
 
    The records are under **Point of Sale → Orders → Musqet Refunds** (managers only). A
    refund stuck as *Pending* that Musqet shows did not go through can be marked

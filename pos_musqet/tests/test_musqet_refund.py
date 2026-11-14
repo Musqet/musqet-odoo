@@ -3,6 +3,8 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from odoo.addons.pos_musqet.models import pos_musqet_refund, pos_payment_method
 from odoo.addons.pos_musqet.models.pos_payment_method import MUSQET_REFERENCE_MAX_LENGTH
 from odoo.exceptions import AccessDenied, AccessError
@@ -98,11 +100,13 @@ class TestMusqetCreateRefund(TransactionCase):
         return refund
 
     def _call_refund(self, payload, original, original_payment_id=123, prior_refunds=None,
-                     sale_id='refund-1', post_status=200, get_status='PENDING', get_http=200):
+                     sale_id='refund-1', post_status=200, get_status='PENDING', get_http=200,
+                     post_error=None):
         """Run musqet_create_refund as the cashier with the Musqet API stubbed.
 
-        The create (POST) returns ``sale_id`` with HTTP ``post_status``; a status read (GET)
-        of an earlier recorded refund returns ``get_status`` with HTTP ``get_http``.
+        The create (POST) returns ``sale_id`` with HTTP ``post_status``, or raises
+        ``post_error``; a status read (GET) of an earlier recorded refund returns
+        ``get_status`` with HTTP ``get_http``.
         """
         # No default currency: an omitted one means the company currency, so most tests take
         # that path. Tests that send a currency do so deliberately.
@@ -123,6 +127,8 @@ class TestMusqetCreateRefund(TransactionCase):
             else:
                 # Anything still unwritten now could fail after the refund is sent.
                 self.dirty_at_post = dirty_field_names(self.env)
+                if post_error:
+                    raise post_error
                 response.status_code = post_status
                 response.json.return_value = {'saleId': sale_id, 'status': 'PENDING'}
             return response
@@ -456,6 +462,53 @@ class TestMusqetCreateRefund(TransactionCase):
         self.assertIn('refund-1', logs.output[0])
         self.assertIn('REFUND-LOST', logs.output[0])
         self.assertIn('500', logs.output[0])
+
+    def _lose_refund(self, original, amount, reference):
+        """Send a refund whose reply times out."""
+        with mute_logger('odoo.addons.pos_musqet.models.pos_payment_method',
+                         'odoo.addons.pos_musqet.models.pos_musqet_record'):
+            return self._call_refund(
+                {'amountInCents': amount, 'reference': reference}, original,
+                post_error=requests.exceptions.ReadTimeout('timed out'))[0]
+
+    def test_records_a_refund_whose_reply_was_lost(self):
+        result = self._lose_refund(self._stub_original(amount=10.0), 600, 'REFUND-A')
+        self.assertIn('did not get a clear answer from Musqet', result['error']['message'])
+        refund = self._recorded_refunds()
+        self.assertEqual(len(refund), 1)
+        self.assertFalse(refund.sale_id)
+        self.assertEqual(refund.state, 'pending')
+        self.assertEqual(refund.reference, 'REFUND-A')
+        self.assertEqual(refund.amount_minor, 600)
+
+    def test_an_unanswered_refund_counts_and_refuses_its_refund_order(self):
+        original = self._stub_original(amount=10.0)
+        self._lose_refund(original, 600, 'REFUND-A')
+        # Its refund order is refused whatever the amount, and told why.
+        result, mock_request = self._call_refund(
+            {'amountInCents': 100, 'reference': 'REFUND-A'}, original, sale_id='refund-a2')
+        self.assertIn('did not get a clear answer from Musqet', result['error']['message'])
+        self.assertFalse(self._posts(mock_request))
+        # It counts against the sale: another refund order may take only what is left.
+        result, mock_request = self._call_refund(
+            {'amountInCents': 600, 'reference': 'REFUND-B'}, original, sale_id='refund-b')
+        self.assertIn('exceeds', result['error']['message'])
+        result, mock_request = self._call_refund(
+            {'amountInCents': 400, 'reference': 'REFUND-B'}, original, sale_id='refund-b')
+        self.assertNotIn('error', result)
+        # It has no saleId to read from Musqet.
+        self.assertFalse(self._gets(mock_request))
+
+    def test_a_manager_clears_an_unanswered_refund(self):
+        original = self._stub_original(amount=10.0)
+        self._lose_refund(original, 600, 'REFUND-A')
+        manager = make_pos_user(self.env, 'musqet_manager_lost_refund',
+                                group='point_of_sale.group_pos_manager')
+        self._recorded_refunds().with_user(manager).action_musqet_mark_failed()
+        result, mock_request = self._call_refund(
+            {'amountInCents': 1000, 'reference': 'REFUND-A'}, original, sale_id='refund-a2')
+        self.assertNotIn('error', result)
+        self.assertEqual(len(self._posts(mock_request)), 1)
 
     def test_rereads_a_pending_refund_and_drops_a_failed_one(self):
         # The first refund failed at the terminal: once Musqet says so it neither counts nor

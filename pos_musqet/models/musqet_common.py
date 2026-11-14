@@ -89,11 +89,31 @@ def reply_is_not_found(reply):
     return isinstance(body, dict) and body.get('code') == 404
 
 
+def reply_outcome_unknown(reply):
+    """Whether ``reply`` (a proxy result for a sale or refund request) leaves unknown whether
+    Musqet accepted the request.
+
+    True for a reply that names no saleId and is not an ``{error}`` saying Musqet refused the
+    request or never got it: the request may have reached Musqet while the reply was lost (a
+    read timeout, a dropped connection, a 5xx, a body Odoo can't read). _musqet_request marks
+    those errors ``outcome_unknown``.
+    """
+    if not isinstance(reply, dict):
+        return True
+    error = reply.get('error')
+    if error is not None:
+        return isinstance(error, dict) and error.get('outcome_unknown') is True
+    return not reply.get('saleId')
+
+
 def sale_key_domain(sale_field, sale_ids, methods):
     """The domain of the rows with one of ``sale_ids`` in ``sale_field``, on one of ``methods``.
 
     A Musqet sale or refund is keyed on (method, saleId): ``sale_field`` is ``sale_id`` on a
     sale or refund record and ``transaction_id`` on a payment. This domain may also match a
-    listed saleId on another listed method, so callers still compare the key.
+    listed saleId on another listed method, so callers still compare the key. An empty saleId
+    (a record of a request whose reply was lost) is left out: it names no sale, and in a
+    domain it would match every row with none.
     """
-    return [(sale_field, 'in', list(sale_ids)), ('payment_method_id', 'in', methods.ids)]
+    return [(sale_field, 'in', [sale_id for sale_id in sale_ids if sale_id]),
+            ('payment_method_id', 'in', methods.ids)]
