@@ -431,7 +431,7 @@ class PosPaymentMethod(models.Model):
                 _("Received an invalid response from the Musqet terminal service."),
                 status_code=response.status_code)
 
-    def musqet_create_sale(self, payload, settled_sale_ids=None):
+    def musqet_create_sale(self, payload, line_sale_ids=None):
         """POST /terminal/sales — start a sale on the bound terminal.
 
         ``payload`` is built by the POS (§4.1: amountInCents, mode, shouldPrint, language,
@@ -449,9 +449,10 @@ class PosPaymentMethod(models.Model):
 
         A sale of the same order already open at Musqet is resumed rather than sent again
         (pos.musqet.sale._musqet_sale_to_resume), so a retry after the POS gave up on a sale,
-        or lost it to a page refresh, can't charge the customer twice. ``settled_sale_ids``
-        are the saleIds already on the order's payment lines, which are never resumed. The
-        reply is then ``{saleId, reference, resumed: true}``, and the POS polls that sale.
+        or lost it to a page refresh, can't charge the customer twice. ``line_sale_ids`` are
+        the saleIds already on the order's payment lines, which are never resumed onto
+        another line. The reply is then ``{saleId, reference, resumed: true}``, and the POS
+        polls that sale.
         """
         error = self._musqet_check_terminal_request(payload)
         if error:
@@ -473,7 +474,7 @@ class PosPaymentMethod(models.Model):
             return self._musqet_error(_("The sale reference is invalid."))
         resumed, refusal = self.env['pos.musqet.sale']._musqet_sale_to_resume(
             self, reference=reference, amount=amount, currency=currency,
-            settled_sale_ids=settled_sale_ids)
+            line_sale_ids=line_sale_ids)
         if refusal:
             return self._musqet_error(refusal)
         if resumed:

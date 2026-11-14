@@ -147,7 +147,7 @@ export class PaymentMusqet extends PaymentInterface {
                 : await this._call("musqet_create_sale", [
                       [this.payment_method_id.id],
                       payload,
-                      this._settledSaleIds(order, line),
+                      this._lineSaleIds(order, line),
                   ]);
             if (!response || response.error) {
                 this._showError(this._errorMessage(response));
@@ -252,17 +252,23 @@ export class PaymentMusqet extends PaymentInterface {
         // Fire-and-forget: the POS is going away, so nothing can wait for the answer. If the
         // cancel fails and the customer pays anyway, a retry of the order resumes that sale
         // rather than charging again (musqet_create_sale).
+        // A create still in flight is cancelled once it returns its saleId.
         for (const state of Object.values(this.pollState)) {
             state.cancelled = true;
-            if (state.saleId && !state.settled) {
-                this._call("musqet_cancel_sale", [[this.payment_method_id.id], state.saleId]);
+            if (state.settled) {
+                continue;
+            }
+            if (state.saleId) {
+                this._cancelSale(state.saleId);
+            } else {
+                state.created.then((saleId) => saleId && this._cancelSale(saleId));
             }
         }
     }
 
     /**
      * Cancel the line's armed sale and find out how it ended, once: a cancel and a give-up
-     * running at the same time share the one round-trip. Resolves to ``{ ended, sale }``
+     * running at the same time share the one round-trip. Resolves to ``{ ended, answered, sale }``
      * (see _endRemoteSale).
      */
     _endSale(state) {
@@ -276,31 +282,42 @@ export class PaymentMusqet extends PaymentInterface {
 
     /**
      * Cancel sale ``saleId`` on the terminal, and read its status if the cancel failed.
-     * Resolves to ``{ ended, sale }``: ``ended`` once Musqet says the sale can no longer be
-     * paid (it accepted the cancel, or reports a failure status); ``sale`` is the status
-     * read, if one was made and succeeded. A sale that completed first has not ended: the
+     * Resolves to ``{ ended, answered, sale }``: ``ended`` once Musqet says the sale can no
+     * longer be paid (it accepted the cancel, or reports a failure status); ``answered`` if
+     * Musqet answered either call (so contact is back); ``sale`` is the status read, if one
+     * was made and succeeded. A sale that completed first has not ended: the
      * customer paid, and the line must settle with it.
      */
     async _endRemoteSale(saleId) {
-        const methodIds = [this.payment_method_id.id];
-        const cancel = await this._call("musqet_cancel_sale", [methodIds, saleId]);
-        if (cancel && !cancel.error && FAILURE_STATUSES.includes(cancel.status)) {
-            return { ended: true, sale: null };
+        const cancel = await this._cancelSale(saleId);
+        const answered = Boolean(cancel && !cancel.error);
+        if (answered && FAILURE_STATUSES.includes(cancel.status)) {
+            return { ended: true, answered, sale: null };
         }
         // Musqet refuses to cancel a sale that already ended (409 CONFLICT), and a failed
         // call says nothing either way: read where the sale stands.
-        const sale = await this._call("musqet_get_sale", [methodIds, saleId]);
+        const sale = await this._readSale(saleId);
         if (!sale || sale.error) {
-            return { ended: false, sale: null };
+            return { ended: false, answered, sale: null };
         }
-        return { ended: FAILURE_STATUSES.includes(sale.status), sale };
+        return { ended: FAILURE_STATUSES.includes(sale.status), answered: true, sale };
+    }
+
+    /** Read sale ``saleId``'s status from Musqet, through the server (musqet_get_sale). */
+    _readSale(saleId) {
+        return this._call("musqet_get_sale", [[this.payment_method_id.id], saleId]);
+    }
+
+    /** Ask Musqet to cancel sale ``saleId``, through the server (musqet_cancel_sale). */
+    _cancelSale(saleId) {
+        return this._call("musqet_cancel_sale", [[this.payment_method_id.id], saleId]);
     }
 
     /**
      * The saleIds already on ``order``'s payment lines other than ``line``. Sent with a new
-     * sale so the server never resumes one of them for this line (musqet_create_sale).
+     * sale so the server never resumes one of them onto this line (musqet_create_sale).
      */
-    _settledSaleIds(order, line) {
+    _lineSaleIds(order, line) {
         return order.payment_ids
             .filter((other) => other !== line && other.transaction_id)
             .map((other) => other.transaction_id);
@@ -420,10 +437,7 @@ export class PaymentMusqet extends PaymentInterface {
             }
             // Poll first, then sleep, so a sale the terminal resolves immediately settles
             // without waiting a full interval up front.
-            const sale = await this._call("musqet_get_sale", [
-                [this.payment_method_id.id],
-                saleId,
-            ]);
+            const sale = await this._readSale(saleId);
             if (state.settled) {
                 // A webhook settled this line while the poll was in flight — nothing to do.
                 return;
@@ -455,6 +469,15 @@ export class PaymentMusqet extends PaymentInterface {
     }
 
     /**
+     * Start a new wait on the line's sale: the give-up counters start again, so the poll
+     * loop doesn't cancel again straight after the cashier was told to wait.
+     */
+    _restartWait(state) {
+        state.waitStart = Date.now();
+        state.connectionFailures = 0;
+    }
+
+    /**
      * Stop waiting on the line's sale, out of time (``timedOut``) or after losing contact,
      * and return whether the line was settled (else the poll loop carries on).
      *
@@ -465,20 +488,11 @@ export class PaymentMusqet extends PaymentInterface {
      * (a new wait, so the loop doesn't cancel again at once), as a refused cashier cancel
      * does; Musqet times the sale out in the end. Except when contact was lost and the status
      * read failed as well: the till can't wait on a server it can't reach, so it releases the
-     * line, warning that the sale may still be live. A read that succeeds shows contact is
-     * back, and the till keeps waiting.
+     * line, warning that the sale may still be live. An answer from Musqet to the cancel or
+     * the read shows contact is back, and the till keeps waiting.
      */
-    /**
-     * Start a new wait on the line's sale: the give-up counters start again, so the poll
-     * loop doesn't cancel again straight after the cashier was told to wait.
-     */
-    _restartWait(state) {
-        state.waitStart = Date.now();
-        state.connectionFailures = 0;
-    }
-
     async _giveUpSale(line, state, timedOut) {
-        const { ended, sale } = await this._endSale(state);
+        const { ended, answered, sale } = await this._endSale(state);
         if (state.cancelRequested || state.cancelled || state.settled) {
             // The cashier cancelled meanwhile, or a webhook settled the line: that decides,
             // and the poll loop picks it up.
@@ -489,16 +503,16 @@ export class PaymentMusqet extends PaymentInterface {
             this._finishSale(line, sale, state);
             return true;
         }
-        if (!ended && (timedOut || sale)) {
-            // Not confirmed ended, and either out of time or Musqet just answered the read
-            // (so contact is back): the sale may still be paid, so keep waiting on it.
+        if (!ended && (timedOut || answered)) {
+            // Not confirmed ended, and either out of time or Musqet just answered (so contact
+            // is back): the sale may still be paid, so keep waiting on it.
             this._showError(CANNOT_CANCEL_MESSAGE());
             this._restartWait(state);
             return false;
         }
         let message;
         if (!ended) {
-            // Contact lost and the read failed too: nothing more the till can find out.
+            // Contact lost, and neither call was answered: nothing more the till can find out.
             message = _t(
                 "Lost connection to the Odoo server, and the Musqet payment could not be cancelled: it may still be live on the terminal. Cancel it there before taking another payment for this order."
             );
