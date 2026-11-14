@@ -64,6 +64,7 @@ LOST = [
         requests.exceptions.ProxyError)),
     ('500', reply(500, {'error': {'code': 500}})),
     ('504 without JSON', reply(504, unreadable=True)),
+    ('502 nested too deep to parse', reply(502, unreadable=RecursionError('too deep'))),
     ('2xx without JSON', reply(200, unreadable=True)),
     ('2xx nested too deep to parse', reply(200, unreadable=RecursionError('too deep'))),
     ('2xx without a saleId', reply(200, {'status': 'PENDING'})),

@@ -5,19 +5,23 @@ import ipaddress
 import json
 import logging
 import pprint
-import ssl
 import time
 import urllib.parse
 
 import requests
-from urllib3.exceptions import NewConnectionError
 from urllib3.util import parse_url
 
 from odoo import fields, models, api, _
 from odoo.exceptions import AccessDenied, UserError, ValidationError
 from odoo.tools import consteq
 
-from .musqet_common import MUSQET_TERMINAL, parse_minor_amount, reply_is_for
+from .musqet_common import (
+    MUSQET_OUTCOME_UNKNOWN,
+    MUSQET_TERMINAL,
+    parse_minor_amount,
+    reply_is_for,
+    request_may_have_arrived,
+)
 from .musqet_crypto import (
     ENV_KEY,
     MusqetEncryptionKeyUnavailable,
@@ -48,50 +52,6 @@ MUSQET_DEFAULT_SALE_MODE = 'any'
 # language: a short locale code ("en", "pt"); the API checks it against its own list.
 MUSQET_REFERENCE_MAX_LENGTH = 255
 MUSQET_LANGUAGE_MAX_LENGTH = 16
-# The request errors raised before anything reached the server: the connection was never
-# made, or the request was never built. (Not SSLError or ProxyError: requests raises those
-# for failures after the request was sent too, a reset mid-response say.)
-MUSQET_NOT_SENT_ERRORS = (
-    requests.exceptions.ConnectTimeout,
-    requests.exceptions.InvalidURL,
-    requests.exceptions.InvalidSchema,
-    requests.exceptions.MissingSchema,
-    requests.exceptions.InvalidHeader,
-    requests.exceptions.InvalidJSONError,
-)
-# The causes that show a request error came before anything was sent: the connection was
-# refused or its host not found (to Musqet or to a proxy), or Musqet's certificate failed
-# verification, which happens during the TLS handshake. Any other handshake failure (urllib3's
-# own hostname CertificateError, say) is taken as possibly sent: the safe side.
-MUSQET_NOT_SENT_CAUSES = (NewConnectionError, ssl.SSLCertVerificationError)
-
-
-def request_may_have_arrived(error):
-    """Whether the request that raised ``error`` (a requests error) may have reached Musqet.
-
-    No for an error of MUSQET_NOT_SENT_ERRORS, or one caused by one of
-    MUSQET_NOT_SENT_CAUSES; yes for any other (a read timeout, a connection dropped
-    mid-request, a TLS or proxy failure of any other kind), the safe side.
-    """
-    if isinstance(error, MUSQET_NOT_SENT_ERRORS):
-        return False
-    return not any(isinstance(cause, MUSQET_NOT_SENT_CAUSES) for cause in iter_error_causes(error))
-
-
-def iter_error_causes(error):
-    """``error`` and the errors it wraps: requests wraps urllib3's MaxRetryError in its
-    arguments, which names the error itself as its ``reason``, and urllib3 wraps the
-    underlying error in its arguments or as its cause."""
-    seen, stack = set(), [error]
-    while stack:
-        cause = stack.pop()
-        if not isinstance(cause, BaseException) or id(cause) in seen:
-            continue
-        seen.add(id(cause))
-        yield cause
-        stack.extend((getattr(cause, 'reason', None), cause.__cause__, *cause.args))
-
-
 class PosPaymentMethod(models.Model):
     _inherit = 'pos.payment.method'
 
@@ -432,7 +392,7 @@ class PosPaymentMethod(models.Model):
         the raw error, and never puts the API key in a log line.
 
         An error after which the request may still have reached Musqet and been acted on
-        carries ``outcome_unknown: True`` (see reply_outcome_is_unknown): a transport failure
+        carries ``MUSQET_OUTCOME_UNKNOWN: True`` (see reply_outcome_is_unknown): a transport failure
         after the connection was made, a 5xx, or a 2xx body that isn't JSON.
         """
         self.ensure_one()
@@ -461,20 +421,21 @@ class PosPaymentMethod(models.Model):
             _logger.warning("Musqet %s %s failed: %s", method, path, error)
             details = {'exception': str(error)}
             if request_may_have_arrived(error):
-                details['outcome_unknown'] = True
+                details[MUSQET_OUTCOME_UNKNOWN] = True
             return self._musqet_error(_("Could not reach the Musqet terminal service."), **details)
         if response.status_code // 100 != 2:
             _logger.warning("Musqet %s %s returned HTTP %s", method, path, response.status_code)
             # Prefer the structured JSON error body; fall back to raw text as a detail.
             try:
                 detail = response.json()
-            except ValueError:
+            except Exception:
+                # Any error, as for a 2xx below: an unreadable 5xx is still an unknown outcome.
                 detail = response.text
             details = {'status_code': response.status_code, 'detail': detail}
             # A server error (or a gateway timing out) may come after Musqet acted on the
             # request; a 4xx is Musqet refusing it.
             if response.status_code >= 500:
-                details['outcome_unknown'] = True
+                details[MUSQET_OUTCOME_UNKNOWN] = True
             return self._musqet_error(_("The Musqet terminal service returned an error."), **details)
         try:
             return response.json()
@@ -484,7 +445,7 @@ class PosPaymentMethod(models.Model):
             _logger.warning("Musqet %s %s returned a body Odoo can't read: %r", method, path, error)
             return self._musqet_error(
                 _("Received an invalid response from the Musqet terminal service."),
-                status_code=response.status_code, outcome_unknown=True)
+                status_code=response.status_code, **{MUSQET_OUTCOME_UNKNOWN: True})
 
     def musqet_create_sale(self, payload, line_sale_ids=None):
         """POST /terminal/sales — start a sale on the bound terminal.

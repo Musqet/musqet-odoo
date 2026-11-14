@@ -27,7 +27,9 @@ class MusqetController(http.Controller):
         raw_body = request.httprequest.data  # exact bytes — needed to verify the HMAC.
         try:
             payload = json.loads(raw_body or b'{}')
-        except (ValueError, TypeError):
+        except Exception:
+            # Any error, not only ValueError: a deeply nested body raises RecursionError, and
+            # the reply must stay [accepted] whatever the body.
             _logger.warning("Musqet webhook: body was not valid JSON")
             return self._ack()
         if not isinstance(payload, dict):
