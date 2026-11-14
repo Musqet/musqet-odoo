@@ -166,7 +166,7 @@ class TestMusqetUpgradeCompanies(MusqetPosRecordsCase):
         with self.assertLogs(METHOD_LOGGER, 'INFO') as logs:
             self._migrate()
         self.assertEqual(self.method.company_id, company)
-        self.assertIn(str(self.method.id), '\n'.join(logs.output))
+        self.assertIn('[%d]' % self.method.id, '\n'.join(logs.output))
 
     def test_logs_a_method_no_config_can_place(self):
         lone = create_musqet_method(self, 'MSQ-UPG-LONE')
