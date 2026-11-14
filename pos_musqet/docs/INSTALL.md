@@ -257,10 +257,11 @@ and make your **company currency match it** (and keep each POS on the company cu
    clears it. A lost refund also counts against the original sale until then. To
    clear one, find it under **Musqet Sales** or **Musqet Refunds** (filter *Reply lost*)
    and check the Musqet app for a request with its reference:
-   - nothing taken: open it and click **Mark as Failed**;
-   - a payment taken: refund it in the Musqet app, then mark it failed;
-   - a refund made: open it and click **Mark as Refunded**. It keeps counting against
-     the sale, and the rest of its refund order can be refunded.
+   - nothing taken or refunded: open it and click **Mark as Failed**;
+   - a sale whose payment was taken: refund it in the Musqet app, then mark it failed;
+   - a refund that was made: open it and click **Mark as Refunded** (never Mark as
+     Failed). It keeps counting against the sale, and the rest of its refund order can
+     be refunded.
 5. **Refund test:** from the order, create a Refund and pay it with Musqet. A
    card-settled original refunds back to the card through the terminal. A
    Lightning-settled original shows a *manual refund* message and makes **no** API

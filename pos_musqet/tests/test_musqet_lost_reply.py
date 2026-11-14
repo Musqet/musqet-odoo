@@ -155,6 +155,12 @@ class TestMusqetLostSaleReply(TransactionCase):
                 # The log is the trail for reconciling it.
                 self.assertIn(reference, logs.output[-1])
 
+    def test_a_null_error_in_an_accepted_reply_is_no_error(self):
+        accepted = reply(200, {'saleId': 'sale-ok', 'status': 'PENDING', 'error': None})
+        result, _stub = self._create(accepted)
+        self.assertEqual(result['saleId'], 'sale-ok')
+        self.assertEqual(self._sales().sale_id, 'sale-ok')
+
     def test_records_nothing_when_musqet_refused_or_never_got_the_request(self):
         for index, (label, outcome) in enumerate(NOT_ACCEPTED):
             reference = 'Order-N%d' % index
