@@ -4,11 +4,12 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from odoo import fields
-from odoo.addons.pos_musqet.models import pos_payment_method
+from odoo.addons.pos_musqet.models import pos_musqet_sale, pos_payment_method
 from odoo.addons.pos_musqet.models.musqet_common import reply_is_not_found
 from odoo.addons.pos_musqet.models.pos_musqet_sale import (
     MUSQET_LINE_SALE_IDS_LIMIT,
     MUSQET_SALE_ID_MAX_LENGTH,
+    MUSQET_SALE_READ_BUDGET,
     MUSQET_SALE_REREAD_LIMIT,
     MUSQET_SALE_STALE_AFTER,
     MUSQET_SALE_START_LOCK,
@@ -354,6 +355,18 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
         result = self._create(fake)
         self.assertRefusedInProgress(result, fake)
         self.assertNotIn(('GET', '/terminal/sales/sale-old'), fake.calls)
+
+    def test_stops_reading_once_the_read_budget_is_spent(self):
+        # Slow reads: each takes most of the budget. The sale not read still blocks.
+        self._sale('sale-old', amount_minor=700)
+        self._sale('sale-new', amount_minor=700)
+        clock = iter([0, 1, MUSQET_SALE_READ_BUDGET + 1])
+        fake = FakeMusqet(statuses={'sale-new': 'CANCELLED'})
+        with patch.object(pos_musqet_sale, 'monotonic', side_effect=lambda: next(clock)):
+            result = self._create(fake)
+        self.assertRefusedInProgress(result, fake)
+        self.assertEqual([path for method, path in fake.calls if method == 'GET'],
+                         ['/terminal/sales/sale-new'])
 
     def test_line_sale_ids_never_hide_a_pending_sale(self):
         # That would switch off the refusal: a live sale on another terminal stays live.

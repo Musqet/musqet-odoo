@@ -1,6 +1,7 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 import logging
 from datetime import timedelta
+from time import monotonic
 
 from odoo import _, api, fields, models
 from odoo.tools import SQL
@@ -25,6 +26,9 @@ _logger = logging.getLogger(__name__)
 # is started (pos.musqet.sale._musqet_sale_to_resume). An order normally has at most one: the
 # terminal takes one command at a time.
 MUSQET_SALE_REREAD_LIMIT = 5
+# No read starts once this many seconds of them have passed: each can take the full
+# MUSQET_TIMEOUT, and they run under the order's lock. A sale not read counts as pending.
+MUSQET_SALE_READ_BUDGET = 15
 # A pending sale older than this that Musqet answers not found for no longer blocks a new sale
 # of its order: Musqet times a sale out after about five minutes, so it can't still be paid.
 MUSQET_SALE_STALE_AFTER = timedelta(minutes=15)
@@ -74,9 +78,9 @@ class PosMusqetSale(models.Model):
     not_found_at = fields.Datetime(
         string="Not Found at Musqet", readonly=True,
         help="When Musqet answered that it has no such sale, long after the sale was started. "
-             "New sale requests of its order no longer read it or wait for it. A later reply "
-             "that settles it (a poll, webhook or refund check) clears this. Check it in the "
-             "Musqet app: it may have been paid under a previous API key.")
+             "New sale requests of its order no longer read it or wait for it. Any later Musqet "
+             "reply that settles it clears this. Check it in the Musqet app: it may have been "
+             "paid under a previous API key.")
 
     _unique_sale = models.Constraint(
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet sale is already recorded.')
@@ -168,9 +172,11 @@ class PosMusqetSale(models.Model):
         and later ones (they no longer read it), unless a later reply settles it, which clears
         the stamp (_musqet_apply_response). Its state stays pending, as it may have been paid
         (a sale of the business the API key belonged to before it was changed reads as not
-        found too). A recent one still refuses. A read that fails any other way (Musqet unreachable, or the method's configuration broken, say a base
-        URL whose every route answers 404 without Musqet's error body: an administrator must
-        fix the method), or a sale past the read limit, still counts as pending.
+        found too). A recent one still refuses. A read that fails any other way (Musqet
+        unreachable, or the method's configuration broken, say a base URL whose every route
+        answers 404 without Musqet's error body: an administrator must fix the method), or a
+        sale not read (past the read limit, or once MUSQET_SALE_READ_BUDGET seconds of reads
+        have passed), still counts as pending.
 
         Not checked here: that ``reference`` is an order of the caller's session (a done sale
         of another order resumed onto a line leaves that line Not verified, as the sale's
@@ -217,14 +223,18 @@ class PosMusqetSale(models.Model):
     def _musqet_read_pending(self, sales):
         """Read the newest pending ones of ``sales`` from Musqet; return those that got a 404.
 
-        Reads at most MUSQET_SALE_REREAD_LIMIT, and stamps the stale ones Musqet no longer
-        knows (the rules are on _musqet_sale_to_resume).
+        Reads at most MUSQET_SALE_REREAD_LIMIT, starting none once MUSQET_SALE_READ_BUDGET
+        seconds have passed, and stamps the stale ones Musqet no longer knows (the rules are on
+        _musqet_sale_to_resume).
         """
         to_read = sales.filtered(lambda sale: sale.state == 'pending').sorted('id', reverse=True)
         now = fields.Datetime.now()
         cutoff = now - MUSQET_SALE_STALE_AFTER
+        deadline = monotonic() + MUSQET_SALE_READ_BUDGET
         answered_404 = self.sudo().browse()
         for sale in to_read[:MUSQET_SALE_REREAD_LIMIT]:
+            if monotonic() > deadline:
+                break
             reply = sale.payment_method_id.musqet_get_sale(sale.sale_id)
             if reply_is_404(reply):
                 answered_404 |= sale
