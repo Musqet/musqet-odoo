@@ -8,7 +8,7 @@ from odoo import http
 from odoo.http import request
 
 from ..models.musqet_common import reply_is_for
-from ..models.pos_payment_method import MUSQET_LIVE_SESSION_STATES
+from ..models.pos_payment_method import MUSQET_LIVE_SESSION_STATES, MUSQET_LOG_ID_MAX_LENGTH
 
 _logger = logging.getLogger(__name__)
 
@@ -94,7 +94,9 @@ class MusqetController(http.Controller):
         method_sudo = request.env['pos.payment.method'].sudo().search(
             [('musqet_terminal_serial', '=', serial)], limit=1)
         if not method_sudo:
-            _logger.warning("Musqet webhook for an unregistered terminal: %r", serial)
+            # Sent unsigned, so cut like every other logged id: it can't fill the log.
+            _logger.warning("Musqet webhook for an unregistered terminal: %.*r",
+                            MUSQET_LOG_ID_MAX_LENGTH, serial)
             return self._ack()
 
         signature = request.httprequest.headers.get('x-webhook-signature', '')
@@ -123,7 +125,8 @@ class MusqetController(http.Controller):
                 if _plain_string(sale_id) and method_sudo._musqet_needs_status_read(sale_id):
                     reply = method_sudo.musqet_get_sale(sale_id)
         except Exception:
-            _logger.exception("Musqet webhook: could not settle sale %r", sale_id)
+            _logger.exception("Musqet webhook: could not settle sale %.*r",
+                              MUSQET_LOG_ID_MAX_LENGTH, sale_id)
         if not reply_is_for(sale_id, reply):
             return self._ack()
         # Buffer Musqet's reply and ping every live session that can show it (one being closed
@@ -139,7 +142,8 @@ class MusqetController(http.Controller):
                 for config in sessions.config_id:
                     config._notify("MUSQET_LATEST_RESPONSE", config.id)
         except Exception:
-            _logger.exception("Musqet webhook: could not push sale %r to the till", sale_id)
+            _logger.exception("Musqet webhook: could not push sale %.*r to the till",
+                              MUSQET_LOG_ID_MAX_LENGTH, sale_id)
         return self._ack()
 
     def _ack(self):

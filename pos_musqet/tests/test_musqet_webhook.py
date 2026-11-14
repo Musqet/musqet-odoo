@@ -493,6 +493,17 @@ class TestMusqetWebhookRoute(HttpCase):
         self.assertNotIn('\n', logs.records[0].getMessage())
         self.assertIn('MSQ-NONE\\nFORGED LINE', logs.records[0].getMessage())
 
+    def test_an_unknown_serial_is_logged_cut_short(self):
+        # Nor fill it: logged no longer than any other id.
+        serial = 'MSQ-' + 'X' * 5000
+        raw = json.dumps({'data': {'saleId': 'sale-wh', 'serial': serial}})
+        with self.assertLogs('odoo.addons.pos_musqet.controllers.main', 'WARNING') as logs:
+            self.url_open('/musqet/webhook', data=raw.encode(),
+                          headers={'Content-Type': 'application/json'})
+        message = logs.records[0].getMessage()
+        self.assertIn("'MSQ-XXX", message)
+        self.assertLess(len(message), 200)
+
     def test_an_unsigned_webhook_reads_nothing(self):
         _, mock_request = self._post(self._body(), secret='whsec_wrong')
         mock_request.assert_not_called()
