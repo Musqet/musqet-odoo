@@ -21,6 +21,7 @@ from .common import (
     dirty_field_names,
     make_pos_user,
     musqet_response,
+    open_plain_method,
     open_session,
     record_sale,
     write_between_sessions,
@@ -188,9 +189,7 @@ class TestMusqetCreateSale(TransactionCase):
                 mock_request.assert_not_called()
 
     def test_denies_a_non_musqet_payment_method(self):
-        cash = self.env['pos.payment.method'].create({'name': 'Plain Method'})
-        # On an open session, so the method check is what refuses it.
-        open_session(self.env, cash)
+        cash = open_plain_method(self.env)
         with self.assertRaises(AccessDenied):
             cash.with_user(self.cashier).musqet_create_sale({'amountInCents': 500})
 

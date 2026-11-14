@@ -20,6 +20,7 @@ from .common import (
     dirty_field_names,
     make_pos_user,
     musqet_response,
+    open_plain_method,
     open_session,
     record_refund,
     record_sale,
@@ -331,9 +332,7 @@ class TestMusqetCreateRefund(TransactionCase):
         self.assertTrue(self.method.musqet_latest_response)
 
     def test_denies_a_non_musqet_payment_method(self):
-        plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
-        # On an open session, so the method check is what refuses it.
-        open_session(self.env, plain)
+        plain = open_plain_method(self.env)
         with self.assertRaises(AccessDenied):
             plain.with_user(self.cashier).musqet_create_refund(
                 {'amountInCents': 500, 'currency': self.currency, 'reference': 'R-1'}, 123)

@@ -7,7 +7,13 @@ from odoo.exceptions import AccessDenied, MissingError, ValidationError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
-from .common import clear_company, create_musqet_method, make_pos_user, open_session
+from .common import (
+    clear_company,
+    create_musqet_method,
+    make_pos_user,
+    open_plain_method,
+    open_session,
+)
 
 
 def proxy_calls(method, names=None):
@@ -86,8 +92,7 @@ class TestMusqetProxyAccess(ProxyCallsMixin, TransactionCase):
     def test_get_and_cancel_deny_a_non_musqet_payment_method(self):
         # _musqet_check_access also refuses a method that isn't a Musqet one: no request may go
         # out for it. On an open session, so the method check is what refuses it.
-        plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
-        open_session(self.env, plain)
+        plain = open_plain_method(self.env)
         self.assertProxyDenied(
             plain.with_user(self.cashier), names=('musqet_get_sale', 'musqet_cancel_sale'))
 
@@ -152,7 +157,8 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
         method = self.method.with_user(self.cashier)
 
         def refused(call, mock_request):
-            self.assertIn('being closed', call()['error']['message'])
+            self.assertIn('No POS session using this Musqet terminal is open',
+                          call()['error']['message'])
             mock_request.assert_not_called()
 
         def allowed(call, mock_request):
@@ -195,6 +201,20 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
             only_mine.musqet_get_latest_status()
         self.assertEqual(other.with_user(both).musqet_get_latest_status(),
                          {'saleId': 's-1', 'status': 'COMPLETE'})
+
+    def test_another_open_till_on_the_method_still_starts_sales(self):
+        # Checked per method: the server can't tell which session the caller is on.
+        self.session.state = 'closing_control'
+        open_session(self.env, self.method)
+
+        def sent(call, mock_request):
+            mock_request.return_value.status_code = 200
+            mock_request.return_value.json.return_value = {'saleId': 'sale-2', 'status': 'PENDING'}
+            self.assertNotIn('error', call())
+            mock_request.assert_called_once()
+
+        self.for_each_proxy_call(
+            self.method.with_user(self.cashier), sent, names=('musqet_create_sale',))
 
     def test_an_internal_call_on_a_missing_method_fails_at_the_check(self):
         missing = self._missing_method()

@@ -1,6 +1,7 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 """The upgrade backfills of sale and refund records, and of Musqet methods' companies."""
 from odoo.tests import tagged
+from odoo.tools import SQL
 
 from .common import (
     RECORD_LOGGER,
@@ -182,6 +183,22 @@ class TestMusqetUpgradeCompanies(MusqetPosRecordsCase):
         with self.assertLogs(METHOD_LOGGER, 'WARNING') as logs:
             self._migrate()
         self.assertIn('[%d]' % archived.id, '\n'.join(logs.output))
+
+    def test_logs_a_method_whose_configs_name_two_companies(self):
+        # Shared across companies before the rule: there is no telling which one it is for.
+        other_company = self.env['res.company'].create({'name': 'Other Upgrade Co'})
+        env_other = self.env(context={'allowed_company_ids': other_company.ids})
+        other_config = env_other['pos.config'].create(
+            {'name': 'Other Upgrade POS', 'payment_method_ids': [(6, 0, [])]})
+        # Raw SQL: Odoo keeps a config's methods to its company, as the upgrade can't assume.
+        self.env.cr.execute(SQL(
+            'INSERT INTO pos_config_pos_payment_method_rel (pos_config_id, pos_payment_method_id)'
+            ' VALUES (%s, %s)', other_config.id, self.method.id))
+        clear_company(self.method)
+        with self.assertLogs(METHOD_LOGGER, 'WARNING') as logs:
+            self._migrate()
+        self.assertFalse(self.method.company_id)
+        self.assertIn('[%d]' % self.method.id, '\n'.join(logs.output))
 
     def test_leaves_other_methods_alone(self):
         clear_company(self.plain)

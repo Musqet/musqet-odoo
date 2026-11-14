@@ -48,8 +48,9 @@ MUSQET_ALLOWED_HOST = 'musqet.tech'
 # The POS session states in which a cashier may start a sale or refund on a method's terminal
 # (MUSQET_PAYING_SESSION_STATES), and may drive it at all (MUSQET_LIVE_SESSION_STATES,
 # _musqet_check_access): a session being closed may still poll or cancel a sale in progress.
-MUSQET_PAYING_SESSION_STATES = ('opening_control', 'opened')
-MUSQET_LIVE_SESSION_STATES = (*MUSQET_PAYING_SESSION_STATES, 'closing_control')
+# Checked per method, not per till: the server can't tell which session a caller is on.
+MUSQET_PAYING_SESSION_STATES = frozenset({'opening_control', 'opened'})
+MUSQET_LIVE_SESSION_STATES = MUSQET_PAYING_SESSION_STATES | {'closing_control'}
 # Rails a sale may be started on (the API's TerminalCommandMode). "any" lets the terminal
 # prompt the customer for card or Bitcoin.
 MUSQET_SALE_MODES = ('any', 'card', 'bitcoin')
@@ -391,12 +392,13 @@ class PosPaymentMethod(models.Model):
         to the config's company.
         """
         sessions = self.env['pos.session'].sudo().search([
-            ('state', 'in', states),
+            ('state', 'in', tuple(states)),
             ('config_id.payment_method_ids', 'in', self.ids),
         ])
+        method_ids = set(self.ids)
         session_states = {}
         for session in sessions:
-            for method_id in set(self.ids) & set(session.config_id.payment_method_ids.ids):
+            for method_id in method_ids & set(session.config_id.payment_method_ids.ids):
                 session_states.setdefault(method_id, set()).add(session.state)
         return session_states
 
@@ -437,17 +439,18 @@ class PosPaymentMethod(models.Model):
         """Shared opening checks for a sale or refund: access, payload shape, serial, company.
 
         Raises AccessDenied for a caller or method that may not drive the terminal; returns
-        an ``{error}`` dict for a cashier whose till is being closed (on no session in
-        MUSQET_PAYING_SESSION_STATES), a malformed payload, a method with no serial or a
-        method with no company (reached only by an internal call: a cashier is refused it in
-        _musqet_check_access), else None.
+        an ``{error}`` dict for a cashier's method on no session in
+        MUSQET_PAYING_SESSION_STATES (every till using it is being closed), a malformed
+        payload, a method with no serial or a method with no company (reached only by an
+        internal call: a cashier is refused it in _musqet_check_access), else None.
         """
         self.ensure_one()
         session_states = self._musqet_check_access()
         if (session_states is not None
-                and not session_states[self.id] & set(MUSQET_PAYING_SESSION_STATES)):
+                and not session_states[self.id] & MUSQET_PAYING_SESSION_STATES):
             return self._musqet_error(_(
-                "This till is being closed, so it takes no new Musqet payment or refund."))
+                "No POS session using this Musqet terminal is open, so it takes no new payment "
+                "or refund."))
         if not isinstance(payload, dict):
             return self._musqet_error(_("The terminal request is invalid."))
         if not self.musqet_terminal_serial:
@@ -645,8 +648,8 @@ class PosPaymentMethod(models.Model):
         must be the company currency, ``reference`` is required, and the remaining fields are
         checked before they are sent. The caller chooses which payment method record this
         runs on, so _musqet_check_access keeps it to a method of the caller's own companies on
-        a live POS session, and _musqet_check_terminal_request refuses a new sale on a till
-        being closed.
+        a live POS session, and _musqet_check_terminal_request refuses a new sale once every
+        till using the method is being closed.
 
         A sale of the same order already open at Musqet is resumed rather than sent again
         (pos.musqet.sale._musqet_sale_to_resume), so a retry after the POS gave up on a sale,

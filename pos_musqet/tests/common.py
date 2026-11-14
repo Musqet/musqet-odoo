@@ -69,6 +69,14 @@ def open_session(env, *methods):
     return env['pos.session'].create({'config_id': config.id, 'user_id': env.uid})
 
 
+def open_plain_method(env):
+    """A payment method that isn't a Musqet one, on an open POS session: so the method check
+    (pos.payment.method._musqet_check_method), not the session check, is what refuses it."""
+    plain = env['pos.payment.method'].create({'name': 'Plain Method'})
+    open_session(env, plain)
+    return plain
+
+
 def clear_company(method):
     """Leave ``method`` with no company, as one saved before 19.0.1.6.0 may be. Raw SQL: the
     ORM refuses it (pos.payment.method._check_musqet_company)."""

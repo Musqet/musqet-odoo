@@ -16,6 +16,7 @@ from .common import (
     create_musqet_method,
     make_pos_user,
     musqet_response,
+    open_plain_method,
     open_session,
     record_refund,
     record_sale,
@@ -95,9 +96,7 @@ class TestMusqetLatestStatus(TransactionCase):
 
     def test_denies_a_non_musqet_payment_method_and_keeps_its_buffer(self):
         # The method check guards the buffer itself: a refused read must not consume it.
-        plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
-        # On an open session, so the method check is what refuses it.
-        open_session(self.env, plain)
+        plain = open_plain_method(self.env)
         plain.musqet_latest_response = '{"status": "COMPLETE"}'
         with self.assertRaises(AccessDenied):
             plain.with_user(self.cashier).musqet_get_latest_status()

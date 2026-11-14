@@ -89,7 +89,7 @@ class MusqetController(http.Controller):
         method_sudo.musqet_latest_response = json.dumps({**reply, 'saleId': sale_id})
         sessions = request.env['pos.session'].sudo().search(
             [('payment_method_ids', 'in', method_sudo.id),
-             ('state', 'in', MUSQET_LIVE_SESSION_STATES)])
+             ('state', 'in', tuple(MUSQET_LIVE_SESSION_STATES))])
         for config in sessions.config_id:
             config._notify("MUSQET_LATEST_RESPONSE", config.id)
         return self._ack()
