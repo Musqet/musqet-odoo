@@ -37,20 +37,21 @@ your Odoo addons path.
 > a database → optionally restart):
 >
 > ```bash
-> REF=<release tag>       # until the first release is tagged: REF=main
+> REF='<release tag>'     # until the first release is tagged: REF=main
 > curl -fsSL "https://raw.githubusercontent.com/Musqet/musqet-odoo/$REF/install.sh" \
->   | bash -s -- --addons-path /opt/odoo/extra-addons --ref "$REF" --db <your_db> \
+>   | bash -s -- --addons-path /opt/odoo/extra-addons --ref "$REF" --db '<your_db>' \
 >     --restart "sudo systemctl restart odoo"
 > ```
 >
-> `--ref` is required: use a release tag from
-> [Releases](https://github.com/Musqet/musqet-odoo/releases) in production, and take
-> the script from the same ref. A tag can be moved, so for a fixed pin use the
-> release's full 40-character commit SHA: the script then refuses anything but that
-> commit. `main` is unreleased development
-> code; until the first release is tagged, it is the only ref there is. The script
-> prints the commit it installed. It needs `git` **or** `curl`/`wget` (no git
-> required). Run with `--help` for options like `--source <dir>` for a local checkout.
+> `--ref` is required. In production use a release from the
+> [Releases](https://github.com/Musqet/musqet-odoo/releases) page, and take the script
+> from the same ref. A tag can be moved, so for a fixed pin use the release's full
+> 40-character commit SHA, copied from that page: the script then refuses anything but
+> that commit. Take the SHA only from Musqet's Releases page, since GitHub also serves
+> commits from forks under this repo's URLs. `main` is unreleased development code;
+> until the first release is tagged, it is the only ref there is. The script prints
+> the commit it installed. It needs `git` **or** `curl`/`wget` (no git required). Run
+> with `--help` for options like `--source <dir>` for a local checkout.
 > The manual steps below are the same thing done by hand.
 
 1. **Get the module onto the server.** Clone (or download) this repo so that the

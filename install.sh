@@ -18,9 +18,10 @@
 # Options:
 #   --addons-path DIR   Where to place pos_musqet/ (must be on Odoo's addons_path). Required.
 #   --db NAME           Also install/upgrade the module into this database (needs odoo + DB).
-#   --ref REF           Release tag, commit SHA or branch to install. Required unless --source.
-#                       Use a release tag (or its commit SHA) in production; `main` is
-#                       unreleased development code.
+#   --ref REF           Release tag, full commit SHA or branch to install. Required unless
+#                       --source. Use a release from the Releases page in production. A tag
+#                       can be moved; a full 40-character SHA is checked against what is
+#                       fetched. `main` is unreleased development code.
 #   --repo URL          Source repo (default: https://github.com/Musqet/musqet-odoo.git).
 #   --source DIR        Use a local checkout instead of cloning (no git/network needed).
 #   --odoo-bin CMD      Odoo executable (default: odoo).
@@ -70,8 +71,10 @@ Usage: install.sh --addons-path DIR [options] [-- <extra odoo args>]
 
   --addons-path DIR   Where to place pos_musqet/ (must be on Odoo's addons_path). Required.
   --db NAME           Also install/upgrade the module into this database.
-  --ref REF           Release tag, commit SHA or branch. Required unless --source.
-                      Use a release tag in production; main is development code.
+  --ref REF           Release tag, full commit SHA or branch. Required unless --source.
+                      Use a release in production. A tag can be moved; a full
+                      40-character SHA is checked against what is fetched.
+                      main is development code.
   --repo URL          Source repo (default: Musqet/musqet-odoo).
   --source DIR        Use a local checkout instead of cloning.
   --odoo-bin CMD      Odoo executable (default: odoo).
@@ -111,6 +114,12 @@ else
   [[ -n "$REF" ]] || { err "missing required --ref: a release tag from" \
     "https://github.com/Musqet/musqet-odoo/releases, a commit SHA, or main for development code"; usage 1; }
   plain_ref "$REF" || die "--ref '$REF' is not a plain tag, branch or commit name"
+  ref_lower="$(printf '%s' "$REF" | tr 'A-F' 'a-f')"   # not ${REF,,}: bash 3.2 lacks it
+  # Only a full SHA is checked against the fetched commit (below), so refuse a short
+  # one rather than let it look like a pin. An all-hex branch or tag name is refused
+  # too; this repo names neither that way.
+  [[ "$ref_lower" =~ ^[0-9a-f]{4,39}$ ]] \
+    && die "--ref $REF looks like a short commit SHA; pass the full 40-character SHA"
 fi
 
 # --upgrade and any `-- <extra odoo args>` are only meaningful with --db; don't let
@@ -169,7 +178,6 @@ if [[ -z "$SOURCE_DIR" ]]; then
   info "Using commit ${COMMIT:-(not recorded in the download)}"
   # A tag or branch can be moved; a full commit SHA can't. When --ref is one, insist
   # on getting exactly that commit, on either fetch path.
-  ref_lower="$(printf '%s' "$REF" | tr 'A-F' 'a-f')"   # not ${REF,,}: bash 3.2 lacks it
   if [[ "$ref_lower" =~ ^[0-9a-f]{40}$ && "$COMMIT" != "$ref_lower" ]]; then
     die "fetched commit ${COMMIT:-(unknown)} does not match --ref $REF"
   fi

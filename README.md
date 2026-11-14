@@ -17,14 +17,16 @@ automatically.
 
 The quickest way to side-load onto an existing Odoo 19 server is the install script,
 which fetches the addon from GitHub and drops it on your addons path. Name what you
-install with `--ref`: a release tag from
-[Releases](https://github.com/Musqet/musqet-odoo/releases) in production, and take the
-script from the same ref. A tag can be moved, so for a fixed pin use the release's full
-40-character commit SHA instead: the script then refuses anything but that commit. `main` is unreleased development code; until the first release is tagged, it
-is the only ref there is.
+install with `--ref`: in production, a release from the
+[Releases](https://github.com/Musqet/musqet-odoo/releases) page, with the script taken
+from the same ref. A tag can be moved, so for a fixed pin use the release's full
+40-character commit SHA, copied from that page: the script then refuses anything but
+that commit. Take the SHA only from Musqet's Releases page, since GitHub also serves
+commits from forks under this repo's URLs. `main` is unreleased development code;
+until the first release is tagged, it is the only ref there is.
 
 ```bash
-REF=<release tag>       # until the first release is tagged: REF=main
+REF='<release tag>'     # until the first release is tagged: REF=main
 # place the files only:
 curl -fsSL "https://raw.githubusercontent.com/Musqet/musqet-odoo/$REF/install.sh" \
   | bash -s -- --addons-path /opt/odoo/extra-addons --ref "$REF"
