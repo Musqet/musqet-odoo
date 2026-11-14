@@ -28,7 +28,7 @@ def proxy_calls(method, names=None):
             {'amountInCents': 500, 'reference': 'Refund-S'}, 1),
         'musqet_get_sale': lambda: method.musqet_get_sale('sale-1'),
         'musqet_cancel_sale': lambda: method.musqet_cancel_sale('sale-1'),
-        'musqet_get_latest_status': lambda: method.musqet_get_latest_status(),
+        'musqet_get_latest_status': lambda: method.musqet_get_latest_status('s-1'),
     }
     return {name: call for name, call in calls.items() if names is None or name in names}
 
@@ -143,7 +143,7 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
 
     def test_allows_a_method_of_the_cashiers_company_on_an_open_session(self):
         self.method.musqet_latest_response = self.BUFFERED
-        self.assertEqual(self.method.with_user(self.cashier).musqet_get_latest_status(),
+        self.assertEqual(self.method.with_user(self.cashier).musqet_get_latest_status('s-1'),
                          {'saleId': 's-1', 'status': 'COMPLETE'})
 
     def test_denies_a_method_on_no_open_session(self):
@@ -173,13 +173,13 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
             method, refused, names=('musqet_create_sale', 'musqet_create_refund'))
         self.for_each_proxy_call(method, allowed, names=('musqet_get_sale', 'musqet_cancel_sale'))
         self.method.musqet_latest_response = self.BUFFERED
-        self.assertTrue(method.musqet_get_latest_status())
+        self.assertTrue(method.musqet_get_latest_status('s-1'))
 
     def test_allows_a_method_whose_session_is_still_opening(self):
         # The POS opens on the till before the opening cash count is confirmed.
         self.session.state = 'opening_control'
         self.method.musqet_latest_response = self.BUFFERED
-        self.assertTrue(self.method.with_user(self.cashier).musqet_get_latest_status())
+        self.assertTrue(self.method.with_user(self.cashier).musqet_get_latest_status('s-1'))
 
     def test_denies_another_companys_method_on_its_own_session(self):
         other = self._other_company_method('MSQ-SCOPE-B02')
@@ -200,8 +200,8 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
             company_ids=[(6, 0, (self.company | self.other_company).ids)])
         only_mine = other.with_user(both).with_context(allowed_company_ids=self.company.ids)
         with self.assertRaises(AccessDenied):
-            only_mine.musqet_get_latest_status()
-        self.assertEqual(other.with_user(both).musqet_get_latest_status(),
+            only_mine.musqet_get_latest_status('s-1')
+        self.assertEqual(other.with_user(both).musqet_get_latest_status('s-1'),
                          {'saleId': 's-1', 'status': 'COMPLETE'})
 
     def test_another_open_till_on_the_method_still_starts_sales(self):

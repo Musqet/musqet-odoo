@@ -41,6 +41,10 @@ MUSQET_TIMEOUT = 10
 # blunt replay of a captured-but-stale notification (§4.5). Generous enough to absorb
 # clock skew between Musqet and the merchant host.
 MUSQET_WEBHOOK_TOLERANCE = 300
+# Epoch seconds are 10 digits until the year 2286. A far longer timestamp would make int() or
+# the float age check raise instead of being rejected, so the header allows a little more.
+# pos_musqet/docs/INSTALL.md §5 states this limit too.
+MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS = 12
 # The base URL must point at the Musqet cloud. The field stays configurable (prod vs
 # staging) but is locked to this domain so an ERP manager can't repoint it at an
 # internal host and exfiltrate the bearer token (SSRF). See _check_musqet_base_url.
@@ -61,8 +65,8 @@ MUSQET_REFERENCE_MAX_LENGTH = 255
 MUSQET_LANGUAGE_MAX_LENGTH = 16
 # At most this much of a refusal's message is passed on to the POS.
 MUSQET_REFUSAL_MESSAGE_MAX_LENGTH = 500
-# At most this much of an untrusted value from a reply reaches the log: a body (at debug
-# level), and an id (a saleId it names).
+# At most this much of an untrusted value reaches the log: a reply body (at debug level),
+# and an id (a saleId a reply names, or a serial or saleId from a webhook body).
 MUSQET_LOG_BODY_MAX_LENGTH = 500
 MUSQET_LOG_ID_MAX_LENGTH = 100
 
@@ -1036,27 +1040,37 @@ class PosPaymentMethod(models.Model):
         # the webhook controller to buffer its result during a session (mirrors pos_adyen).
         return super()._is_write_forbidden(fields - {'musqet_latest_response'})
 
-    def musqet_get_latest_status(self):
-        """Return the latest webhook-buffered sale result for the POS frontend.
+    def musqet_get_latest_status(self, sale_id=None):
+        """Return the webhook-buffered result of sale ``sale_id`` for the POS frontend.
 
         Named with the ``musqet_`` prefix to match the proxy convention and the JS call site.
         Same access guard as the proxy (_musqet_check_access): a POS cashier of the method's
         company, while a POS session using it is opening, open or being closed, or an
         internal/sudo call, may read it.
         Returns Musqet's reply to the status read a verified webhook triggered (the partner
-        sale shape, with its saleId), or ``False`` if nothing is buffered.
+        sale shape, with its saleId), or ``False`` if nothing is buffered for that sale.
+        ``sale_id`` defaults to None so a till still running the frontend from before
+        19.0.1.7.0 gets ``False`` (its poll loop settles the line) rather than an error.
         """
         self.ensure_one()
         self._musqet_check_access()
         latest = self.sudo().musqet_latest_response
         if not latest:
             return False
+        reply = json.loads(latest)
+        # Every till using the method is pinged; only the one waiting on this sale takes the
+        # result, so another till's call can't use up the push meant for it. The controller
+        # always buffers a non-empty saleId string, so nothing else matches it. A till that
+        # names another till's saleId (same company, live session) could still take it: the
+        # server can't tell which session is calling. That costs only the push; the record is
+        # settled and the other till's poll settles its line.
+        if reply.get('saleId') != sale_id:
+            return False
         # Consume-once: clear the buffer as we hand it over so a duplicate notification — or a
         # captured-but-still-fresh webhook replayed inside the timestamp window — can't drive a
-        # second settlement. Assumes one terminal per method (see the webhook controller); if a
-        # result is consumed by the wrong session the poll loop remains the backstop.
+        # second settlement. The poll loop remains the backstop.
         self.sudo().musqet_latest_response = ''
-        return json.loads(latest)
+        return reply
 
     def _musqet_verify_webhook(self, signature_header, raw_body):
         """Verify a Musqet webhook signature (§4.5).
@@ -1065,28 +1079,42 @@ class PosPaymentMethod(models.Model):
         ``hmac = HMAC-SHA256("<ts>.<rawBody>", signing_secret)`` (hex). Returns True only if
         the configured signing secret reproduces the signature AND the timestamp is fresh.
         Comparison is constant-time (consteq); a missing secret, malformed header or stale
-        timestamp is rejected. ``raw_body`` must be the exact bytes received — re-encoding a
-        parsed body could change it and break the signature.
+        timestamp is rejected. A header naming ``t`` or ``v1`` more than once, a timestamp that
+        isn't plain ASCII digits (at most MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS of them), or a
+        ``v1`` that isn't ASCII is malformed: the check reads one unambiguous value of each.
+        ``raw_body`` must be the exact bytes received — re-encoding a parsed body could change
+        it and break the signature.
+
+        A captured request still verifies again inside the tolerance window. That is
+        harmless here: the webhook only triggers a status read from Musqet's API (see the
+        controller), so a replay can at most repeat a read of a sale that still needs one.
         """
         self.ensure_one()
         if not signature_header:
             return False
-        # Parse "t=<ts>,v1=<hmac>" into a dict, tolerant of surrounding spaces.
+        # Parse "t=<ts>,v1=<hmac>", tolerant of surrounding spaces; other keys are ignored.
         parts = {}
         for chunk in signature_header.split(','):
             key, sep, value = chunk.partition('=')
-            if sep:
-                parts[key.strip()] = value.strip()
+            key = key.strip()
+            if sep and key in ('t', 'v1'):
+                if key in parts:
+                    return False
+                parts[key] = value.strip()
         timestamp = parts.get('t')
         signature = parts.get('v1')
         if not timestamp or not signature:
             return False
-        # Reject stale/future timestamps to blunt replay (seconds since the epoch).
-        try:
-            age = abs(time.time() - int(timestamp))
-        except (TypeError, ValueError):
+        # int() also takes '+12', '1_2' and non-ASCII digits: only the plain form is signed.
+        if (not (timestamp.isascii() and timestamp.isdigit())
+                or len(timestamp) > MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS):
             return False
-        if age > MUSQET_WEBHOOK_TOLERANCE:
+        # consteq raises on a non-ASCII string, so such a v1 is rejected before it (one of
+        # another length just doesn't match).
+        if not signature.isascii():
+            return False
+        # Reject stale/future timestamps to blunt replay (seconds since the epoch).
+        if abs(time.time() - int(timestamp)) > MUSQET_WEBHOOK_TOLERANCE:
             return False
         # Skip the decrypt for malformed or stale headers. This is not a guard: a well-formed,
         # fresh header with a bogus signature still reaches the decrypt.

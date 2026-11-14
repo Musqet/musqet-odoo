@@ -589,55 +589,35 @@ export class PaymentMusqet extends PaymentInterface {
 
     /**
      * Handle an inbound webhook (push path). Invoked by the PosStore websocket patch once the
-     * backend controller has verified a signature and buffered the result. Pulls the buffer
-     * and settles the pending line. Only fires on publicly-reachable deployments; the pilot
-     * settles via the poll loop and never reaches here.
+     * backend controller has verified a signature and buffered the result. Asks for the
+     * buffered result of this line's saleId and settles the line with it; with no saleId yet
+     * (or after a page reload) it does nothing and the poll loop settles the line. Only fires
+     * on publicly-reachable deployments; the pilot settles via the poll loop and never
+     * reaches here.
      */
     async handleMusqetStatusResponse() {
+        const line = this.pos.getPendingPaymentLine("musqet");
+        const state = line && this.pollState[line.uuid];
+        // Only the sale this line is waiting on: before our own create has returned
+        // (state.saleId still null) we can't name it, so the poll loop settles it. With no
+        // poll state (the page was reloaded mid-payment) this tab has no sale to take a
+        // result for: paying the order again resumes the sale (musqet_create_sale).
+        if (!state?.saleId) {
+            return;
+        }
+        // The server hands over (and clears) the buffered result only if it is for this
+        // saleId, so another till pinged for the same method can't use it up.
         const sale = await this._call("musqet_get_latest_status", [
             [this.payment_method_id.id],
+            state.saleId,
         ]);
-        if (!sale || sale.error) {
-            // Nothing buffered, or a transient RPC failure — the poll loop is the backstop.
+        if (!sale || sale.error || sale.saleId !== state.saleId) {
+            // Nothing buffered for this sale, or a transient RPC failure: the poll loop is
+            // the backstop. The saleId is checked here too so this never settles a line on
+            // a server that doesn't match it (one older than 19.0.1.7.0).
             return;
         }
-        const line = this.pos.getPendingPaymentLine("musqet");
-        if (!line) {
-            return;
-        }
-        const state = this.pollState[line.uuid];
-        if (state) {
-            // Only settle if this buffered result is for the sale this line is waiting on.
-            // The server buffers Musqet's status-read reply with its saleId set, so require an
-            // exact match — a missing/foreign saleId, or the window before our own create has
-            // returned (state.saleId still null), means we can't confirm it's ours, so we
-            // leave it to the poll loop rather than settle on a guess.
-            if (sale.saleId !== state.saleId) {
-                return;
-            }
-            this._finishSale(line, sale, state);
-            return;
-        }
-        // The in-memory poll state was lost (e.g. the page was refreshed mid-payment). We no
-        // longer have our saleId, so match by order reference and refuse to settle on "can't
-        // confirm" — never settle a line the result can't be positively tied to.
-        const order = line.pos_order_id;
-        const reference = order?.pos_reference || order?.uuid;
-        if (!reference || sale.reference !== reference) {
-            return;
-        }
-        const success = sale.status === SUCCESS_STATUS;
-        if (success) {
-            line.transaction_id = sale.saleId || line.transaction_id;
-            line.musqet_rail = sale.rail || false;
-            line.setReceiptInfo(this._receiptInfo(sale));
-        } else if (!FAILURE_STATUSES.includes(sale.status)) {
-            // Non-terminal status buffered — nothing to settle yet.
-            return;
-        } else {
-            this._showError(this._statusErrorMessage(sale.status));
-        }
-        line.handlePaymentResponse(success);
+        this._finishSale(line, sale, state);
     }
 
     _receiptInfo(sale) {

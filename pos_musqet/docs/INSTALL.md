@@ -328,8 +328,12 @@ Security notes (already enforced by the addon):
 
 - Every inbound webhook is **HMAC-verified** (`x-webhook-signature: t=<ts>,v1=<hmac>`,
   HMAC-SHA256 over `"<ts>.<rawbody>"`) using a constant-time compare; timestamps more
-  than **±300s** from now are rejected to blunt replay.
-- The route always returns `200` so it can't be used as a signature oracle.
+  than **±300s** from now are rejected to blunt replay. A header naming `t` or `v1`
+  twice, or a timestamp that isn't 1 to 12 plain digits, is rejected. A form-encoded
+  body is dropped: Musqet sends JSON.
+- The route always answers `200` with the plain-text body `[accepted]`, so it can't be
+  used as a signature oracle. Only a body declared over 64 KB is refused (`413`),
+  unread.
 - The webhook body is never trusted as the result: a verified webhook makes Odoo read
   the sale back from Musqet's API, and both Odoo's record of the sale and the till take
   that reply. A leaked signing secret alone can't change what a refund is capped at or
@@ -338,10 +342,15 @@ Security notes (already enforced by the addon):
   settled sale costs no call to Musqet; a replay before then (within the ±300s window)
   costs one call each, which the rate-limiting below also bounds.
 - Webhook and polling are mutually idempotent: whichever lands first settles the sale,
-  the other is ignored.
+  the other is ignored. Every till using the payment method is told a result is ready,
+  but only the till waiting on that sale takes it. A till whose page was reloaded
+  mid-payment doesn't take it either: paying the order again picks the sale up.
 - The webhook route does an unauthenticated indexed lookup *before* HMAC verification.
   For public deployments, front it with reverse-proxy **rate-limiting / an IP
-  allow-list** as defence-in-depth.
+  allow-list** as defence-in-depth, and **cap the request body size** there too (64 KB
+  is ample; nginx `client_max_body_size`). A body sent chunked, with no
+  `Content-Length`, can't be refused up front: Werkzeug 2.3 or later (Odoo's packages
+  on Python 3.12) stops reading it at 64 KB, but older Werkzeug reads all of it.
 
 ---
 
