@@ -261,7 +261,7 @@ class PosPaymentMethod(models.Model):
         for method in self:
             if method.payment_provider != MUSQET_TERMINAL:
                 continue
-            # Archived configs too: one may be restored, and the upgrade counts them.
+            # Archived configs too: one may be restored.
             configs = method.sudo().with_context(active_test=False).config_ids
             if configs.company_id - method.company_id:
                 raise ValidationError(_(

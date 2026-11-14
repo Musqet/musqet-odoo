@@ -11,21 +11,15 @@
                     <page name="musqet_settings" string="Musqet">
                         <group>
                             <field name="musqet_api_key"
-                                   invisible="payment_provider != 'musqet'"
                                    required="payment_provider == 'musqet'"
                                    password="True"/>
                             <field name="musqet_base_url"
-                                   invisible="payment_provider != 'musqet'"
                                    required="payment_provider == 'musqet'"/>
                             <field name="musqet_terminal_serial"
-                                   invisible="payment_provider != 'musqet'"
                                    required="payment_provider == 'musqet'"/>
                             <!-- Webhook (optional; public-HTTPS deployments only: the pilot uses polling) -->
-                            <field name="musqet_webhook_secret"
-                                   invisible="payment_provider != 'musqet'"
-                                   password="True"/>
+                            <field name="musqet_webhook_secret" password="True"/>
                             <field name="musqet_webhook_url"
-                                   invisible="payment_provider != 'musqet'"
                                    widget="CopyClipboardChar"/>
                         </group>
                     </page>

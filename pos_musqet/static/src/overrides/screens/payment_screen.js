@@ -24,7 +24,7 @@ patch(PaymentScreen.prototype, {
             // refund lines (negative) — a refund-of-refund finds no candidate and bails.
             const candidates = (refundedOrder?.payment_ids ?? []).filter(
                 (line) =>
-                    line.payment_provider === "musqet" &&
+                    line.payment_method_id?.payment_provider === "musqet" &&
                     line.transaction_id &&
                     toMinor(line.amount) >= dueMinor
             );

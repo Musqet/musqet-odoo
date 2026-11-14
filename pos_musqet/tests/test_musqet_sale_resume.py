@@ -27,7 +27,6 @@ from .common import (
     musqet_response,
     open_session,
     record_sale,
-    write_between_sessions,
 )
 
 
@@ -220,7 +219,7 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
     def test_ignores_a_sale_of_a_method_no_longer_musqet(self):
         # It can't be read, so it would block the order for good.
         self._sale('sale-p', method=self.other_method, amount_minor=700)
-        write_between_sessions(self.other_method, {'payment_provider': False})
+        self.other_method.write({'payment_provider': False})
         fake = FakeMusqet()
         self.assertEqual(self._create(fake)['saleId'], 'new-sale')
         self.assertEqual(fake.calls, [('POST', '/terminal/sales')])

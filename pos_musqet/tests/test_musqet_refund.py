@@ -24,7 +24,6 @@ from .common import (
     open_session,
     record_refund,
     record_sale,
-    write_between_sessions,
 )
 
 
@@ -336,7 +335,7 @@ class TestMusqetCreateRefund(TransactionCase):
         self.assertNotIn('error', result)
 
     def test_rejects_when_no_serial_is_configured(self):
-        write_between_sessions(self.method, {'musqet_terminal_serial': False})
+        self.method.write({'musqet_terminal_serial': False})
         self.method.musqet_latest_response = json.dumps({'saleId': 'live', 'status': 'PENDING'})
         result, mock_request = self._call_refund({'amountInCents': 500}, self._stub_original())
         self.assertIn('error', result)

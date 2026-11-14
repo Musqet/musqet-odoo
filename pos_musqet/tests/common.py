@@ -80,20 +80,13 @@ def open_plain_method(env):
 
 
 def list_method_on_config(method, config):
-    """List ``method`` on ``config`` whatever their companies, as a method shared before the
-    company rule may be. Raw SQL: Odoo keeps a config's methods to its company."""
+    """List ``method`` on ``config`` whatever their companies, as a direct database write
+    could. Raw SQL: Odoo keeps a config's methods to its company."""
     method.env.cr.execute(SQL(
         'INSERT INTO pos_config_pos_payment_method_rel (pos_config_id, pos_payment_method_id)'
         ' VALUES (%s, %s)', config.id, method.id))
     method.invalidate_recordset(['config_ids'])
     config.invalidate_recordset(['payment_method_ids'])
-
-
-def write_between_sessions(records, vals):
-    """Write ``vals`` on payment methods as if no POS session using them were open: Odoo
-    refuses most edits to a method while one is, and a test's cashier needs one open."""
-    with patch.object(type(records), '_is_write_forbidden', return_value=False):
-        records.write(vals)
 
 
 def musqet_response(sale_id, status='PENDING', status_code=200, **fields):

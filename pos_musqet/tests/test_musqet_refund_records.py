@@ -239,6 +239,27 @@ class TestMusqetRefundWithPosRecords(MusqetPosRecordsCase):
         seen = self.env['pos.musqet.sale'].with_user(manager).search([])
         self.assertEqual(seen.mapped('sale_id'), ['sale-mine'])
 
+    def test_manager_only_reads_sale_and_refund_records(self):
+        # The company restriction in ir.access covers every operation, but grants none: a
+        # manager's own access stays read-only, so records change only through the server.
+        manager = make_pos_user(self.env, 'musqet_manager_ro', group='point_of_sale.group_pos_manager')
+        sale = record_sale(self.env, self.method, 'sale-ro')
+        refund = self.env['pos.musqet.refund'].search([('sale_id', '=', 'refund-1')])
+        for record, vals in ((sale, {'sale_id': 'sale-forged', 'company_id': sale.company_id.id,
+                                     'payment_method_id': self.method.id}),
+                             (refund, {'sale_id': 'refund-forged', 'original_sale_id': 'sale-ro',
+                                       'company_id': refund.company_id.id,
+                                       'payment_method_id': self.method.id})):
+            Model = record.with_user(manager)
+            with self.subTest(model=record._name):
+                self.assertTrue(Model.search([('id', '=', record.id)]))
+                with self.assertRaises(AccessError):
+                    Model.write({'state': 'done'})
+                with self.assertRaises(AccessError):
+                    Model.create(vals)
+                with self.assertRaises(AccessError):
+                    Model.unlink()
+
     def test_manager_can_mark_a_stuck_pending_refund_failed(self):
         manager = make_pos_user(self.env, 'musqet_manager_fail', group='point_of_sale.group_pos_manager')
         stuck = self.env['pos.musqet.refund'].search([('sale_id', '=', 'refund-1')])

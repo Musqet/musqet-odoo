@@ -23,8 +23,8 @@ from the same ref. A tag can be moved, so for a fixed pin use the release's full
 40-character commit SHA, copied from that page: the script then refuses anything but
 that commit. Take the SHA only from Musqet's Releases page, since GitHub also serves
 commits from forks under this repo's URLs. The `20.0` branch is unreleased development
-code for Odoo 20 (`19.0` for Odoo 19); until the first release is tagged, it is the only
-ref there is.
+code for Odoo 20 (`19.0` for Odoo 19); until the first release is tagged, use the branch
+for your Odoo version.
 
 ```bash
 REF='<release tag>'     # until the first release is tagged: REF=20.0

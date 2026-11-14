@@ -13,7 +13,6 @@ from .common import (
     make_pos_user,
     open_plain_method,
     open_session,
-    write_between_sessions,
 )
 
 
@@ -244,25 +243,40 @@ class TestMusqetMethodCompany(ProxyCallsMixin, TransactionCase):
         self.assertEqual(method.payment_method_type, 'terminal')
         with self.assertRaisesRegex(ValidationError, 'Terminal integration'):
             method.payment_method_type = 'cash_machine'
+        # From the other side: Musqet given to a method that isn't a terminal.
+        plain = self.env['pos.payment.method'].create({'type': 'bank', 'name': 'Plain Type'})
+        with self.assertRaisesRegex(ValidationError, 'Terminal integration'):
+            plain.payment_provider = 'musqet'
+
+    def _listed_on_another_companys_pos(self, serial, archived=False):
+        """A Musqet method of a third company, listed (by a direct database write) on a POS
+        of another company, and that POS's company."""
+        third_company = self.env['res.company'].create({'name': 'Third Co %s' % serial})
+        method = create_musqet_method(self, serial, company_id=third_company.id)
+        other_company = self.env['res.company'].create({'name': 'Other Co %s' % serial})
+        env_other = self.env(context={'allowed_company_ids': other_company.ids})
+        config = env_other['pos.config'].create(
+            {'name': 'Other POS', 'payment_method_ids': [(6, 0, [])], 'active': not archived})
+        list_method_on_config(method, config)
+        return method, other_company
 
     def test_a_musqet_method_cannot_take_a_company_another_companys_pos_lists_it_on(self):
-        # Shared before the rule: the manager must take it off the other company's POS first.
-        other_company = self.env['res.company'].create({'name': 'Other Rule Co'})
-        method = create_musqet_method(self, 'MSQ-NOCO-005')
-        other_session = open_session(
-            self.env(context={'allowed_company_ids': other_company.ids}),
-            create_musqet_method(self, 'MSQ-NOCO-006', company_id=other_company.id))
-        list_method_on_config(method, other_session.config_id)
-        with self.assertRaisesRegex(ValidationError, 'another company'):
-            write_between_sessions(method, {'company_id': self.env.company.id})
-
-    def test_an_archived_pos_of_another_company_counts_too(self):
-        # It may be restored, and the upgrade counts it.
-        other_company = self.env['res.company'].create({'name': 'Other Archive Co'})
-        env_other = self.env(context={'allowed_company_ids': other_company.ids})
-        archived = env_other['pos.config'].create(
-            {'name': 'Archived POS', 'payment_method_ids': [(6, 0, [])], 'active': False})
-        method = create_musqet_method(self, 'MSQ-NOCO-007')
-        list_method_on_config(method, archived)
+        # The manager must take it off the other company's POS first.
+        method, _other = self._listed_on_another_companys_pos('MSQ-CO-001')
         with self.assertRaisesRegex(ValidationError, 'another company'):
             method.company_id = self.env.company
+
+    def test_an_archived_pos_of_another_company_counts_too(self):
+        # It may be restored.
+        method, _other = self._listed_on_another_companys_pos('MSQ-CO-002', archived=True)
+        with self.assertRaisesRegex(ValidationError, 'another company'):
+            method.company_id = self.env.company
+
+    def test_a_method_on_another_companys_pos_cannot_become_a_musqet_one(self):
+        method, _other = self._listed_on_another_companys_pos('MSQ-CO-003')
+        plain = self.env['pos.payment.method'].create({
+            'type': 'bank', 'name': 'Plain Terminal', 'payment_method_type': 'terminal'})
+        other_config = method.sudo().with_context(active_test=False).config_ids
+        list_method_on_config(plain, other_config)
+        with self.assertRaisesRegex(ValidationError, 'another company'):
+            plain.write({'payment_provider': 'musqet', 'musqet_terminal_serial': 'MSQ-CO-004'})

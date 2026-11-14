@@ -51,7 +51,7 @@ your Odoo addons path.
 > that commit. Take the SHA only from Musqet's Releases page, since GitHub also serves
 > commits from forks under this repo's URLs. The `20.0` branch is unreleased
 > development code for Odoo 20 (`19.0` for Odoo 19); until the first release is tagged,
-> it is the only ref there is. The script prints
+> use the branch for your Odoo version. The script prints
 > the commit it installed. It needs `git` **or** `curl`/`wget` (no git required). Run
 > with `--help` for options like `--source <dir>` for a local checkout.
 > The manual steps below are the same thing done by hand.
@@ -122,7 +122,9 @@ your Odoo addons path.
    (Odoo's upgrade sets any that are missing) and replaces *Use a Payment Terminal* with
    *Integration* and *Integrate with*: check each Musqet method afterwards shows
    **Terminal** and **Musqet** there (§3). Close every POS session first, and reload each
-   till afterwards.
+   till afterwards. The 19.0 upgrade steps above still ship, so a database left on an
+   older 19.0 version is brought up to date on the way; only the 19.0.1.6.0 company step
+   is gone, since Odoo 20 requires every method's company itself.
 
 ---
 

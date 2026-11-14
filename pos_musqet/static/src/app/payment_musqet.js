@@ -66,15 +66,17 @@ export class PaymentMusqet extends PaymentInterface {
         this.connectWebSocket("MUSQET_LATEST_RESPONSE", () => {
             const pendingLine = this.pos.getPendingPaymentLine("musqet");
             if (pendingLine) {
-                pendingLine.payment_interface.handleMusqetStatusResponse();
+                pendingLine.payment_interface.handleMusqetStatusResponse(pendingLine);
             }
         });
     }
 
-    // Odoo 20 never sends a terminal request when the line is added (only bank QR codes
-    // do): the cashier confirms the amount and presses Send, and the terminal then prompts
-    // for the rail (card or Lightning) itself.
-
+    /**
+     * Start a sale (or, for a negative line, a refund) on the terminal and wait for it to
+     * settle. Odoo 20 never calls this when the line is added (only bank QR codes send at
+     * once): the cashier confirms the amount and presses Send, and the terminal then prompts
+     * for the rail (card or Lightning) itself.
+     */
     async sendPaymentRequest(line) {
         await super.sendPaymentRequest(...arguments);
         const order = line?.pos_order_id;
@@ -240,8 +242,8 @@ export class PaymentMusqet extends PaymentInterface {
         // Keep waiting on the sale, unless it settled before the cancel began (its status is
         // already final). No message if it completed: the poll loop settles it as paid. The
         // core line puts itself back to "waitingCard" on our false (a Musqet method is always
-        // a "terminal" one: _check_musqet_terminal_type), and a refused delete restores the
-        // status the line had.
+        // a "terminal" one: _check_musqet_terminal_type). A refused delete then restores the
+        // status the line had when it began, which the poll loop corrects if it was "waiting".
         if (!state.settled) {
             this._keepWaiting(state, outcome.sale?.status !== SUCCESS_STATUS);
         }
@@ -428,6 +430,12 @@ export class PaymentMusqet extends PaymentInterface {
                 await this._sleep(POLL_INTERVAL_MS);
                 continue;
             }
+            // The sale is armed, so the line waits on the card. A refused delete that began
+            // during the create round-trip puts the line back to the status it had then
+            // ("waiting": no Cancel button), after our answer, so put it right here.
+            if (line.getPaymentStatus() === "waiting") {
+                line.setPaymentStatus("waitingCard");
+            }
             const timedOut = Date.now() - state.waitStart >= POLL_TIMEOUT_MS;
             if (timedOut || state.connectionFailures >= MAX_POLL_CONNECTION_FAILURES) {
                 if (await this._tryGiveUp(line, state, timedOut)) {
@@ -581,7 +589,7 @@ export class PaymentMusqet extends PaymentInterface {
             if (refundOf) {
                 line.musqet_refund_of = refundOf;
             }
-            // Odoo 20 dropped setReceiptInfo; it appended to the line's ticket field.
+            // ticket holds the line's receipt text; append, as other terminals may add to it.
             line.ticket = (line.ticket || "") + this._receiptInfo(sale);
             line.setPaymentStatus("done");
             state.resolve?.(true);
@@ -595,15 +603,15 @@ export class PaymentMusqet extends PaymentInterface {
     }
 
     /**
-     * Handle an inbound webhook (push path). Invoked by the websocket subscription in setup once the
-     * backend controller has verified a signature and buffered the result. Asks for the
-     * buffered result of this line's saleId and settles the line with it; with no saleId yet
+     * Handle an inbound webhook (push path) for ``line``, the pending Musqet line. Invoked by
+     * the websocket subscription in setup once the backend controller has verified a
+     * signature and buffered the result. Asks for the buffered result of this line's saleId
+     * and settles the line with it; with no saleId yet
      * (or after a page reload) it does nothing and the poll loop settles the line. Only fires
      * on publicly-reachable deployments; the pilot settles via the poll loop and never
      * reaches here.
      */
-    async handleMusqetStatusResponse() {
-        const line = this.pos.getPendingPaymentLine("musqet");
+    async handleMusqetStatusResponse(line) {
         const state = line && this.pollState[line.uuid];
         // Only the sale this line is waiting on: before our own create has returned
         // (state.saleId still null) we can't name it, so the poll loop settles it. With no
