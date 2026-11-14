@@ -124,8 +124,9 @@ your Odoo addons path.
    **Terminal** and **Musqet** there (§3). Close every POS session first, and reload each
    till afterwards. Upgrading to 19.0.1.7.0 on Odoo 19 first is required, not optional:
    its 19.0.1.6.0 step (shipped on the `19.0` branch) gives a Musqet method the company of
-   the POS configs it is on, and Odoo's own upgrade does not look at those. If a database skipped it, check afterwards that no Musqet method is
-   listed on another company's POS (its cashiers are refused until it is removed there).
+   the POS configs it is on, and Odoo's own upgrade does not look at those. If a database
+   skipped it, check afterwards that no Musqet method is listed on another company's POS
+   (its cashiers are refused until it is removed there).
 
 ---
 
