@@ -46,8 +46,9 @@ class MusqetController(http.Controller):
         still answered [accepted].
         Query or form parameters are ignored: the signed body is the only input.
         """
-        # The route's max_content_length refuses this as the body is read only on Werkzeug
-        # 2.3+; checked here too so the 413 holds on older Werkzeug (and before the guard).
+        # Only Werkzeug 2.3+ applies the route's max_content_length to a non-form body; checked
+        # here too so the 413 holds on older Werkzeug, and outside the try below so it isn't
+        # answered [accepted].
         length = request.httprequest.content_length
         if length is not None and length > MUSQET_WEBHOOK_MAX_BYTES:
             raise RequestEntityTooLarge()
