@@ -1059,7 +1059,10 @@ class PosPaymentMethod(models.Model):
         reply = json.loads(latest)
         # Every till using the method is pinged; only the one waiting on this sale takes the
         # result, so another till's call can't use up the push meant for it. The controller
-        # always buffers a non-empty saleId string, so nothing else matches it.
+        # always buffers a non-empty saleId string, so nothing else matches it. A till that
+        # names another till's saleId (same company, live session) could still take it: the
+        # server can't tell which session is calling. That costs only the push; the record is
+        # settled and the other till's poll settles its line.
         if reply.get('saleId') != sale_id:
             return False
         # Consume-once: clear the buffer as we hand it over so a duplicate notification — or a
@@ -1076,10 +1079,10 @@ class PosPaymentMethod(models.Model):
         the configured signing secret reproduces the signature AND the timestamp is fresh.
         Comparison is constant-time (consteq); a missing secret, malformed header or stale
         timestamp is rejected. A header naming ``t`` or ``v1`` more than once, a timestamp that
-        isn't 1 to 12 plain ASCII digits, or a ``v1`` that isn't ASCII is
-        malformed: the check reads one unambiguous value of each. ``raw_body`` must be the
-        exact bytes received — re-encoding a parsed body could change it and break the
-        signature.
+        isn't plain ASCII digits (at most MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS of them), or a
+        ``v1`` that isn't ASCII is malformed: the check reads one unambiguous value of each.
+        ``raw_body`` must be the exact bytes received — re-encoding a parsed body could change
+        it and break the signature.
 
         A captured request still verifies again inside the tolerance window. That is
         harmless here: the webhook only triggers a status read from Musqet's API (see the

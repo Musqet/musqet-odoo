@@ -7,6 +7,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from odoo.addons.pos_musqet.controllers.main import MUSQET_WEBHOOK_MAX_BYTES
+from odoo.addons.pos_musqet.models.pos_payment_method import MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS
 from odoo.addons.pos_musqet.models import pos_payment_method
 from odoo.exceptions import AccessDenied
 from odoo.tests import tagged
@@ -102,13 +103,13 @@ class TestMusqetWebhookVerification(TransactionCase):
                 header = self._sign(body, timestamp)
                 self.assertFalse(self.method._musqet_verify_webhook(header, body))
 
-    def test_rejects_a_timestamp_over_twelve_digits(self):
+    def test_rejects_a_timestamp_over_the_digit_limit(self):
         # Rejected, not raised: int() refuses over 4,300 digits, and a few hundred overflow
         # the float age check.
         body = b'{"status":"COMPLETE"}'
-        now = str(int(time.time()))
-        self.assertTrue(self.method._musqet_verify_webhook(self._sign(body, '00' + now), body))
-        for timestamp in ('000' + now, '9' * 400, '9' * 5000):
+        longest = str(int(time.time())).zfill(MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS)
+        self.assertTrue(self.method._musqet_verify_webhook(self._sign(body, longest), body))
+        for timestamp in ('0' + longest, '9' * 400, '9' * 5000):
             with self.subTest(digits=len(timestamp)):
                 header = self._sign(body, timestamp)
                 self.assertFalse(self.method._musqet_verify_webhook(header, body))
@@ -403,6 +404,17 @@ class TestMusqetWebhookRoute(HttpCase):
             response, _ = self._post(self._body())
         self.assertAccepted(response)
         self.assertEqual(self.sale.state, 'done')
+        # The buffer write is undone with the ping: no result is left waiting unannounced.
+        self.assertIsNone(self._buffered())
+
+    def test_any_failure_still_answers(self):
+        # One guard behind the whole handler: even the serial lookup failing is answered.
+        Method = type(self.env['pos.payment.method'])
+        with patch.object(Method, 'search', side_effect=ValueError('boom')), \
+             mute_logger('odoo.addons.pos_musqet.controllers.main'):
+            response, mock_request = self._post(self._body())
+        self.assertAccepted(response)
+        mock_request.assert_not_called()
 
     def test_a_form_body_is_dropped(self):
         # Odoo reads a form body as fields, leaving nothing to verify.
@@ -416,14 +428,16 @@ class TestMusqetWebhookRoute(HttpCase):
 
     def test_a_serial_that_is_not_a_string_reads_nothing(self):
         # Signed, but the serial must name one terminal: a list, say, isn't looked up.
-        for serial in (['MSQ-WHR-001'], {'serial': 'MSQ-WHR-001'}, 1):
-            with self.subTest(serial=serial), \
-                 mute_logger('odoo.addons.pos_musqet.controllers.main'):
+        for serial in (['MSQ-WHR-001'], {'serial': 'MSQ-WHR-001'}, 1, 'MSQ-WHR-001\x00'):
+            with self.subTest(serial=serial), self.assertLogs(
+                    'odoo.addons.pos_musqet.controllers.main', 'WARNING') as logs:
                 body = self._body()
                 body['data']['serial'] = serial
                 response, mock_request = self._post(body)
                 self.assertAccepted(response)
                 mock_request.assert_not_called()
+            # Refused by the check, not caught as a failure further on.
+            self.assertIn('serial missing or not a plain string', logs.output[0])
         self.assertEqual(self.sale.state, 'pending')
 
     def test_an_oversized_body_is_refused_unread(self):

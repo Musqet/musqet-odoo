@@ -41,6 +41,16 @@ class MusqetController(http.Controller):
             _logger.warning("Musqet webhook: body sent as a form, not JSON")
             return self._ack()
         raw_body = request.httprequest.data  # exact bytes — needed to verify the HMAC.
+        # The one guard behind every step below: whatever raises, the answer is [accepted].
+        # The steps that must not undo each other (settling, then pushing) catch their own.
+        try:
+            with request.env.cr.savepoint():
+                return self._musqet_handle_webhook(raw_body)
+        except Exception:
+            _logger.exception("Musqet webhook: could not handle the request")
+            return self._ack()
+
+    def _musqet_handle_webhook(self, raw_body):
         try:
             payload = json.loads(raw_body or b'{}')
         except Exception:
@@ -55,8 +65,9 @@ class MusqetController(http.Controller):
         # wrapped as {event, data}. Unwrap to the sale object either way.
         sale = payload['data'] if isinstance(payload.get('data'), dict) else payload
         serial = sale.get('serial')
-        if not isinstance(serial, str) or not serial:
-            _logger.warning("Musqet webhook: terminal serial missing or not a string")
+        # PostgreSQL can't take a NUL in a string, so one is refused here, not by the search.
+        if not isinstance(serial, str) or not serial or '\x00' in serial:
+            _logger.warning("Musqet webhook: terminal serial missing or not a plain string")
             return self._ack()
 
         # The serial only selects which method's secret to verify against; the HMAC is the
@@ -68,14 +79,7 @@ class MusqetController(http.Controller):
             return self._ack()
 
         signature = request.httprequest.headers.get('x-webhook-signature', '')
-        try:
-            verified = method_sudo._musqet_verify_webhook(signature, raw_body)
-        except Exception:
-            # The check rejects malformed headers itself, so this would be a bug in it; caught
-            # so it still answers [accepted], not an error only a registered serial reaches.
-            _logger.warning("Musqet webhook: signature check raised for %r", serial)
-            return self._ack()
-        if not verified:
+        if not method_sudo._musqet_verify_webhook(signature, raw_body):
             _logger.warning("Musqet webhook: signature verification failed for %r", serial)
             return self._ack()
 
