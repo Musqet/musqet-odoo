@@ -27,12 +27,15 @@ MUSQET_SALE_REREAD_LIMIT = 5
 # A pending sale older than this that Musqet answers not found for no longer blocks a new sale
 # of its order: Musqet times a sale out after about five minutes, so it can't still be paid.
 MUSQET_SALE_STALE_AFTER = timedelta(minutes=15)
-# The first key of the advisory lock on starting a sale of an order (_musqet_try_lock_order);
-# the second is a hash of the company and order reference.
+# The first key of the advisory lock on starting a sale of an order (_musqet_try_lock_order):
+# ASCII "MS", the namespace of the two-key lock. The second key is a 32-bit hash of the
+# company and order reference, so two orders may now and then share a lock; the cost is a
+# rare, false "already being started" refusal.
 MUSQET_SALE_START_LOCK = 0x4D53
-# At most this many saleIds of the order's lines are taken from the POS, each at most this
-# long: an order has a handful of payment lines.
+# At most this many saleIds of the order's lines are taken from the POS: an order has a
+# handful of payment lines.
 MUSQET_LINE_SALE_IDS_LIMIT = 100
+# A saleId from the POS longer than this is ignored (Musqet's are far shorter).
 MUSQET_SALE_ID_MAX_LENGTH = 255
 
 
@@ -67,6 +70,11 @@ class PosMusqetSale(models.Model):
     state = fields.Selection(
         help="Done once Musqet reports the sale complete, with the amount and currency it "
              "captured. Only a done card sale can be refunded.")
+    not_found_at = fields.Datetime(
+        string="Not Found at Musqet", readonly=True,
+        help="When Musqet answered that it has no such sale, long after the sale was started. "
+             "It no longer blocks a new sale of its order, and is not read again. Check it in "
+             "the Musqet app: it may have been paid under a previous API key.")
 
     _unique_sale = models.Constraint(
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet sale is already recorded.')
@@ -141,17 +149,19 @@ class PosMusqetSale(models.Model):
 
         A sale may be resumed only if its method, amount and currency are the request's, it
         is not on one of the order's lines (``line_sale_ids``, the saleIds on them, which the
-        POS sends), and this request's read of it, if any, didn't get a 404 (Musqet doesn't
-        know it, so polling it would fail). A done sale on a line is left out; a pending one
+        POS sends), and this request's read of it, if any, didn't get a 404 of any kind
+        (Musqet doesn't know it, or the method can't reach Musqet: either way polling it
+        would fail). A done sale on a line is left out; a pending one
         on a line still refuses, as does any pending sale that can't be resumed.
         ``line_sale_ids`` comes from the browser, so it can only refuse more, or send a new
         sale where one was done, never hide a pending sale.
 
         A pending sale whose read got Musqet's own not-found reply (reply_is_not_found) and
         that is older than MUSQET_SALE_STALE_AFTER can't still be paid on the terminal: it
-        is left out of this request, and logged for reconciliation. Its record stays pending,
-        as it may have been paid (a sale of the business the API key belonged to before it
-        was changed reads as not found too). A recent one still refuses. A read that fails
+        is stamped not_found_at, logged once for reconciliation, and left out of this request
+        and every later one (never read again). Its state stays pending, as it may have been
+        paid (a sale of the business the API key belonged to before it was changed reads as
+        not found too). A recent one still refuses. A read that fails
         any other way (Musqet unreachable, or the method's configuration broken, say a base
         URL whose every route answers 404 without Musqet's error body: an administrator must
         fix the method), or a sale past the read limit, still counts as pending.
@@ -174,28 +184,18 @@ class PosMusqetSale(models.Model):
                 "A Musqet payment for this order is already being started. Wait for it, then "
                 "try again.")
         open_sales = self._musqet_open_sales_of(company, reference)
-        to_read = open_sales.filtered(lambda sale: sale.state == 'pending').sorted('id', reverse=True)
-        cutoff = fields.Datetime.now() - MUSQET_SALE_STALE_AFTER
-        not_found = self.sudo().browse()
-        for sale in to_read[:MUSQET_SALE_REREAD_LIMIT]:
-            if reply_is_not_found(sale.payment_method_id.musqet_get_sale(sale.sale_id)):
-                not_found |= sale
-        gone = not_found.filtered(lambda sale: sale.create_date < cutoff)
-        for sale in gone:
-            _logger.warning(
-                "Musqet no longer knows sale %r (method %s, order %r), pending since %s: "
-                "starting another sale of the order. Check it in the Musqet app.",
-                sale.sale_id, sale.payment_method_id.id, sale.reference, sale.create_date)
+        unreadable = self._musqet_read_pending(open_sales)
         on_lines = self._musqet_line_sale_ids(line_sale_ids)
-        # After the reads: a sale the POS has on a line may only now read as done.
+        # After the reads: a sale the POS has on a line may only now read as done, and one
+        # Musqet no longer knows may only now be stamped.
         open_sales = open_sales.filtered(
-            lambda sale: sale.state != 'failed'
-            and not (sale.state == 'done' and sale.sale_id in on_lines)) - gone
+            lambda sale: sale.state != 'failed' and not sale.not_found_at
+            and not (sale.state == 'done' and sale.sale_id in on_lines))
 
         def resumable(sale):
             return (sale.payment_method_id == method and sale.amount_minor == amount
                     and sale.currency == currency and sale.sale_id not in on_lines
-                    and sale not in not_found)
+                    and sale not in unreadable)
 
         pending = open_sales.filtered(lambda sale: sale.state == 'pending')
         resumable_pending = pending.filtered(resumable)
@@ -206,6 +206,30 @@ class PosMusqetSale(models.Model):
                 "the Musqet payment methods.")
         candidates = resumable_pending or open_sales.filtered(resumable)
         return candidates.sorted('id', reverse=True)[:1], None
+
+    @api.model
+    def _musqet_read_pending(self, sales):
+        """Read the newest pending ones of ``sales`` from Musqet; return those that got a 404.
+
+        Reads at most MUSQET_SALE_REREAD_LIMIT. One older than MUSQET_SALE_STALE_AFTER that
+        got Musqet's own not-found reply is stamped not_found_at and logged, once (see
+        _musqet_sale_to_resume).
+        """
+        to_read = sales.filtered(lambda sale: sale.state == 'pending').sorted('id', reverse=True)
+        cutoff = fields.Datetime.now() - MUSQET_SALE_STALE_AFTER
+        unreadable = self.sudo().browse()
+        for sale in to_read[:MUSQET_SALE_REREAD_LIMIT]:
+            reply = sale.payment_method_id.musqet_get_sale(sale.sale_id)
+            error = reply.get('error') if isinstance(reply, dict) else None
+            if isinstance(error, dict) and error.get('status_code') == 404:
+                unreadable |= sale
+            if sale.create_date < cutoff and reply_is_not_found(reply):
+                sale.not_found_at = fields.Datetime.now()
+                _logger.warning(
+                    "Musqet no longer knows sale %r (method %s, order %r), pending since %s: "
+                    "no longer blocking the order. Check it in the Musqet app.",
+                    sale.sale_id, sale.payment_method_id.id, sale.reference, sale.create_date)
+        return unreadable
 
     @api.model
     def _musqet_order_lock_key(self, company, reference):
@@ -239,14 +263,16 @@ class PosMusqetSale(models.Model):
     def _musqet_open_sales_of(self, company, reference):
         """The sales of order ``reference`` in ``company`` that a new sale may repeat.
 
-        Those Musqet hasn't failed, on a method that is still a Musqet one (a record of any
-        other can't be read), and not on a synced payment with their (method, saleId).
+        Those Musqet hasn't failed or said it no longer knows (not_found_at), on a method
+        that is still a Musqet one (a record of any other can't be read), and not on a synced
+        payment with their (method, saleId).
         """
         sales = self.sudo().search([
             ('company_id', '=', company.id),
             ('reference', '=', reference),
             ('state', '!=', 'failed'),
             ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
+            ('not_found_at', '=', False),
         ], order='id')
         on_lines = {
             (payment.payment_method_id.id, payment.transaction_id)

@@ -27,13 +27,12 @@ from .common import (
 )
 
 
-# The logger of the proxy, which warns of a failed or mismatched Musqet call.
+# Loggers: the proxy warns of a failed or mismatched Musqet call, the sale records of a stale
+# sale Musqet no longer knows.
 PROXY_LOGGER = 'odoo.addons.pos_musqet.models.pos_payment_method'
-
-
-# The logger of the sale records, which warns of a stale sale Musqet no longer knows.
 SALE_LOGGER = 'odoo.addons.pos_musqet.models.pos_musqet_sale'
-# Musqet's own answer for a saleId it doesn't know, and a bare 404 from something else.
+# Replies for stub_reply: Musqet's own answer for a saleId it doesn't know, and a bare 404
+# from something else (a wrong base URL, a proxy in the way).
 NOT_FOUND = {'status_code': 404, 'body': {'error': {'code': 404, 'message': 'Terminal sale not found.'}}}
 BARE_404 = {'status_code': 404, 'body': 'Not Found'}
 
@@ -255,6 +254,25 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
         # business the API key belonged to before).
         self.assertIn("'sale-p'", logs.output[0])
         self.assertEqual(sale.state, 'pending')
+        self.assertTrue(sale.not_found_at)
+
+    def test_a_stale_sale_musqet_no_longer_has_is_logged_once_and_not_read_again(self):
+        sale = self._sale('sale-p', amount_minor=700)
+        self._age(sale, MUSQET_SALE_STALE_AFTER + timedelta(minutes=1))
+        with self.assertLogs(PROXY_LOGGER, 'WARNING'), self.assertLogs(SALE_LOGGER, 'WARNING'):
+            self._create(FakeMusqet(statuses={'sale-p': NOT_FOUND}), reference='Order-R')
+        fake = FakeMusqet(statuses={'sale-p': NOT_FOUND})
+        with self.assertNoLogs(SALE_LOGGER, 'WARNING'):
+            self.assertEqual(self._create(fake)['saleId'], 'new-sale')
+        self.assertNotIn(('GET', '/terminal/sales/sale-p'), fake.calls)
+
+    def test_a_matching_sale_whose_method_answers_a_bare_404_is_not_resumed(self):
+        # Polling it would fail at once: the method can't reach Musqet.
+        self._sale('sale-p')
+        fake = FakeMusqet(statuses={'sale-p': BARE_404})
+        with self.assertLogs(PROXY_LOGGER, 'WARNING'):
+            result = self._create(fake)
+        self.assertRefusedInProgress(result, fake)
 
     def test_a_bare_404_says_nothing_about_a_stale_sale(self):
         # A wrong base URL answers 404 for every route, without Musqet's error body.
@@ -274,7 +292,7 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
             result = self._create(fake)
         self.assertRefusedInProgress(result, fake)
 
-    def test_a_recent_pending_sale_still_blocks_on_a_404(self):
+    def test_a_recent_pending_sale_still_blocks_on_musqets_not_found(self):
         # It may be a sale of the business the API key belonged to before it was changed.
         self._sale('sale-p', amount_minor=700)
         fake = FakeMusqet(statuses={'sale-p': NOT_FOUND})

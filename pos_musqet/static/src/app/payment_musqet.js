@@ -231,10 +231,8 @@ export class PaymentMusqet extends PaymentInterface {
         } finally {
             state.cancelRequested = false;
         }
-        if (outcome.sale?.status !== SUCCESS_STATUS) {
-            this._showError(CANNOT_CANCEL_MESSAGE());
-        }
-        this._restartWait(state);
+        // No message if it completed: the poll loop settles it as paid.
+        this._keepWaiting(state, outcome.sale?.status !== SUCCESS_STATUS);
         // Keep waiting on the sale. (The core screen does this itself after a cancel button,
         // but leaves a deleted line "waitingCancel".) Not if it settled before the cancel
         // began: its status is already final.
@@ -403,9 +401,9 @@ export class PaymentMusqet extends PaymentInterface {
     /**
      * Poll musqet_get_sale until a terminal status, or until the wait can be given up
      * (_tryGiveUp: out of time or contact, and the sale ended or can't be asked about),
-     * settling the line through _finishSale (which resolves sendPaymentRequest's promise). Fire-and-forget: the
-     * result is delivered via ``state.resolve``, not a return value, so an inbound webhook can
-     * settle the same line first. ``state`` is owned by sendPaymentRequest (which registered
+     * settling the line through _finishSale (which resolves sendPaymentRequest's promise).
+     * Fire-and-forget: the result is delivered via ``state.resolve``, not a return value, so
+     * an inbound webhook can settle the same line first. ``state`` is owned by sendPaymentRequest (which registered
      * and will remove it) so a cancel — or a webhook that already settled — is observed here.
      */
     async _pollSale(saleId, line, state) {
@@ -473,6 +471,17 @@ export class PaymentMusqet extends PaymentInterface {
     }
 
     /**
+     * Keep waiting on a sale whose cancel Musqet couldn't confirm: it may still be paid.
+     * Tells the cashier so (if ``warn``) and starts a new wait.
+     */
+    _keepWaiting(state, warn) {
+        if (warn) {
+            this._showError(CANNOT_CANCEL_MESSAGE());
+        }
+        this._restartWait(state);
+    }
+
+    /**
      * Stop waiting on the line's sale, out of time (``timedOut``) or after losing contact,
      * and return whether the line was settled (else the poll loop carries on).
      *
@@ -501,8 +510,7 @@ export class PaymentMusqet extends PaymentInterface {
         if (!ended && (timedOut || answered)) {
             // Not confirmed ended, and either out of time or Musqet just answered (so contact
             // is back): the sale may still be paid, so keep waiting on it.
-            this._showError(CANNOT_CANCEL_MESSAGE());
-            this._restartWait(state);
+            this._keepWaiting(state, true);
             return false;
         }
         let message;
@@ -514,6 +522,9 @@ export class PaymentMusqet extends PaymentInterface {
         } else if (timedOut) {
             // Say how it ended, if the read told us (the terminal may have failed it first).
             message = this._statusErrorMessage(sale?.status || "TIMED_OUT");
+        } else if (sale?.status) {
+            // Ended on its own (the read reported how), not by our cancel.
+            message = this._statusErrorMessage(sale.status);
         } else {
             message = _t(
                 "Contact with Odoo or Musqet dropped while waiting for the Musqet terminal, so the payment was cancelled. Please try again."

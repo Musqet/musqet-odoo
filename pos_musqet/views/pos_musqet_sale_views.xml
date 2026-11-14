@@ -13,6 +13,7 @@
                 <field name="rail"/>
                 <field name="payment_method_id"/>
                 <field name="company_id" groups="base.group_multi_company"/>
+                <field name="not_found_at" optional="hide"/>
                 <field name="state" widget="badge"
                        decoration-warning="state == 'pending'"
                        decoration-success="state == 'done'"
@@ -41,6 +42,7 @@
                             <field name="currency"/>
                             <field name="payment_method_id"/>
                             <field name="company_id" groups="base.group_multi_company"/>
+                            <field name="not_found_at" invisible="not not_found_at"/>
                         </group>
                     </group>
                 </sheet>
