@@ -7,7 +7,6 @@ import time
 from unittest.mock import MagicMock, patch
 
 from odoo.addons.pos_musqet.controllers.main import MUSQET_WEBHOOK_MAX_BYTES
-from odoo.addons.pos_musqet.models.pos_payment_method import MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS
 from odoo.addons.pos_musqet.models import pos_payment_method
 from odoo.exceptions import AccessDenied
 from odoo.tests import tagged
@@ -107,7 +106,8 @@ class TestMusqetWebhookVerification(TransactionCase):
         # Rejected, not raised: int() refuses over 4,300 digits, and a few hundred overflow
         # the float age check.
         body = b'{"status":"COMPLETE"}'
-        longest = str(int(time.time())).zfill(MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS)
+        longest = str(int(time.time())).zfill(
+            pos_payment_method.MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS)
         self.assertTrue(self.method._musqet_verify_webhook(self._sign(body, longest), body))
         for timestamp in ('0' + longest, '9' * 400, '9' * 5000):
             with self.subTest(digits=len(timestamp)):
@@ -350,12 +350,16 @@ class TestMusqetWebhookRoute(HttpCase):
         refund.invalidate_recordset()
         self.assertEqual((refund.state, refund.amount_minor), ('done', 900))
 
-    def test_a_non_string_sale_id_reads_nothing(self):
+    def test_a_sale_id_that_is_not_a_plain_string_reads_nothing(self):
+        # Neither a number nor a string with a NUL: refused, not raised by the record search.
         sale = record_sale(self.env, self.method, '123', state='pending')
-        body = self._body()
-        body['data']['saleId'] = 123
-        _, mock_request = self._post(body, read=musqet_response('123', 'COMPLETE'))
-        mock_request.assert_not_called()
+        for sale_id in (123, '123\x00'):
+            with self.subTest(sale_id=sale_id), \
+                 self.assertNoLogs('odoo.addons.pos_musqet.controllers.main', 'ERROR'):
+                body = self._body()
+                body['data']['saleId'] = sale_id
+                _, mock_request = self._post(body, read=musqet_response('123', 'COMPLETE'))
+                mock_request.assert_not_called()
         sale.invalidate_recordset()
         self.assertEqual(sale.state, 'pending')
 
@@ -426,8 +430,9 @@ class TestMusqetWebhookRoute(HttpCase):
             self.assertAccepted(response)
             self.assertIn('sent as a form', logs.output[0])
 
-    def test_a_serial_that_is_not_a_string_reads_nothing(self):
-        # Signed, but the serial must name one terminal: a list, say, isn't looked up.
+    def test_a_serial_that_is_not_a_plain_string_reads_nothing(self):
+        # Signed, but the serial must name one terminal: a list, say, isn't looked up, nor a
+        # string with a NUL (PostgreSQL can't search for one).
         for serial in (['MSQ-WHR-001'], {'serial': 'MSQ-WHR-001'}, 1, 'MSQ-WHR-001\x00'):
             with self.subTest(serial=serial), self.assertLogs(
                     'odoo.addons.pos_musqet.controllers.main', 'WARNING') as logs:

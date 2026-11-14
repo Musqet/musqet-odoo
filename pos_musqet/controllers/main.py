@@ -18,6 +18,12 @@ MUSQET_WEBHOOK_MAX_BYTES = 64 * 1024
 FORM_MIMETYPES = ('application/x-www-form-urlencoded', 'multipart/form-data')
 
 
+def _plain_string(value):
+    """Whether a body value can go into a database search: a non-empty string with no NUL
+    (PostgreSQL can't take one), so a bad value is refused, not raised by the search."""
+    return isinstance(value, str) and bool(value) and '\x00' not in value
+
+
 class MusqetController(http.Controller):
 
     # type='http', not 'jsonrpc': Musqet posts a plain JSON body, not a JSON-RPC call, and a
@@ -42,7 +48,7 @@ class MusqetController(http.Controller):
             return self._ack()
         raw_body = request.httprequest.data  # exact bytes — needed to verify the HMAC.
         # The one guard behind every step below: whatever raises, the answer is [accepted].
-        # The steps that must not undo each other (settling, then pushing) catch their own.
+        # The push catches its own, so a failure there doesn't undo the settled record.
         try:
             with request.env.cr.savepoint():
                 return self._musqet_handle_webhook(raw_body)
@@ -65,8 +71,7 @@ class MusqetController(http.Controller):
         # wrapped as {event, data}. Unwrap to the sale object either way.
         sale = payload['data'] if isinstance(payload.get('data'), dict) else payload
         serial = sale.get('serial')
-        # PostgreSQL can't take a NUL in a string, so one is refused here, not by the search.
-        if not isinstance(serial, str) or not serial or '\x00' in serial:
+        if not _plain_string(serial):
             _logger.warning("Musqet webhook: terminal serial missing or not a plain string")
             return self._ack()
 
@@ -91,7 +96,7 @@ class MusqetController(http.Controller):
         # read could still settle (pending, or a done sale with no rail yet): once it is
         # settled (or if Odoo never recorded it), the POS's own poll covers the till, and a
         # replayed webhook costs no call to Musqet.
-        # In a savepoint, and never raised: the reply must stay [accepted] whatever happens.
+        # In its own savepoint, so a failed read is rolled back and logged against its sale.
         # A record a read could still settle, left so here, is read back from Musqet the next
         # time a refund of the sale resolves it; until then its synced line shows Not
         # verified (or, for a sale with no rail, can't be refunded).
@@ -101,8 +106,7 @@ class MusqetController(http.Controller):
             with request.env.cr.savepoint():
                 # An empty saleId names no sale (an unanswered record has none), so it is
                 # never read.
-                if (sale_id and isinstance(sale_id, str)
-                        and method_sudo._musqet_needs_status_read(sale_id)):
+                if _plain_string(sale_id) and method_sudo._musqet_needs_status_read(sale_id):
                     reply = method_sudo.musqet_get_sale(sale_id)
         except Exception:
             _logger.exception("Musqet webhook: could not settle sale %r", sale_id)

@@ -43,6 +43,7 @@ MUSQET_TIMEOUT = 10
 MUSQET_WEBHOOK_TOLERANCE = 300
 # Epoch seconds are 10 digits until the year 2286. A far longer timestamp would make int() or
 # the float age check raise instead of being rejected, so the header allows a little more.
+# pos_musqet/docs/INSTALL.md §5 states this limit too.
 MUSQET_WEBHOOK_MAX_TIMESTAMP_DIGITS = 12
 # The base URL must point at the Musqet cloud. The field stays configurable (prod vs
 # staging) but is locked to this domain so an ERP manager can't repoint it at an
