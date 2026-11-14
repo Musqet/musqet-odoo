@@ -177,7 +177,7 @@ class TestMusqetLostSaleReply(TransactionCase):
         self.assertEqual(read('sale-r'), {'saleId': 'sale-r', 'status': 'CANCELLED'})
         self.assertEqual(sale.state, 'failed')
 
-    def test_only_musqet_s_own_refusal_reaches_the_till_with_its_error_object(self):
+    def test_only_a_refusal_in_musqets_shape_reaches_the_till(self):
         # A gateway's page (an unknown outcome) stays out of the reply, which reaches the
         # cashier's browser; a refusal in Musqet's error shape keeps only an integer code
         # (reply_is_not_found reads it) and a capped message.

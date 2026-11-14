@@ -31,8 +31,8 @@ from .common import (
 
 # The sale records log a stale sale Musqet no longer knows.
 SALE_LOGGER = 'odoo.addons.pos_musqet.models.pos_musqet_sale'
-# Replies for stub_reply: Musqet's own answer for a saleId it doesn't know, and a bare 404
-# from something else (a wrong base URL, a proxy in the way).
+# Replies for stub_reply: a 404 in Musqet's NOT_FOUND shape (its answer for a saleId it
+# doesn't know), and a bare 404 from something else (a wrong base URL, a proxy in the way).
 NOT_FOUND = {'status_code': 404, 'body': {'error': {'code': 404, 'message': 'Terminal sale not found.'}}}
 BARE_404 = {'status_code': 404, 'body': 'Not Found'}
 
@@ -410,9 +410,9 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
 
 @tagged('post_install', '-at_install')
 class TestMusqetReplyIsNotFound(TransactionCase):
-    """reply_is_not_found takes only Musqet's own 404 body as "no such sale"."""
+    """reply_is_not_found takes only a 404 in Musqet's NOT_FOUND shape as "no such sale"."""
 
-    def test_only_musqets_own_not_found(self):
+    def test_only_a_not_found_in_musqets_shape(self):
         def proxy_error(status_code, detail):
             return {'error': {'message': 'x', 'status_code': status_code, 'detail': detail}}
 

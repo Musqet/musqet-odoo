@@ -437,7 +437,7 @@ class PosPaymentMethod(models.Model):
             details = {'status_code': response.status_code}
             if response.status_code in MUSQET_REFUSED_STATUSES:
                 detail = self._musqet_refusal_detail(response, method, path)
-                if detail:
+                if detail is not None:
                     details['detail'] = detail
             else:
                 details[MUSQET_OUTCOME_UNKNOWN] = True
@@ -460,12 +460,13 @@ class PosPaymentMethod(models.Model):
             return response.text
 
     @api.model
-    def _musqet_log_body_at_debug(self, response, method, path):
+    def _musqet_log_body_at_debug(self, response, method, path, body=None):
         """Log the body of a non-2xx ``response`` that may not be Musqet's (a gateway's or a
         WAF's page, say), at debug only: it is kept out of the reply, which reaches the
-        cashier's browser."""
-        _logger.debug("Musqet %s %s HTTP %s body: %.500r", method, path, response.status_code,
-                      self._musqet_response_json(response))
+        cashier's browser. ``body`` is the body if already parsed (_musqet_response_json)."""
+        if body is None:
+            body = self._musqet_response_json(response)
+        _logger.debug("Musqet %s %s HTTP %s body: %.500r", method, path, response.status_code, body)
 
     @api.model
     def _musqet_refusal_detail(self, response, method, path):
@@ -477,7 +478,7 @@ class PosPaymentMethod(models.Model):
         """
         body = self._musqet_response_json(response)
         if not isinstance(body, dict) or not isinstance(body.get('error'), dict):
-            self._musqet_log_body_at_debug(response, method, path)
+            self._musqet_log_body_at_debug(response, method, path, body)
             return None
         error = {}
         code = body['error'].get('code')

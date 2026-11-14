@@ -185,7 +185,7 @@ class PosMusqetSale(models.Model):
         ``line_sale_ids`` comes from the browser, so it can only refuse more, or send a new
         sale where one was done, never hide a pending sale.
 
-        A pending sale whose read got Musqet's own not-found reply (reply_is_not_found) and
+        A pending sale whose read got a 404 in Musqet's NOT_FOUND shape (reply_is_not_found) and
         that is older than MUSQET_SALE_STALE_AFTER can't still be paid on the terminal: it
         is stamped not_found_at, logged once for reconciliation, and left out of this request
         and later ones (they no longer read it), unless a later reply settles it, which clears
