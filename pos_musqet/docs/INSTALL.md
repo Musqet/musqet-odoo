@@ -251,9 +251,10 @@ and make your **company currency match it** (and keep each POS on the company cu
    **Lost replies.** If Musqet's reply to a payment or refund request never reaches Odoo
    (the connection drops or times out, or Musqet or a gateway in front of it answers
    with anything but a plain refusal, such as a server error), the terminal may have
-   taken it all the same, and Musqet can't look a request up by order reference. So Odoo records it with no Musqet saleId, tells the cashier, and refuses
-   another Musqet payment of that order (or another refund in that refund order) until a
-   manager clears it. A lost refund also counts against the original sale until then. To
+   taken it all the same, and Musqet can't look a request up by order reference. So
+   Odoo records it with no Musqet saleId, tells the cashier, and refuses another Musqet
+   payment of that order (or another refund in that refund order) until a manager
+   clears it. A lost refund also counts against the original sale until then. To
    clear one, find it under **Musqet Sales** or **Musqet Refunds** (filter *Reply lost*)
    and check the Musqet app for a request with its reference:
    - nothing taken: open it and click **Mark as Failed**;

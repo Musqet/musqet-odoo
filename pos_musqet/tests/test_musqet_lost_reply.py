@@ -73,6 +73,8 @@ LOST = [
     ('2xx without a saleId', reply(200, {'status': 'PENDING'})),
     ('2xx with an empty saleId', reply(200, {'saleId': '', 'status': 'PENDING'})),
     ('2xx not an object', reply(200, ['PENDING'])),
+    ('2xx with an error message', reply(200, {'error': 'upstream timeout'})),
+    ('2xx with an error object', reply(200, {'error': {'code': 504}})),
 ]
 # Requests Musqet refused or never got: (label, raised error or reply).
 NOT_ACCEPTED = [
@@ -88,6 +90,8 @@ NOT_ACCEPTED = [
     ('409 terminal busy', reply(409, {'error': {'code': 409, 'message': 'busy'}})),
     ('400', reply(400, {'error': {'code': 400}})),
     ('401 bad key', reply(401, {'error': {'code': 401}})),
+    ('403', reply(403, {'error': {'code': 403}})),
+    ('404 wrong URL', reply(404, unreadable=True)),
     ('422', reply(422, {'error': {'code': 422}})),
 ]
 

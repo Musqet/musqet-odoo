@@ -22,8 +22,9 @@ class PosMusqetRefund(models.Model):
     only by the server (sudo), and exist as soon as Musqet accepts the refund, before the
     refund order reaches Odoo (except in the case the "Not covered" paragraph of
     musqet_create_refund names), or as soon as its reply is lost (unanswered, with no
-    saleId). A POS manager can mark a pending one failed
-    (action_musqet_mark_failed); nothing else changes them from the browser. The upgrade
+    saleId). A POS manager can mark a pending one failed (action_musqet_mark_failed), or an
+    unanswered one refunded (action_musqet_mark_refunded); nothing else changes them from the
+    browser. The upgrade
     to 19.0.1.2.0 also created done records for the refunds synced before it
     (_musqet_record_synced_refunds).
     """
@@ -39,7 +40,8 @@ class PosMusqetRefund(models.Model):
     reference = fields.Char(help="The refund order reference sent to Musqet.")
     amount_minor = fields.Integer(
         help="The amount in minor units of the company currency (cents): the amount requested "
-             "while pending, the amount Musqet reports refunded once done.")
+             "while pending, the amount Musqet reports refunded once done (or the amount "
+             "requested, if a manager marked it refunded).")
     state = fields.Selection(help="Pending and Done count against the original sale; Failed does not.")
 
     _unique_sale = models.Constraint(

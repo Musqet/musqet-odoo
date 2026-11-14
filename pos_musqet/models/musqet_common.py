@@ -153,8 +153,8 @@ def reply_outcome_is_unknown(reply):
 
     True for a reply that names no saleId and is not an ``{error}`` saying Musqet refused the
     request or never got it: the request may have reached Musqet while the reply was lost (a
-    read timeout, a dropped connection, a 5xx, a body Odoo can't read). _musqet_request marks
-    those errors MUSQET_OUTCOME_UNKNOWN.
+    read timeout, a dropped connection, a status outside MUSQET_REFUSED_STATUSES, a body Odoo
+    can't read). _musqet_request marks those errors MUSQET_OUTCOME_UNKNOWN.
     """
     if not isinstance(reply, dict):
         return True

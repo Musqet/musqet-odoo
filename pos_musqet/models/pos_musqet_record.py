@@ -27,7 +27,8 @@ class PosMusqetRecord(models.AbstractModel):
     Musqet may have accepted it (_musqet_record_sent). Nothing can read it from Musqet (the
     API has no lookup by reference), so it stays pending, blocking its order's next request
     and counting as a pending one would, until a POS manager who has checked it in the
-    Musqet app marks it failed (action_musqet_mark_failed).
+    Musqet app marks it failed (action_musqet_mark_failed), or, for a refund, refunded
+    (pos.musqet.refund.action_musqet_mark_refunded).
     """
     _name = 'pos.musqet.record'
     _description = 'Musqet Sale or Refund Record'
@@ -65,7 +66,8 @@ class PosMusqetRecord(models.AbstractModel):
 
     def _musqet_is_unanswered(self):
         """Whether this record is unanswered and still pending: the reply to its request never
-        reached Odoo (it has no saleId), and no manager has marked it failed."""
+        reached Odoo (it has no saleId), and no manager has marked it failed (or, for a
+        refund, refunded)."""
         self.ensure_one()
         return self.state == 'pending' and not self.sale_id
 
@@ -168,9 +170,10 @@ class PosMusqetRecord(models.AbstractModel):
     def _musqet_record_unanswered(self, vals, details):
         """Record a request Musqet may have accepted, its reply lost; return the POS message.
 
-        Pending with no saleId until a manager marks it failed, and the message says the
-        order is blocked until then. If it can't be saved (in a savepoint, logged), nothing
-        blocks a retry, and the message says to check the Musqet app first.
+        Pending with no saleId until a manager marks it failed (or, for a refund, refunded),
+        and the message says the order is blocked until then. If it can't be saved (in a
+        savepoint, logged), nothing blocks a retry, and the message says to check the Musqet
+        app first.
         """
         try:
             with self.env.cr.savepoint():
