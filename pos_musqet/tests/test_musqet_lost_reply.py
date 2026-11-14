@@ -177,9 +177,10 @@ class TestMusqetLostSaleReply(TransactionCase):
         self.assertEqual(read('sale-r'), {'saleId': 'sale-r', 'status': 'CANCELLED'})
         self.assertEqual(sale.state, 'failed')
 
-    def test_only_musqet_s_own_refusal_reaches_the_till_with_its_body(self):
+    def test_only_musqet_s_own_refusal_reaches_the_till_with_its_error_object(self):
         # A gateway's page (an unknown outcome) stays out of the reply, which reaches the
-        # cashier's browser; Musqet's refusal keeps its body (reply_is_not_found reads it).
+        # cashier's browser; Musqet's refusal keeps its error's code and message
+        # (reply_is_not_found reads the code), and nothing else.
         record_sale(self.env, self.method, 'sale-r', state='pending', rail=False)
         cases = (
             (reply(502, {'error': {'code': 502}}), False),
@@ -194,6 +195,13 @@ class TestMusqetLostSaleReply(TransactionCase):
                 with patch.object(pos_payment_method.requests, 'request', stub):
                     result = self.method.with_user(self.cashier).musqet_get_sale('sale-r')
                 self.assertEqual('detail' in result['error'], has_detail)
+        stub = MagicMock(return_value=reply(404, {
+            'error': {'code': 404, 'message': 'Terminal sale not found.', 'trace': ['x']},
+            'requestId': 'r-1'}))
+        with patch.object(pos_payment_method.requests, 'request', stub), mute_logger(PROXY_LOGGER):
+            result = self.method.with_user(self.cashier).musqet_get_sale('sale-r')
+        self.assertEqual(result['error']['detail'],
+                         {'error': {'code': 404, 'message': 'Terminal sale not found.'}})
 
     def test_records_nothing_when_musqet_refused_or_never_got_the_request(self):
         for index, (label, outcome) in enumerate(NOT_ACCEPTED):

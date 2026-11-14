@@ -437,14 +437,17 @@ class PosPaymentMethod(models.Model):
             except Exception:
                 # Any error, as for a 2xx below: an unreadable body doesn't change the outcome.
                 detail = response.text
+            refused = response.status_code in MUSQET_REFUSED_STATUSES
             details = {'status_code': response.status_code}
-            if response.status_code not in MUSQET_REFUSED_STATUSES:
+            if not refused:
                 details[MUSQET_OUTCOME_UNKNOWN] = True
-            if (response.status_code in MUSQET_REFUSED_STATUSES and isinstance(detail, dict)
-                    and isinstance(detail.get('error'), dict)):
+            if refused and isinstance(detail, dict) and isinstance(detail.get('error'), dict):
                 # Musqet's own refusal, in its error shape: it says why (reply_is_not_found
-                # reads it). Only its error object is kept.
-                details['detail'] = {'error': detail['error']}
+                # reads its code). Only the error's scalar code and message are kept.
+                details['detail'] = {'error': {
+                    key: value for key, value in detail['error'].items()
+                    if key in ('code', 'message') and isinstance(value, (int, str))
+                }}
             else:
                 # Maybe not Musqet's (a gateway's or a WAF's page, say): kept out of the reply,
                 # which reaches the cashier's browser.
@@ -803,8 +806,9 @@ class PosPaymentMethod(models.Model):
         ('read' or 'cancel') only labels the log line.
         """
         if isinstance(response, dict) and 'error' not in response and not reply_is_for(sale_id, response):
-            _logger.warning("Musqet replied about sale %r to a %s of sale %r",
-                            response.get('saleId'), action, sale_id)
+            echoed = response.get('saleId')
+            _logger.warning("Musqet replied about sale %.100r to a %s of sale %.100r",
+                            echoed if isinstance(echoed, str) else None, action, sale_id)
             return self._musqet_error(_("Musqet replied about a different sale."))
         return response
 
