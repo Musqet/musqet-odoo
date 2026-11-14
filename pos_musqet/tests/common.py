@@ -60,13 +60,13 @@ def make_pos_user(env, login, group='point_of_sale.group_pos_user', **values):
     })
 
 
-def open_session(env, *methods, user=None):
+def open_session(env, *methods):
     """Open a POS session on a new config taking ``methods``: a cashier may drive only a
     terminal on an open session (pos.payment.method._musqet_check_access)."""
     config = env['pos.config'].create({
         'name': 'Musqet POS',
         'payment_method_ids': [(6, 0, [method.id for method in methods])]})
-    return env['pos.session'].create({'config_id': config.id, 'user_id': (user or env.user).id})
+    return env['pos.session'].create({'config_id': config.id, 'user_id': env.uid})
 
 
 def write_between_sessions(records, vals):
