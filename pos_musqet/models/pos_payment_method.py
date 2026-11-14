@@ -364,6 +364,9 @@ class PosPaymentMethod(models.Model):
         check alone keeps a cashier to their own company's terminals. Every refusal is the same
         AccessDenied (a method with no company included), so it says nothing about which ids
         exist or whose they are.
+
+        Returns, for a caller other than sudo, the states of the live sessions each method is
+        on (``{method id: set of states}``, see _musqet_session_states); None for sudo.
         """
         if not self.env.su and not self.env.user.has_group('point_of_sale.group_pos_user'):
             raise AccessDenied()
@@ -372,13 +375,17 @@ class PosPaymentMethod(models.Model):
         # one, would raise its own error, and is refused below (it is on no session).
         methods = self.sudo() if self.env.su else self.sudo().exists()
         methods._musqet_check_method()
-        if not self.env.su and (
-                any(method.company_id not in self.env.companies for method in methods)
-                or set(self.ids) - self._musqet_ids_on_sessions(MUSQET_LIVE_SESSION_STATES)):
+        if self.env.su:
+            return None
+        session_states = self._musqet_session_states(MUSQET_LIVE_SESSION_STATES)
+        if (any(method.company_id not in self.env.companies for method in methods)
+                or set(self.ids) - session_states.keys()):
             raise AccessDenied()
+        return session_states
 
-    def _musqet_ids_on_sessions(self, states):
-        """The ids of these methods that are on a POS session in one of ``states``.
+    def _musqet_session_states(self, states):
+        """``{method id: set of states}``: for each of these methods on a POS session in one
+        of ``states``, the states of those sessions.
 
         The session's config is in the method's company: Odoo keeps a config's payment methods
         to the config's company.
@@ -387,7 +394,11 @@ class PosPaymentMethod(models.Model):
             ('state', 'in', states),
             ('config_id.payment_method_ids', 'in', self.ids),
         ])
-        return set(self.ids) & set(sessions.config_id.payment_method_ids.ids)
+        session_states = {}
+        for session in sessions:
+            for method_id in set(self.ids) & set(session.config_id.payment_method_ids.ids):
+                session_states.setdefault(method_id, set()).add(session.state)
+        return session_states
 
     def _musqet_check_method(self):
         # Only a Musqet payment method drives a Musqet terminal: refuse to run the proxy on
@@ -432,8 +443,9 @@ class PosPaymentMethod(models.Model):
         _musqet_check_access), else None.
         """
         self.ensure_one()
-        self._musqet_check_access()
-        if not self.env.su and not self._musqet_ids_on_sessions(MUSQET_PAYING_SESSION_STATES):
+        session_states = self._musqet_check_access()
+        if (session_states is not None
+                and not session_states[self.id] & set(MUSQET_PAYING_SESSION_STATES)):
             return self._musqet_error(_(
                 "This till is being closed, so it takes no new Musqet payment or refund."))
         if not isinstance(payload, dict):
