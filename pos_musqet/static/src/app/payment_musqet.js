@@ -589,9 +589,11 @@ export class PaymentMusqet extends PaymentInterface {
 
     /**
      * Handle an inbound webhook (push path). Invoked by the PosStore websocket patch once the
-     * backend controller has verified a signature and buffered the result. Pulls the buffer
-     * and settles the pending line. Only fires on publicly-reachable deployments; the pilot
-     * settles via the poll loop and never reaches here.
+     * backend controller has verified a signature and buffered the result. Asks for the
+     * buffered result of this line's saleId and settles the line with it; with no saleId yet
+     * (or after a page reload) it does nothing and the poll loop settles the line. Only fires
+     * on publicly-reachable deployments; the pilot settles via the poll loop and never
+     * reaches here.
      */
     async handleMusqetStatusResponse() {
         const line = this.pos.getPendingPaymentLine("musqet");
