@@ -104,8 +104,8 @@ class MusqetController(http.Controller):
         reply = None
         try:
             with request.env.cr.savepoint():
-                # An empty saleId names no sale (an unanswered record has none), so it is
-                # never read.
+                # An empty saleId names no sale (an unanswered record has none), and one that
+                # isn't a plain string can't be searched (see _plain_string), so neither is read.
                 if _plain_string(sale_id) and method_sudo._musqet_needs_status_read(sale_id):
                     reply = method_sudo.musqet_get_sale(sale_id)
         except Exception:
