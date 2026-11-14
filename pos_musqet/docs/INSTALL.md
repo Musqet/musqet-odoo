@@ -199,9 +199,9 @@ the database.
 A Musqet method belongs to **one company**: Odoo requires the method's *Company* field,
 and records its sales and refunds in that company. A cashier can drive its terminal only
 as a user of that company (one of the companies selected in Odoo), and only while a POS
-session of that company using the method is not closed. Once every session using the
-method is being closed, a till can still check or cancel a payment in progress, but starts
-no new sale or refund. A refund's original payment must be of the same company.
+session of that company using the method is not closed. Once every such session is being
+closed, a till can still check or cancel a payment in progress, but starts no new sale or
+refund. A refund's original payment must be of the same company.
 
 ### 3.1 Currency match — the most likely footgun ⚠️
 
