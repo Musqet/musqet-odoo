@@ -14,6 +14,7 @@ from .musqet_common import (
     parse_iso_currency,
     parse_minor_amount,
     parse_rail,
+    reply_is_404,
     reply_is_not_found,
     sale_key_domain,
 )
@@ -81,12 +82,16 @@ class PosMusqetSale(models.Model):
 
     def _musqet_apply_response(self, response):
         """Settle as for any record; also, a done sale whose rail Musqet hadn't reported yet
-        takes it from a later COMPLETE reply. A rail already set never changes."""
+        takes it from a later COMPLETE reply. A rail already set never changes. A sale this
+        reply settles loses its not_found_at stamp: Musqet knows it after all, so a retry of
+        its order may resume it again."""
         if isinstance(response, dict) and response.get('status') == MUSQET_SUCCESS_STATUS:
             rail = parse_rail(response.get('rail'))
             if rail:
                 self.filtered(lambda sale: sale.state == 'done' and not sale.rail).write({'rail': rail})
+        stamped = self.filtered(lambda sale: sale.state == 'pending' and sale.not_found_at)
         super()._musqet_apply_response(response)
+        stamped.filtered(lambda sale: sale.state != 'pending').write({'not_found_at': False})
 
     def _musqet_needs_status_read(self):
         """Also a done sale with no rail yet: a later reply fills it in, and until then the
@@ -216,15 +221,15 @@ class PosMusqetSale(models.Model):
         _musqet_sale_to_resume).
         """
         to_read = sales.filtered(lambda sale: sale.state == 'pending').sorted('id', reverse=True)
-        cutoff = fields.Datetime.now() - MUSQET_SALE_STALE_AFTER
+        now = fields.Datetime.now()
+        cutoff = now - MUSQET_SALE_STALE_AFTER
         unreadable = self.sudo().browse()
         for sale in to_read[:MUSQET_SALE_REREAD_LIMIT]:
             reply = sale.payment_method_id.musqet_get_sale(sale.sale_id)
-            error = reply.get('error') if isinstance(reply, dict) else None
-            if isinstance(error, dict) and error.get('status_code') == 404:
+            if reply_is_404(reply):
                 unreadable |= sale
             if sale.create_date < cutoff and reply_is_not_found(reply):
-                sale.not_found_at = fields.Datetime.now()
+                sale.not_found_at = now
                 _logger.warning(
                     "Musqet no longer knows sale %r (method %s, order %r), pending since %s: "
                     "no longer blocking the order. Check it in the Musqet app.",

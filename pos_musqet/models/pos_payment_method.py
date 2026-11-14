@@ -728,9 +728,9 @@ class PosPaymentMethod(models.Model):
     def _musqet_reply_about(self, sale_id, response, action):
         """``response`` for the POS, if it is about ``sale_id``; else an ``{error}``.
 
-        A reply naming another saleId (to a ``action`` of ``sale_id``: 'read' or 'cancel')
-        settles nothing (_musqet_sync_records), and must not reach the till either, which
-        would settle or release a line on it.
+        A reply naming another saleId settles nothing (_musqet_sync_records), and must not
+        reach the till either, which would settle or release a line on it. ``action``
+        ('read' or 'cancel') only labels the log line.
         """
         if isinstance(response, dict) and 'error' not in response and not reply_is_for(sale_id, response):
             _logger.warning("Musqet replied about sale %r to a %s of sale %r",

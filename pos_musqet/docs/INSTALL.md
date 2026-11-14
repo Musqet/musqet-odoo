@@ -89,7 +89,9 @@ your Odoo addons path.
    first, so no sale is still in progress, then run `odoo -d <your_db> -u pos_musqet
    --stop-after-init`. The upgrade to 19.0.1.3.0 records each Musqet sale already
    synced; a sale started before it but synced after it has no record, so Odoo can't
-   refund it and marks its payment *Not verified* (see §8).
+   refund it and marks its payment *Not verified* (see §8). The upgrade to 19.0.1.4.0
+   adds a column to the Musqet Sales records (*Not Found at Musqet*); run it before the
+   new code takes a payment, or every Musqet sale fails until you do.
 
 ---
 

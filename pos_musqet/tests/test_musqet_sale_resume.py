@@ -260,11 +260,29 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
         sale = self._sale('sale-p', amount_minor=700)
         self._age(sale, MUSQET_SALE_STALE_AFTER + timedelta(minutes=1))
         with self.assertLogs(PROXY_LOGGER, 'WARNING'), self.assertLogs(SALE_LOGGER, 'WARNING'):
-            self._create(FakeMusqet(statuses={'sale-p': NOT_FOUND}), reference='Order-R')
+            self._create(FakeMusqet(statuses={'sale-p': NOT_FOUND}))
+        # The retry resumes the sale the first request sent (new-sale, still pending), and
+        # neither reads nor logs sale-p again.
         fake = FakeMusqet(statuses={'sale-p': NOT_FOUND})
         with self.assertNoLogs(SALE_LOGGER, 'WARNING'):
-            self.assertEqual(self._create(fake)['saleId'], 'new-sale')
+            self.assertResumed(self._create(fake), fake, 'new-sale')
         self.assertNotIn(('GET', '/terminal/sales/sale-p'), fake.calls)
+
+    def test_a_stamped_sale_musqet_settles_after_all_is_resumed_again(self):
+        # Say the earlier API key is restored, and a read finds the sale paid.
+        sale = self._sale('sale-p')
+        self._age(sale, MUSQET_SALE_STALE_AFTER + timedelta(minutes=1))
+        with self.assertLogs(PROXY_LOGGER, 'WARNING'), self.assertLogs(SALE_LOGGER, 'WARNING'):
+            self._create(FakeMusqet(statuses={'sale-p': NOT_FOUND}), amount=700)
+        self.assertTrue(sale.not_found_at)
+        sale._musqet_apply_response({
+            'status': 'COMPLETE', 'amountInCents': 1000, 'rail': 'card',
+            'currency': self.method.company_id.currency_id.name})
+        self.assertEqual(sale.state, 'done')
+        self.assertFalse(sale.not_found_at)
+        # (The first request's own sale, new-sale for 700, has ended meanwhile.)
+        fake = FakeMusqet(statuses={'new-sale': 'CANCELLED'})
+        self.assertResumed(self._create(fake), fake, 'sale-p')
 
     def test_a_matching_sale_whose_method_answers_a_bare_404_is_not_resumed(self):
         # Polling it would fail at once: the method can't reach Musqet.

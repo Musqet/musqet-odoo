@@ -231,12 +231,12 @@ export class PaymentMusqet extends PaymentInterface {
         } finally {
             state.cancelRequested = false;
         }
-        // No message if it completed: the poll loop settles it as paid.
-        this._keepWaiting(state, outcome.sale?.status !== SUCCESS_STATUS);
-        // Keep waiting on the sale. (The core screen does this itself after a cancel button,
-        // but leaves a deleted line "waitingCancel".) Not if it settled before the cancel
-        // began: its status is already final.
+        // Keep waiting on the sale, unless it settled before the cancel began (its status is
+        // already final). No message if it completed: the poll loop settles it as paid. The
+        // line goes back to "waitingCard": the core screen does this itself after a cancel
+        // button, but leaves a deleted line "waitingCancel".
         if (!state.settled) {
+            this._keepWaiting(state, outcome.sale?.status !== SUCCESS_STATUS);
             order.payment_ids.find((line) => line.uuid === uuid)?.setPaymentStatus("waitingCard");
         }
         return false;
@@ -403,8 +403,9 @@ export class PaymentMusqet extends PaymentInterface {
      * (_tryGiveUp: out of time or contact, and the sale ended or can't be asked about),
      * settling the line through _finishSale (which resolves sendPaymentRequest's promise).
      * Fire-and-forget: the result is delivered via ``state.resolve``, not a return value, so
-     * an inbound webhook can settle the same line first. ``state`` is owned by sendPaymentRequest (which registered
-     * and will remove it) so a cancel — or a webhook that already settled — is observed here.
+     * an inbound webhook can settle the same line first. ``state`` is owned by
+     * sendPaymentRequest (which registered and will remove it) so a cancel — or a webhook
+     * that already settled — is observed here.
      */
     async _pollSale(saleId, line, state) {
         // state.waitStart is when the current wait began, and state.connectionFailures counts
@@ -471,8 +472,9 @@ export class PaymentMusqet extends PaymentInterface {
     }
 
     /**
-     * Keep waiting on a sale whose cancel Musqet couldn't confirm: it may still be paid.
-     * Tells the cashier so (if ``warn``) and starts a new wait.
+     * Keep waiting on a sale the cancel didn't end (it completed, or Musqet couldn't confirm
+     * the cancel, so it may still be paid). Tells the cashier it couldn't be cancelled (if
+     * ``warn``) and starts a new wait.
      */
     _keepWaiting(state, warn) {
         if (warn) {
