@@ -515,6 +515,41 @@ class TestMusqetCreateRefund(TransactionCase):
             {'amountInCents': 100, 'reference': 'REFUND-A'}, original)
         self.assertNotIn('error', result)
 
+    def test_a_manager_marks_an_unanswered_refund_refunded(self):
+        # Found refunded in the Musqet app: it keeps counting and makes its reference a
+        # duplicate for this sale, but no longer blocks its refund order's other refunds.
+        original = self._stub_original(amount=10.0)
+        self._lose_refund(original, 600, 'REFUND-A')
+        other_sale = record_refund(self.env, self.method, False, original_sale_id='sale-orig-other',
+                                   reference='REFUND-B')
+        manager = make_pos_user(self.env, 'musqet_manager_refunded',
+                                group='point_of_sale.group_pos_manager')
+        (self._recorded_refunds() | other_sale).with_user(manager).action_musqet_mark_refunded()
+        self.assertEqual(self._recorded_refunds().state, 'done')
+        result, mock_request = self._call_refund(
+            {'amountInCents': 100, 'reference': 'REFUND-A'}, original, sale_id='refund-a2')
+        self.assertIn('already been processed', result['error']['message'])
+        result, mock_request = self._call_refund(
+            {'amountInCents': 500, 'reference': 'REFUND-B'}, original, sale_id='refund-b')
+        self.assertIn('exceeds', result['error']['message'])
+        result, mock_request = self._call_refund(
+            {'amountInCents': 400, 'reference': 'REFUND-B'}, original, sale_id='refund-b')
+        self.assertNotIn('error', result)
+        self.assertEqual(len(self._posts(mock_request)), 1)
+
+    def test_only_an_unanswered_refund_may_be_marked_refunded(self):
+        pending = record_refund(self.env, self.method, 'refund-p')
+        failed = record_refund(self.env, self.method, False, state='failed')
+        manager = make_pos_user(self.env, 'musqet_manager_refunded_only',
+                                group='point_of_sale.group_pos_manager')
+        (pending | failed).with_user(manager).action_musqet_mark_refunded()
+        self.assertEqual((pending.state, failed.state), ('pending', 'failed'))
+        cashier_target = record_refund(self.env, self.method, False)
+        cashier_target.invalidate_recordset()
+        with self.assertRaises(AccessError):
+            cashier_target.with_user(self.cashier).action_musqet_mark_refunded()
+        self.assertEqual(cashier_target.state, 'pending')
+
     def test_a_manager_clears_an_unanswered_refund(self):
         original = self._stub_original(amount=10.0)
         self._lose_refund(original, 600, 'REFUND-A')

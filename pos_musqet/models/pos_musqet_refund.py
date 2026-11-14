@@ -45,6 +45,19 @@ class PosMusqetRefund(models.Model):
     _unique_sale = models.Constraint(
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet refund is already recorded.')
 
+    def action_musqet_mark_refunded(self):
+        """Mark unanswered refunds done, for a POS manager who has found them refunded in the
+        Musqet app.
+
+        A done refund keeps counting against its sale at the amount requested, and makes its
+        refund order's reference a duplicate for that sale, but it no longer blocks the other
+        refunds of its refund order. Only unanswered refunds (pending, no saleId) move: one
+        with a saleId is settled by Musqet's replies. It can't be undone.
+        """
+        # As action_musqet_mark_failed: managers only, within their companies.
+        self.check_access('read')
+        self.filtered(lambda refund: refund._musqet_is_unanswered()).sudo().write({'state': 'done'})
+
     def _musqet_unanswered_message(self):
         return _(
             "Odoo did not get a clear answer from Musqet to a refund request for this order, so "

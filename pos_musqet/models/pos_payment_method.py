@@ -17,6 +17,7 @@ from odoo.tools import consteq
 
 from .musqet_common import (
     MUSQET_OUTCOME_UNKNOWN,
+    MUSQET_REFUSED_STATUSES,
     MUSQET_TERMINAL,
     parse_minor_amount,
     reply_is_for,
@@ -392,8 +393,9 @@ class PosPaymentMethod(models.Model):
         the raw error, and never puts the API key in a log line.
 
         An error after which the request may still have reached Musqet and been acted on
-        carries ``MUSQET_OUTCOME_UNKNOWN: True`` (see reply_outcome_is_unknown): a transport failure
-        after the connection was made, a 5xx, or a 2xx body that isn't JSON.
+        carries ``outcome_unknown: True`` (the MUSQET_OUTCOME_UNKNOWN key, see
+        reply_outcome_is_unknown): a transport failure after the connection was made, a
+        non-2xx status not in MUSQET_REFUSED_STATUSES, or a 2xx body that isn't JSON.
         """
         self.ensure_one()
         self._musqet_check_access()
@@ -432,9 +434,7 @@ class PosPaymentMethod(models.Model):
                 # Any error, as for a 2xx below: an unreadable 5xx is still an unknown outcome.
                 detail = response.text
             details = {'status_code': response.status_code, 'detail': detail}
-            # A server error (or a gateway timing out) may come after Musqet acted on the
-            # request; a 4xx is Musqet refusing it.
-            if response.status_code >= 500:
+            if response.status_code not in MUSQET_REFUSED_STATUSES:
                 details[MUSQET_OUTCOME_UNKNOWN] = True
             return self._musqet_error(_("The Musqet terminal service returned an error."), **details)
         try:

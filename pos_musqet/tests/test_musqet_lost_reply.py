@@ -66,6 +66,9 @@ LOST = [
     ('504 without JSON', reply(504, unreadable=True)),
     ('502 nested too deep to parse', reply(502, unreadable=RecursionError('too deep'))),
     ('2xx without JSON', reply(200, unreadable=True)),
+    ('408 from a gateway', reply(408, unreadable=True)),
+    ('429 from a gateway', reply(429, unreadable=True)),
+    ('3xx not followed', reply(302, unreadable=True)),
     ('2xx nested too deep to parse', reply(200, unreadable=RecursionError('too deep'))),
     ('2xx without a saleId', reply(200, {'status': 'PENDING'})),
     ('2xx with an empty saleId', reply(200, {'saleId': '', 'status': 'PENDING'})),
@@ -84,7 +87,8 @@ NOT_ACCEPTED = [
         requests.exceptions.ProxyError)),
     ('409 terminal busy', reply(409, {'error': {'code': 409, 'message': 'busy'}})),
     ('400', reply(400, {'error': {'code': 400}})),
-    ('3xx not followed', reply(302, unreadable=True)),
+    ('401 bad key', reply(401, {'error': {'code': 401}})),
+    ('422', reply(422, {'error': {'code': 422}})),
 ]
 
 

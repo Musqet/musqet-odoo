@@ -249,16 +249,17 @@ and make your **company currency match it** (and keep each POS on the company cu
    progress, a new one is refused until it ends.
 
    **Lost replies.** If Musqet's reply to a payment or refund request never reaches Odoo
-   (the connection drops or times out, or Musqet answers with a server error), the
-   terminal may have taken it all the same, and Musqet can't look a request up by order
-   reference. So Odoo records it with no Musqet saleId, tells the cashier, and refuses
+   (the connection drops or times out, or Musqet or a gateway in front of it answers
+   with anything but a plain refusal, such as a server error), the terminal may have
+   taken it all the same, and Musqet can't look a request up by order reference. So Odoo records it with no Musqet saleId, tells the cashier, and refuses
    another Musqet payment of that order (or another refund in that refund order) until a
    manager clears it. A lost refund also counts against the original sale until then. To
    clear one, find it under **Musqet Sales** or **Musqet Refunds** (filter *Reply lost*)
    and check the Musqet app for a request with its reference:
    - nothing taken: open it and click **Mark as Failed**;
    - a payment taken: refund it in the Musqet app, then mark it failed;
-   - a refund made: leave it *Pending*, so it keeps counting against the sale.
+   - a refund made: open it and click **Mark as Refunded**. It keeps counting against
+     the sale, and the rest of its refund order can be refunded.
 5. **Refund test:** from the order, create a Refund and pay it with Musqet. A
    card-settled original refunds back to the card through the terminal. A
    Lightning-settled original shows a *manual refund* message and makes **no** API

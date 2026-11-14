@@ -21,6 +21,12 @@ MUSQET_RAILS = tuple(rail for rail, _label in MUSQET_RAIL_SELECTION)
 # Musqet and been acted on (reply_outcome_is_unknown).
 MUSQET_OUTCOME_UNKNOWN = 'outcome_unknown'
 
+# The HTTP statuses that mean Musqet refused a request without acting on it: a bad request,
+# a bad key, a wrong URL, a busy terminal (409 CONFLICT), a value it rejects. Any other non-2xx
+# (a 5xx, a gateway's 408 or 429, a redirect, which is never followed) may come after the
+# request was acted on, so its outcome is unknown.
+MUSQET_REFUSED_STATUSES = frozenset({400, 401, 403, 404, 409, 422})
+
 # The request errors raised before anything reached the server: the connection was never
 # made, or the request was never built. (Not SSLError or ProxyError: requests raises those
 # for failures after the request was sent too, a reset mid-response say.)
