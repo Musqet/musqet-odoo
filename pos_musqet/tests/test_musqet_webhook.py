@@ -199,8 +199,8 @@ class TestMusqetWebhookRoute(HttpCase):
                           hashlib.sha256).hexdigest()
         data = body.get('data') if isinstance(body, dict) else None
         read = read or musqet_response(
-            data['saleId'] if data else 'sale-wh', 'COMPLETE', amountInCents=900, currency=self.sale.currency,
-            rail='card')
+            data['saleId'] if data else 'sale-wh', 'COMPLETE', amountInCents=900,
+            currency=self.sale.currency, rail='card')
         with patch.object(pos_payment_method.requests, 'request', return_value=read) as mock_request:
             response = self.url_open('/musqet/webhook', data=raw, headers={
                 'Content-Type': 'application/json',
