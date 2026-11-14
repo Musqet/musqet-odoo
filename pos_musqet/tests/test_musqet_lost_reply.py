@@ -179,8 +179,8 @@ class TestMusqetLostSaleReply(TransactionCase):
 
     def test_only_musqet_s_own_refusal_reaches_the_till_with_its_error_object(self):
         # A gateway's page (an unknown outcome) stays out of the reply, which reaches the
-        # cashier's browser; Musqet's refusal keeps its error's code and message
-        # (reply_is_not_found reads the code), and nothing else.
+        # cashier's browser; a refusal in Musqet's error shape keeps only an integer code
+        # (reply_is_not_found reads it) and a capped message.
         record_sale(self.env, self.method, 'sale-r', state='pending', rail=False)
         cases = (
             (reply(502, {'error': {'code': 502}}), False),
@@ -298,6 +298,8 @@ class TestMusqetLostSaleReply(TransactionCase):
              self.assertLogs(PROXY_LOGGER, 'WARNING'):
             result = self.method.with_user(self.cashier).musqet_get_sale('sale-p')
         self.assertTrue(result['error']['outcome_unknown'])
+        # Only the error's type reaches the browser; its text (the URL) stays in the log.
+        self.assertEqual(result['error']['exception'], 'ReadTimeout')
         self.assertEqual(self._sales().mapped('sale_id'), ['sale-p'])
 
 

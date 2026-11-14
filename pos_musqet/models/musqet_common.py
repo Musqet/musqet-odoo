@@ -134,10 +134,12 @@ def reply_is_404(reply):
 
 
 def reply_is_not_found(reply):
-    """Whether ``reply`` (a proxy result) is Musqet's own 404 NOT_FOUND: it has no such sale.
+    """Whether ``reply`` (a proxy result) is a 404 in Musqet's NOT_FOUND shape: taken as
+    Musqet having no such sale.
 
-    Musqet's API answers it with the JSON body ``{"error": {"code": 404, ...}}``, which
-    _musqet_request puts in the error's ``detail``. A bare 404 (a wrong base URL, a proxy in
+    Musqet's API answers it with the JSON body ``{"error": {"code": 404, ...}}``, whose code
+    and message _musqet_request keeps in the error's ``detail`` (the shape alone can't prove
+    the body is Musqet's). A bare 404 (a wrong base URL, a proxy in
     the way) says nothing about the sale, and is not taken as one.
     """
     if not reply_is_404(reply):

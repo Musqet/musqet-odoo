@@ -425,69 +425,95 @@ class PosPaymentMethod(models.Model):
                 allow_redirects=False,
             )
         except requests.exceptions.RequestException as error:
-            # str(error) may include the URL but never the headers, so no key leaks.
+            # str(error) may include the URL but never the headers, so no key leaks. It stays
+            # in the log: the reply, which reaches the cashier's browser, names only its type.
             _logger.warning("Musqet %s %s failed: %s", method, path, error)
-            details = {'exception': str(error)}
+            details = {'exception': type(error).__name__}
             if request_may_have_arrived(error):
                 details[MUSQET_OUTCOME_UNKNOWN] = True
             return self._musqet_error(_("Could not reach the Musqet terminal service."), **details)
         if response.status_code // 100 != 2:
             _logger.warning("Musqet %s %s returned HTTP %s", method, path, response.status_code)
-            # Prefer the structured JSON error body; fall back to raw text as a detail.
-            try:
-                detail = response.json()
-            except Exception:
-                # Any error, as for a 2xx below: an unreadable body doesn't change the outcome.
-                detail = response.text
-            refused = response.status_code in MUSQET_REFUSED_STATUSES
             details = {'status_code': response.status_code}
-            if not refused:
-                details[MUSQET_OUTCOME_UNKNOWN] = True
-            if refused and isinstance(detail, dict) and isinstance(detail.get('error'), dict):
-                # Musqet's own refusal, in its error shape: it says why (reply_is_not_found
-                # reads its code). Only an integer code and a capped message are kept: the
-                # shape alone doesn't prove the body is Musqet's.
-                error = {}
-                code = detail['error'].get('code')
-                if isinstance(code, int) and not isinstance(code, bool):
-                    error['code'] = code
-                message = detail['error'].get('message')
-                if isinstance(message, str):
-                    error['message'] = message[:MUSQET_REFUSAL_MESSAGE_MAX_LENGTH]
-                details['detail'] = {'error': error}
+            if response.status_code in MUSQET_REFUSED_STATUSES:
+                detail = self._musqet_refusal_detail(response, method, path)
+                if detail:
+                    details['detail'] = detail
             else:
-                # Maybe not Musqet's (a gateway's or a WAF's page, say): kept out of the reply,
-                # which reaches the cashier's browser.
-                _logger.debug("Musqet %s %s HTTP %s body: %.500r",
-                              method, path, response.status_code, detail)
+                details[MUSQET_OUTCOME_UNKNOWN] = True
+                self._musqet_log_body_at_debug(response, method, path)
             return self._musqet_error(_("The Musqet terminal service returned an error."), **details)
-        # Only an {error} built here may say Musqet refused the request: a 2xx body Odoo can't
-        # read, that isn't an object, or that carries a non-null error of its own (a
-        # gateway's, say), says nothing of whether Musqet acted on it. The body is kept out of
-        # the reply: it may not be Musqet's, and the reply reaches the cashier's browser.
+        body = self._musqet_2xx_body(response, method, path)
+        if body is None:
+            details = {'status_code': response.status_code, MUSQET_OUTCOME_UNKNOWN: True}
+            return self._musqet_error(
+                _("Received an invalid response from the Musqet terminal service."), **details)
+        return body
+
+    @api.model
+    def _musqet_response_json(self, response):
+        """``response``'s JSON body, or its text if it has none Odoo can read (any error: a
+        hostile body can raise anything, RecursionError on deep nesting, say)."""
+        try:
+            return response.json()
+        except Exception:
+            return response.text
+
+    @api.model
+    def _musqet_log_body_at_debug(self, response, method, path):
+        """Log the body of a non-2xx ``response`` that may not be Musqet's (a gateway's or a
+        WAF's page, say), at debug only: it is kept out of the reply, which reaches the
+        cashier's browser."""
+        _logger.debug("Musqet %s %s HTTP %s body: %.500r", method, path, response.status_code,
+                      self._musqet_response_json(response))
+
+    @api.model
+    def _musqet_refusal_detail(self, response, method, path):
+        """The ``{error}`` detail kept from a refusal ``response`` in Musqet's error shape
+        (reply_is_not_found reads its code), else None (the body logged at debug).
+
+        Only an integer code and a capped message are kept: the shape alone doesn't prove the
+        body is Musqet's.
+        """
+        body = self._musqet_response_json(response)
+        if not isinstance(body, dict) or not isinstance(body.get('error'), dict):
+            self._musqet_log_body_at_debug(response, method, path)
+            return None
+        error = {}
+        code = body['error'].get('code')
+        if isinstance(code, int) and not isinstance(code, bool):
+            error['code'] = code
+        message = body['error'].get('message')
+        if isinstance(message, str):
+            error['message'] = message[:MUSQET_REFUSAL_MESSAGE_MAX_LENGTH]
+        return {'error': error}
+
+    @api.model
+    def _musqet_2xx_body(self, response, method, path):
+        """The body of a 2xx ``response``, or None if it is unusable (logged here).
+
+        Only an {error} built by _musqet_request may say Musqet refused the request: a 2xx
+        body Odoo can't read, that isn't an object, or that carries a non-null error of its
+        own (a gateway's, say), says nothing of whether Musqet acted on it. Its body is kept
+        out of the reply: it may not be Musqet's, and the reply reaches the cashier's browser.
+        A null error is none, and is dropped, so no caller mistakes the key for one.
+        """
         try:
             body = response.json()
         except Exception as error:
             # Not only ValueError: a hostile body can raise anything (RecursionError on deep
             # nesting), and Musqet may have acted on the request all the same.
             _logger.warning("Musqet %s %s returned a body Odoo can't read: %r", method, path, error)
-            unusable = True
-        else:
-            unusable = not isinstance(body, dict) or body.get('error') is not None
-            if unusable:
-                # A string saleId, if any, helps reconcile it in the Musqet app; the body
-                # itself may hold payment details, so it is logged only at debug level.
-                sale_id = body.get('saleId') if isinstance(body, dict) else None
-                _logger.warning(
-                    "Musqet %s %s returned an unexpected 2xx body (saleId %.100r, a %s)",
-                    method, path, sale_id if isinstance(sale_id, str) else None,
-                    type(body).__name__)
-                _logger.debug("Musqet %s %s unexpected 2xx body: %.500r", method, path, body)
-        if unusable:
-            details = {'status_code': response.status_code, MUSQET_OUTCOME_UNKNOWN: True}
-            return self._musqet_error(
-                _("Received an invalid response from the Musqet terminal service."), **details)
-        # A null error is none: drop it, so no caller mistakes the key for one.
+            return None
+        if not isinstance(body, dict) or body.get('error') is not None:
+            # A string saleId, if any, helps reconcile it in the Musqet app; the body itself
+            # may hold payment details, so it is logged only at debug level.
+            sale_id = body.get('saleId') if isinstance(body, dict) else None
+            _logger.warning(
+                "Musqet %s %s returned an unexpected 2xx body (saleId %.100r, a %s)",
+                method, path, sale_id if isinstance(sale_id, str) else None, type(body).__name__)
+            _logger.debug("Musqet %s %s unexpected 2xx body: %.500r", method, path, body)
+            return None
         body.pop('error', None)
         return body
 
