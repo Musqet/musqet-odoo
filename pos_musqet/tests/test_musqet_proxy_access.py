@@ -3,12 +3,11 @@
 from unittest.mock import MagicMock, patch
 
 from odoo.addons.pos_musqet.models import pos_payment_method
-from odoo.exceptions import AccessDenied, ValidationError
+from odoo.exceptions import AccessDenied, MissingError, ValidationError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
-from odoo.tools import SQL
 
-from .common import create_musqet_method, make_pos_user, open_session
+from .common import clear_company, create_musqet_method, make_pos_user, open_session
 
 
 def proxy_calls(method, names=None):
@@ -138,11 +137,30 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
     def test_denies_a_method_on_no_open_session(self):
         self.assertDenied(create_musqet_method(self, 'MSQ-SCOPE-002'))
 
-    def test_denies_a_method_whose_session_is_closing_or_closed(self):
-        for state in ('closing_control', 'closed'):
-            with self.subTest(state=state):
-                self.session.state = state
-                self.assertDenied(self.method)
+    def test_denies_a_method_whose_session_is_closed(self):
+        self.session.state = 'closed'
+        self.assertDenied(self.method)
+
+    def test_a_till_being_closed_polls_and_cancels_but_starts_nothing(self):
+        # A sale still in progress as the session closes must still be read or cancelled.
+        self.session.state = 'closing_control'
+        method = self.method.with_user(self.cashier)
+
+        def refused(call, mock_request):
+            self.assertIn('being closed', call()['error']['message'])
+            mock_request.assert_not_called()
+
+        def allowed(call, mock_request):
+            mock_request.return_value.status_code = 200
+            mock_request.return_value.json.return_value = {'saleId': 'sale-1', 'status': 'PENDING'}
+            call()
+            mock_request.assert_called_once()
+
+        self.for_each_proxy_call(
+            method, refused, names=('musqet_create_sale', 'musqet_create_refund'))
+        self.for_each_proxy_call(method, allowed, names=('musqet_get_sale', 'musqet_cancel_sale'))
+        self.method.musqet_latest_response = self.BUFFERED
+        self.assertTrue(method.musqet_get_latest_status())
 
     def test_allows_a_method_whose_session_is_still_opening(self):
         # The POS opens on the till before the opening cash count is confirmed.
@@ -174,6 +192,12 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
         self.assertEqual(other.with_user(both).musqet_get_latest_status(),
                          {'saleId': 's-1', 'status': 'COMPLETE'})
 
+    def test_an_internal_call_on_a_missing_method_fails_at_the_check(self):
+        missing = self.env['pos.payment.method'].browse(
+            self.env['pos.payment.method'].search([], order='id desc', limit=1).id + 1000)
+        with self.assertRaises(MissingError):
+            missing.sudo()._musqet_check_access()
+
 
 @tagged('post_install', '-at_install')
 class TestMusqetMethodCompany(ProxyCallsMixin, TransactionCase):
@@ -194,23 +218,22 @@ class TestMusqetMethodCompany(ProxyCallsMixin, TransactionCase):
         # Saved before the rule, or by a direct database write: even an internal call can't
         # start a sale or refund for a company the method doesn't name.
         method = create_musqet_method(self, 'MSQ-NOCO-003')
-        self.env.cr.execute(SQL(
-            'UPDATE pos_payment_method SET company_id = NULL WHERE id = %s', method.id))
-        method.invalidate_recordset(['company_id'])
+        clear_company(method)
+
         def check(call, mock_request):
             self.assertIn('no company', call()['error']['message'])
             mock_request.assert_not_called()
+
         self.for_each_proxy_call(
             method, check, names=('musqet_create_sale', 'musqet_create_refund'))
+        domain = [('payment_method_id', '=', method.id)]
+        self.assertFalse(self.env['pos.musqet.sale'].search(domain))
+        self.assertFalse(self.env['pos.musqet.refund'].search(domain))
 
     def test_a_cashier_gets_the_same_refusal_for_it_as_for_any_method_not_theirs(self):
         # A method with no company is no cashier's: the same AccessDenied, not the message
         # above, so a refusal still says nothing about which ids exist.
         method = create_musqet_method(self, 'MSQ-NOCO-004')
         open_session(self.env, method)
-        self.env.cr.execute(SQL(
-            'UPDATE pos_payment_method SET company_id = NULL WHERE id = %s', method.id))
-        method.invalidate_recordset(['company_id'])
+        clear_company(method)
         self.assertProxyDenied(method.with_user(make_pos_user(self.env, 'musqet_cashier_noco')))
-        self.assertFalse(
-            self.env['pos.musqet.sale'].search([('payment_method_id', '=', method.id)]))

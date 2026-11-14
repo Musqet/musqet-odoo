@@ -69,6 +69,14 @@ def open_session(env, *methods):
     return env['pos.session'].create({'config_id': config.id, 'user_id': env.uid})
 
 
+def clear_company(method):
+    """Leave ``method`` with no company, as one saved before 19.0.1.6.0 may be. Raw SQL: the
+    ORM refuses it (pos.payment.method._check_musqet_company)."""
+    method.env.cr.execute(SQL(
+        'UPDATE pos_payment_method SET company_id = NULL WHERE id = %s', method.id))
+    method.invalidate_recordset(['company_id'])
+
+
 def write_between_sessions(records, vals):
     """Write ``vals`` on payment methods as if no POS session using them were open: Odoo
     refuses most edits to a method while one is, and a test's cashier needs one open."""

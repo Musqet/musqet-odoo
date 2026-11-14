@@ -95,8 +95,10 @@ your Odoo addons path.
    19.0.1.5.0 lets a sale or refund record have no Musqet saleId (see *Lost replies* in
    §4); until it runs, Odoo can't record a request whose reply was lost. From
    19.0.1.6.0 a Musqet method must have a company, and a cashier can drive its terminal
-   only on an opening or open POS session (§3). A method saved without a company starts
-   no sale or refund, and its cashiers get an access error, until a manager sets one.
+   only on its company's POS sessions (§3). The upgrade gives a method with no company the
+   company of the POS configs it is on; one it can't place (on no config, or on configs of
+   several companies) is named in the log, starts no sale or refund, and its cashiers get
+   an access error, until a manager sets its company.
 
 ---
 
@@ -195,9 +197,9 @@ the database.
 
 A Musqet method belongs to **one company**: Odoo requires the method's *Company* field,
 and records its sales and refunds in that company. A cashier can drive its terminal only
-while working in that company, and only while a POS session using the method is opening or
-open (not while it is being closed). A refund's original payment must be of the same
-company.
+while working in that company, and only while a POS session using the method is not
+closed. A session being closed can still check or cancel a payment in progress, but starts
+no new sale or refund. A refund's original payment must be of the same company.
 
 ### 3.1 Currency match — the most likely footgun ⚠️
 

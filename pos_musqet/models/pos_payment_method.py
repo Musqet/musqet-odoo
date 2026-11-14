@@ -13,7 +13,7 @@ from urllib3.util import parse_url
 
 from odoo import fields, models, api, _
 from odoo.exceptions import AccessDenied, UserError, ValidationError
-from odoo.tools import consteq
+from odoo.tools import SQL, consteq
 
 from .musqet_common import (
     MUSQET_OUTCOME_UNKNOWN,
@@ -47,6 +47,12 @@ MUSQET_WEBHOOK_TOLERANCE = 300
 MUSQET_ALLOWED_HOST = 'musqet.tech'
 # Rails a sale may be started on (the API's TerminalCommandMode). "any" lets the terminal
 # prompt the customer for card or Bitcoin.
+# The POS session states in which a cashier may drive a method's terminal (_musqet_check_access):
+# a session being closed may still poll or cancel a sale in progress, but starts no new sale or
+# refund (MUSQET_PAYING_SESSION_STATES).
+MUSQET_LIVE_SESSION_STATES = ('opening_control', 'opened', 'closing_control')
+MUSQET_PAYING_SESSION_STATES = ('opening_control', 'opened')
+
 MUSQET_SALE_MODES = ('any', 'card', 'bitcoin')
 MUSQET_DEFAULT_SALE_MODE = 'any'
 # Upper bounds on the free-text request fields. reference: the API schema's max(255).
@@ -237,6 +243,40 @@ class PosPaymentMethod(models.Model):
                     "Musqet payment method %(payment_method)s must have a company.",
                     payment_method=method.name))
 
+    @api.model
+    def _musqet_set_missing_companies(self):
+        """Give each Musqet method with no company the company of the POS configs it is on.
+
+        For the upgrade to 19.0.1.6.0, which requires the company (_check_musqet_company);
+        safe to run again. Only a method whose configs all name one company gets it; any other
+        is logged, and starts no sale or refund until a manager sets one. Raw SQL: a write
+        through the ORM is refused while a session using the method is open.
+        """
+        self.env.cr.execute(SQL("""
+            UPDATE pos_payment_method method SET company_id = configs.company_id
+              FROM (SELECT rel.pos_payment_method_id AS method_id,
+                           MIN(config.company_id) AS company_id
+                      FROM pos_config_pos_payment_method_rel rel
+                      JOIN pos_config config ON config.id = rel.pos_config_id
+                     GROUP BY rel.pos_payment_method_id
+                    HAVING COUNT(DISTINCT config.company_id) = 1) configs
+             WHERE method.id = configs.method_id
+               AND method.company_id IS NULL
+               AND method.use_payment_terminal = %s
+         RETURNING method.id
+        """, MUSQET_TERMINAL))
+        updated = [row[0] for row in self.env.cr.fetchall()]
+        self.browse(updated).invalidate_recordset(['company_id'])
+        if updated:
+            _logger.info("pos_musqet: set the company of Musqet payment method(s) %s from "
+                         "their POS configs", updated)
+        missing = self.sudo().search(
+            [('use_payment_terminal', '=', MUSQET_TERMINAL), ('company_id', '=', False)])
+        if missing:
+            _logger.warning(
+                "pos_musqet: Musqet payment method(s) %s have no company and start no sale or "
+                "refund until a manager sets one", missing.ids)
+
     @api.constrains('musqet_base_url')
     def _check_musqet_base_url(self):
         for payment_method in self:
@@ -312,40 +352,38 @@ class PosPaymentMethod(models.Model):
     def _musqet_check_access(self):
         """Raise AccessDenied unless the caller may drive the terminal of every method in self.
 
-        A sudo or internal call may (the webhook, and the server's own reads). Any other caller
-        must be a POS user (as pos_adyen.proxy_adyen_request requires), and each method must
-        exist, be a Musqet one, belong to one of the caller's companies and be on a POS session
-        that is opening or open: a till the caller could be working on. The
-        caller picks the method's id over RPC, and the proxy reads the method's restricted
-        fields with sudo(), which skips the multi-company record rule, so this check is what
-        keeps a cashier to their own company's terminals. Every refusal is the same
-        AccessDenied, so it says nothing about which ids exist or whose they are.
+        Passes: a sudo or internal call (the webhook, the server's own reads), on Musqet
+        methods. Any other caller must be a POS user (as pos_adyen.proxy_adyen_request
+        requires), and each method must exist, be a Musqet one, belong to one of the caller's
+        companies and be on a POS session in MUSQET_LIVE_SESSION_STATES. The session's user
+        isn't checked: Odoo lets any POS user of the company join a session.
 
-        The session's user isn't checked: Odoo lets any POS user of the company join an open
-        session, so it binds no cashier. A method with no company (_check_musqet_company) is
-        no cashier's either, so it gets the same AccessDenied; only an internal call reaches
-        the clearer refusal in _musqet_check_terminal_request.
+        Why: the caller picks the method's id over RPC, and the proxy reads the method's
+        restricted fields with sudo(), which skips the multi-company record rule, so this
+        check alone keeps a cashier to their own company's terminals. Every refusal is the same
+        AccessDenied (a method with no company included), so it says nothing about which ids
+        exist or whose they are.
         """
         if not self.env.su and not self.env.user.has_group('point_of_sale.group_pos_user'):
             raise AccessDenied()
-        # Read with sudo(), and only the methods that exist: a plain read of another company's
-        # method, or any read of a missing one, would raise its own error. A missing id is on
-        # no session, so it is refused below like any other.
-        methods = self.sudo().exists()
+        # Read with sudo(). A sudo caller's missing id raises MissingError here; anyone else's
+        # is dropped, as a plain read of another company's method, or any read of a missing
+        # one, would raise its own error, and is refused below (it is on no session).
+        methods = self.sudo() if self.env.su else self.sudo().exists()
         methods._musqet_check_method()
         if not self.env.su and (
                 any(method.company_id not in self.env.companies for method in methods)
-                or set(self.ids) - self._musqet_ids_on_open_sessions()):
+                or set(self.ids) - self._musqet_ids_on_sessions(MUSQET_LIVE_SESSION_STATES)):
             raise AccessDenied()
 
-    def _musqet_ids_on_open_sessions(self):
-        """The ids of these methods that are on a POS session opening or open.
+    def _musqet_ids_on_sessions(self, states):
+        """The ids of these methods that are on a POS session in one of ``states``.
 
-        A session being closed (closing_control) takes no new payment. The session's config is
-        in the method's company: Odoo keeps a config's payment methods to the config's company.
+        The session's config is in the method's company: Odoo keeps a config's payment methods
+        to the config's company.
         """
         sessions = self.env['pos.session'].sudo().search([
-            ('state', 'in', ('opening_control', 'opened')),
+            ('state', 'in', states),
             ('config_id.payment_method_ids', 'in', self.ids),
         ])
         return set(self.ids) & set(sessions.config_id.payment_method_ids.ids)
@@ -387,12 +425,16 @@ class PosPaymentMethod(models.Model):
         """Shared opening checks for a sale or refund: access, payload shape, serial, company.
 
         Raises AccessDenied for a caller or method that may not drive the terminal; returns
-        an ``{error}`` dict for a malformed payload, a method with no serial or a method with
-        no company (reached only by an internal call: a cashier is refused it in
+        an ``{error}`` dict for a cashier whose till is being closed (on no session in
+        MUSQET_PAYING_SESSION_STATES), a malformed payload, a method with no serial or a
+        method with no company (reached only by an internal call: a cashier is refused it in
         _musqet_check_access), else None.
         """
         self.ensure_one()
         self._musqet_check_access()
+        if not self.env.su and not self._musqet_ids_on_sessions(MUSQET_PAYING_SESSION_STATES):
+            return self._musqet_error(_(
+                "This till is being closed, so it takes no new Musqet payment or refund."))
         if not isinstance(payload, dict):
             return self._musqet_error(_("The terminal request is invalid."))
         if not self.musqet_terminal_serial:
@@ -590,7 +632,7 @@ class PosPaymentMethod(models.Model):
         must be the company currency, ``reference`` is required, and the remaining fields are
         checked before they are sent. The caller chooses which payment method record this
         runs on, so _musqet_check_access keeps it to a method of the caller's own companies on
-        an open POS session.
+        a POS session that is opening or open.
 
         A sale of the same order already open at Musqet is resumed rather than sent again
         (pos.musqet.sale._musqet_sale_to_resume), so a retry after the POS gave up on a sale,
@@ -962,7 +1004,8 @@ class PosPaymentMethod(models.Model):
 
         Named with the ``musqet_`` prefix to match the proxy convention and the JS call site.
         Same access guard as the proxy (_musqet_check_access): a POS cashier of the method's
-        company, while a POS session using it is open, or an internal/sudo call, may read it.
+        company, while a POS session using it is opening, open or being closed, or an
+        internal/sudo call, may read it.
         Returns Musqet's reply to the status read a verified webhook triggered (the partner
         sale shape, with its saleId), or ``False`` if nothing is buffered.
         """
