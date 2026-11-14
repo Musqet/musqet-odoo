@@ -74,8 +74,9 @@ class PosMusqetSale(models.Model):
     not_found_at = fields.Datetime(
         string="Not Found at Musqet", readonly=True,
         help="When Musqet answered that it has no such sale, long after the sale was started. "
-             "It no longer blocks a new sale of its order, and is not read again. Check it in "
-             "the Musqet app: it may have been paid under a previous API key.")
+             "New sale requests of its order no longer read it or wait for it. A later reply "
+             "that settles it (a poll, webhook or refund check) clears this. Check it in the "
+             "Musqet app: it may have been paid under a previous API key.")
 
     _unique_sale = models.Constraint(
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet sale is already recorded.')
@@ -83,8 +84,8 @@ class PosMusqetSale(models.Model):
     def _musqet_apply_response(self, response):
         """Settle as for any record; also, a done sale whose rail Musqet hadn't reported yet
         takes it from a later COMPLETE reply. A rail already set never changes. A sale this
-        reply settles loses its not_found_at stamp: Musqet knows it after all, so a retry of
-        its order may resume it again."""
+        reply settles (done or failed) loses its not_found_at stamp, so a done one may be
+        resumed again (_musqet_sale_to_resume); a reply that leaves it pending keeps it."""
         if isinstance(response, dict) and response.get('status') == MUSQET_SUCCESS_STATUS:
             rail = parse_rail(response.get('rail'))
             if rail:
@@ -164,10 +165,10 @@ class PosMusqetSale(models.Model):
         A pending sale whose read got Musqet's own not-found reply (reply_is_not_found) and
         that is older than MUSQET_SALE_STALE_AFTER can't still be paid on the terminal: it
         is stamped not_found_at, logged once for reconciliation, and left out of this request
-        and every later one (never read again). Its state stays pending, as it may have been
-        paid (a sale of the business the API key belonged to before it was changed reads as
-        not found too). A recent one still refuses. A read that fails
-        any other way (Musqet unreachable, or the method's configuration broken, say a base
+        and later ones (they no longer read it), unless a later reply settles it, which clears
+        the stamp (_musqet_apply_response). Its state stays pending, as it may have been paid
+        (a sale of the business the API key belonged to before it was changed reads as not
+        found too). A recent one still refuses. A read that fails any other way (Musqet unreachable, or the method's configuration broken, say a base
         URL whose every route answers 404 without Musqet's error body: an administrator must
         fix the method), or a sale past the read limit, still counts as pending.
 
@@ -189,7 +190,7 @@ class PosMusqetSale(models.Model):
                 "A Musqet payment for this order is already being started. Wait for it, then "
                 "try again.")
         open_sales = self._musqet_open_sales_of(company, reference)
-        unreadable = self._musqet_read_pending(open_sales)
+        answered_404 = self._musqet_read_pending(open_sales)
         on_lines = self._musqet_line_sale_ids(line_sale_ids)
         # After the reads: a sale the POS has on a line may only now read as done, and one
         # Musqet no longer knows may only now be stamped.
@@ -200,7 +201,7 @@ class PosMusqetSale(models.Model):
         def resumable(sale):
             return (sale.payment_method_id == method and sale.amount_minor == amount
                     and sale.currency == currency and sale.sale_id not in on_lines
-                    and sale not in unreadable)
+                    and sale not in answered_404)
 
         pending = open_sales.filtered(lambda sale: sale.state == 'pending')
         resumable_pending = pending.filtered(resumable)
@@ -216,25 +217,24 @@ class PosMusqetSale(models.Model):
     def _musqet_read_pending(self, sales):
         """Read the newest pending ones of ``sales`` from Musqet; return those that got a 404.
 
-        Reads at most MUSQET_SALE_REREAD_LIMIT. One older than MUSQET_SALE_STALE_AFTER that
-        got Musqet's own not-found reply is stamped not_found_at and logged, once (see
-        _musqet_sale_to_resume).
+        Reads at most MUSQET_SALE_REREAD_LIMIT, and stamps the stale ones Musqet no longer
+        knows (the rules are on _musqet_sale_to_resume).
         """
         to_read = sales.filtered(lambda sale: sale.state == 'pending').sorted('id', reverse=True)
         now = fields.Datetime.now()
         cutoff = now - MUSQET_SALE_STALE_AFTER
-        unreadable = self.sudo().browse()
+        answered_404 = self.sudo().browse()
         for sale in to_read[:MUSQET_SALE_REREAD_LIMIT]:
             reply = sale.payment_method_id.musqet_get_sale(sale.sale_id)
             if reply_is_404(reply):
-                unreadable |= sale
+                answered_404 |= sale
             if sale.create_date < cutoff and reply_is_not_found(reply):
                 sale.not_found_at = now
                 _logger.warning(
                     "Musqet no longer knows sale %r (method %s, order %r), pending since %s: "
                     "no longer blocking the order. Check it in the Musqet app.",
                     sale.sale_id, sale.payment_method_id.id, sale.reference, sale.create_date)
-        return unreadable
+        return answered_404
 
     @api.model
     def _musqet_order_lock_key(self, company, reference):
@@ -268,7 +268,7 @@ class PosMusqetSale(models.Model):
     def _musqet_open_sales_of(self, company, reference):
         """The sales of order ``reference`` in ``company`` that a new sale may repeat.
 
-        Those Musqet hasn't failed or said it no longer knows (not_found_at), on a method
+        Those not failed, not stamped not_found_at (see _musqet_sale_to_resume), on a method
         that is still a Musqet one (a record of any other can't be read), and not on a synced
         payment with their (method, saleId).
         """

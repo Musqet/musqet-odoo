@@ -484,6 +484,26 @@ export class PaymentMusqet extends PaymentInterface {
     }
 
     /**
+     * The message for a line released by _tryGiveUp: the sale ``ended`` (``sale`` is the
+     * status read, if one was made), or contact was lost and Musqet answered nothing.
+     */
+    _giveUpMessage({ ended, timedOut, sale }) {
+        if (!ended) {
+            // Contact lost, and neither call was answered: nothing more the till can find out.
+            return _t(
+                "Lost contact with Odoo or Musqet, and the Musqet payment could not be cancelled: it may still be live on the terminal. Cancel it there before taking another payment for this order."
+            );
+        }
+        if (sale?.status || timedOut) {
+            // Say how it ended, if the read told us (the terminal may have failed it first).
+            return this._statusErrorMessage(sale?.status || "TIMED_OUT");
+        }
+        return _t(
+            "Contact with Odoo or Musqet dropped while waiting for the Musqet terminal, so the payment was cancelled. Please try again."
+        );
+    }
+
+    /**
      * Stop waiting on the line's sale, out of time (``timedOut``) or after losing contact,
      * and return whether the line was settled (else the poll loop carries on).
      *
@@ -515,25 +535,8 @@ export class PaymentMusqet extends PaymentInterface {
             this._keepWaiting(state, true);
             return false;
         }
-        let message;
-        if (!ended) {
-            // Contact lost, and neither call was answered: nothing more the till can find out.
-            message = _t(
-                "Lost contact with Odoo or Musqet, and the Musqet payment could not be cancelled: it may still be live on the terminal. Cancel it there before taking another payment for this order."
-            );
-        } else if (timedOut) {
-            // Say how it ended, if the read told us (the terminal may have failed it first).
-            message = this._statusErrorMessage(sale?.status || "TIMED_OUT");
-        } else if (sale?.status) {
-            // Ended on its own (the read reported how), not by our cancel.
-            message = this._statusErrorMessage(sale.status);
-        } else {
-            message = _t(
-                "Contact with Odoo or Musqet dropped while waiting for the Musqet terminal, so the payment was cancelled. Please try again."
-            );
-        }
         state.settled = true;
-        this._showError(message);
+        this._showError(this._giveUpMessage({ ended, timedOut, sale }));
         line.setPaymentStatus("retry");
         state.resolve?.(false);
         return true;
