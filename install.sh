@@ -18,7 +18,9 @@
 # Options:
 #   --addons-path DIR   Where to place pos_musqet/ (must be on Odoo's addons_path). Required.
 #   --db NAME           Also install/upgrade the module into this database (needs odoo + DB).
-#   --ref REF           Git branch, tag or commit to install (default: main). Pin a tag for prod.
+#   --ref REF           Release tag, commit SHA or branch to install. Required unless --source.
+#                       Use a release tag (or its commit SHA) in production; `main` is
+#                       unreleased development code.
 #   --repo URL          Source repo (default: https://github.com/Musqet/musqet-odoo.git).
 #   --source DIR        Use a local checkout instead of cloning (no git/network needed).
 #   --odoo-bin CMD      Odoo executable (default: odoo).
@@ -31,17 +33,17 @@
 #   install.sh --addons-path /opt/odoo/extra --db live -- -c /etc/odoo/odoo.conf
 #
 # Examples:
-#   install.sh --addons-path /mnt/extra-addons                       # place only (Docker build)
-#   install.sh --addons-path /opt/odoo/extra --db live \
+#   install.sh --addons-path /mnt/extra-addons --ref v19.0.1.0.0     # place only (Docker build)
+#   install.sh --addons-path /opt/odoo/extra --ref v19.0.1.0.0 --db live \
 #              --restart "sudo systemctl restart odoo"               # merchant: place + install
-#   install.sh --addons-path /mnt/extra-addons --ref v19.0.1.0.0     # pin a release
+#   install.sh --addons-path /mnt/extra-addons --ref main            # development code
 #   install.sh --source . --addons-path /mnt/extra-addons           # from a local checkout
 #
 set -euo pipefail
 umask 022   # ensure placed files are not group/world-writable regardless of caller
 
 REPO_URL="https://github.com/Musqet/musqet-odoo.git"
-REF="main"
+REF=""
 ADDONS_PATH=""
 SOURCE_DIR=""
 DB=""
@@ -60,7 +62,8 @@ Usage: install.sh --addons-path DIR [options] [-- <extra odoo args>]
 
   --addons-path DIR   Where to place pos_musqet/ (must be on Odoo's addons_path). Required.
   --db NAME           Also install/upgrade the module into this database.
-  --ref REF           Git branch, tag or commit (default: main).
+  --ref REF           Release tag, commit SHA or branch. Required unless --source.
+                      Use a release tag in production; main is development code.
   --repo URL          Source repo (default: Musqet/musqet-odoo).
   --source DIR        Use a local checkout instead of cloning.
   --odoo-bin CMD      Odoo executable (default: odoo).
@@ -92,6 +95,19 @@ done
 
 [[ -n "$ADDONS_PATH" ]] || { err "missing required --addons-path DIR"; usage 1; }
 
+# No default ref: a silent default would install whatever that branch holds today, so
+# a rebuild could pull different code. The caller names what they install.
+if [[ -n "$SOURCE_DIR" ]]; then
+  [[ -z "$REF" ]] || err "warning: ignoring --ref with --source (the checkout is used as it is)"
+else
+  [[ -n "$REF" ]] || { err "missing required --ref: a release tag from" \
+    "https://github.com/Musqet/musqet-odoo/releases, a commit SHA, or main for development code"; usage 1; }
+  # The ref goes on git's command line and into a download URL: refuse anything that
+  # could read as an option or change the URL.
+  [[ "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && "$REF" != *..* ]] \
+    || die "--ref '$REF' is not a plain tag, branch or commit name"
+fi
+
 # --upgrade and any `-- <extra odoo args>` are only meaningful with --db; don't let
 # them silently no-op.
 [[ "$ACTION" == "-u" && -z "$DB" ]] && die "--upgrade requires --db NAME"
@@ -109,6 +125,7 @@ elif command -v git >/dev/null 2>&1; then
   info "Cloning $REPO_URL @ $REF (git)"
   git clone --quiet "$REPO_URL" "$TMP/repo" || die "clone failed: $REPO_URL"
   git -C "$TMP/repo" checkout --quiet "$REF" || die "ref not found: $REF"
+  info "Using commit $(git -C "$TMP/repo" rev-parse HEAD)"
   SRC="$TMP/repo"
 else
   # No git (e.g. the stock odoo:19 image) — download a tarball with curl/wget instead.

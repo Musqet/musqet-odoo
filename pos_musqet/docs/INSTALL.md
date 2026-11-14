@@ -37,21 +37,27 @@ your Odoo addons path.
 > a database → optionally restart):
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/Musqet/musqet-odoo/main/install.sh \
->   | bash -s -- --addons-path /opt/odoo/extra-addons --db <your_db> \
+> REF=<release tag>
+> curl -fsSL "https://raw.githubusercontent.com/Musqet/musqet-odoo/$REF/install.sh" \
+>   | bash -s -- --addons-path /opt/odoo/extra-addons --ref "$REF" --db <your_db> \
 >     --restart "sudo systemctl restart odoo"
 > ```
 >
-> It needs `git` **or** `curl`/`wget` (no git required). Run with `--help` for options
-> like `--ref <tag>` to pin a release or `--source <dir>` for a local checkout. The
-> manual steps below are the same thing done by hand.
+> `--ref` is required: use a release tag from
+> [Releases](https://github.com/Musqet/musqet-odoo/releases) (or its commit SHA) in
+> production, and take the script from the same tag. `main` is unreleased development
+> code; until the first release is tagged, it is the only ref there is. The script
+> prints the commit it installed. It needs `git` **or** `curl`/`wget` (no git
+> required). Run with `--help` for options like `--source <dir>` for a local checkout.
+> The manual steps below are the same thing done by hand.
 
 1. **Get the module onto the server.** Clone (or download) this repo so that the
    `pos_musqet/` directory sits in a directory that is on your Odoo `addons_path`:
 
    ```bash
    cd /opt/odoo/extra-addons        # any directory already on addons_path
-   git clone https://github.com/Musqet/musqet-odoo.git
+   # a release tag in production; main is development code
+   git clone --branch <release tag> https://github.com/Musqet/musqet-odoo.git
    # pos_musqet now lives at /opt/odoo/extra-addons/musqet-odoo/pos_musqet
    ```
 

@@ -10,7 +10,8 @@
 
 services:
   db:
-    image: postgres:16
+    # Pinned by digest so every run gets the same build; see docs/DEV.md to update.
+    image: postgres:16.15@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657
     environment:
       POSTGRES_USER: odoo
       POSTGRES_PASSWORD: odoo
@@ -24,7 +25,7 @@ services:
       retries: 10
 
   odoo:
-    image: odoo:19
+    image: odoo:19.0-20261015@sha256:27f920e002c43a1af7022a68f3cc17db71a2f9f3348800cb050721ce54893e49
     depends_on:
       db:
         condition: service_healthy
