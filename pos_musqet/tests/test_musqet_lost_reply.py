@@ -1,5 +1,6 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 """A sale or refund request whose reply never reached Odoo: recorded unanswered, failing closed."""
+import ssl
 from http.client import RemoteDisconnected
 from unittest.mock import MagicMock, patch
 
@@ -9,6 +10,8 @@ from urllib3.exceptions import (
     MaxRetryError,
     NewConnectionError,
     ProtocolError,
+    ProxyError,
+    SSLError,
 )
 
 from odoo.addons.pos_musqet.models import pos_payment_method
@@ -31,9 +34,10 @@ PROXY_LOGGER = 'odoo.addons.pos_musqet.models.pos_payment_method'
 UNANSWERED = 'did not get a clear answer from Musqet'
 
 
-def wrapped(reason):
-    """A requests ConnectionError as requests raises it: wrapping urllib3's MaxRetryError."""
-    return requests.exceptions.ConnectionError(MaxRetryError(None, '/terminal/sales', reason))
+def wrapped(reason, error=requests.exceptions.ConnectionError):
+    """A requests ``error`` as requests raises it: wrapping urllib3's MaxRetryError, whose
+    reason is urllib3's own error."""
+    return error(MaxRetryError(None, '/terminal/sales', reason))
 
 
 def reply(status_code=200, body=None, unreadable=False):
@@ -52,6 +56,12 @@ LOST = [
     ('dropped connection', requests.exceptions.ConnectionError(
         ProtocolError('Connection aborted.', RemoteDisconnected('closed')))),
     ('body cut short', requests.exceptions.ChunkedEncodingError('incomplete read')),
+    ('TLS failure mid-response', wrapped(
+        SSLError(ssl.SSLError('bad record mac')), requests.exceptions.SSLError)),
+    ('TLS failure reading the body', requests.exceptions.SSLError('read failed')),
+    ('proxy connection reset', wrapped(
+        ProxyError('Cannot connect to proxy.', ConnectionResetError('reset')),
+        requests.exceptions.ProxyError)),
     ('500', reply(500, {'error': {'code': 500}})),
     ('504 without JSON', reply(504, unreadable=True)),
     ('2xx without JSON', reply(200, unreadable=True)),
@@ -64,8 +74,12 @@ NOT_ACCEPTED = [
     ('connect timeout', requests.exceptions.ConnectTimeout(
         MaxRetryError(None, '/terminal/sales', ConnectTimeoutError('timed out')))),
     ('connection refused', wrapped(NewConnectionError(None, 'refused'))),
-    ('TLS failure', requests.exceptions.SSLError('handshake failed')),
-    ('proxy failure', requests.exceptions.ProxyError('proxy refused')),
+    ('certificate not verified', wrapped(
+        SSLError(ssl.SSLCertVerificationError(1, 'certificate verify failed')),
+        requests.exceptions.SSLError)),
+    ('proxy refused', wrapped(
+        ProxyError('Unable to connect to proxy', NewConnectionError(None, 'refused')),
+        requests.exceptions.ProxyError)),
     ('409 terminal busy', reply(409, {'error': {'code': 409, 'message': 'busy'}})),
     ('400', reply(400, {'error': {'code': 400}})),
     ('3xx not followed', reply(302, unreadable=True)),
@@ -138,6 +152,17 @@ class TestMusqetLostSaleReply(TransactionCase):
                 result, _stub = self._create(outcome, reference)
                 self.assertNotIn(UNANSWERED, result['error']['message'])
                 self.assertFalse(self._sales(reference))
+
+    def test_says_so_when_an_unanswered_sale_cannot_be_recorded(self):
+        Sale = type(self.env['pos.musqet.sale'])
+        with patch.object(Sale, 'create', side_effect=ValueError('cannot save')), \
+             mute_logger(PROXY_LOGGER), self.assertLogs(RECORD_LOGGER, 'ERROR') as logs:
+            result, _stub = self._create(requests.exceptions.ReadTimeout('timed out'))
+        # Nothing blocks a retry, so the cashier isn't told a manager must clear it.
+        self.assertIn('could not record it', result['error']['message'])
+        self.assertNotIn('A manager must', result['error']['message'])
+        self.assertFalse(self._sales())
+        self.assertIn('Order-L', logs.output[0])
 
     def test_refuses_the_order_until_the_sale_is_cleared(self):
         self._lose()

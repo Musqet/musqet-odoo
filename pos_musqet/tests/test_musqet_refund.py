@@ -499,6 +499,21 @@ class TestMusqetCreateRefund(TransactionCase):
         # It has no saleId to read from Musqet.
         self.assertFalse(self._gets(mock_request))
 
+    def test_an_unanswered_refund_of_another_sale_refuses_its_refund_order(self):
+        # A refund order refunding two sales: the lost refund of one holds up the other's.
+        lost = record_refund(self.env, self.method, False, original_sale_id='sale-orig-other',
+                             reference='REFUND-A')
+        original = self._stub_original(amount=10.0)
+        result, mock_request = self._call_refund(
+            {'amountInCents': 100, 'reference': 'REFUND-A'}, original)
+        self.assertIn('did not get a clear answer from Musqet', result['error']['message'])
+        self.assertFalse(self._posts(mock_request))
+        # Not once a manager has marked it failed.
+        lost.state = 'failed'
+        result, mock_request = self._call_refund(
+            {'amountInCents': 100, 'reference': 'REFUND-A'}, original)
+        self.assertNotIn('error', result)
+
     def test_a_manager_clears_an_unanswered_refund(self):
         original = self._stub_original(amount=10.0)
         self._lose_refund(original, 600, 'REFUND-A')

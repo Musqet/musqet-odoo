@@ -70,8 +70,10 @@ class MusqetController(http.Controller):
         reply = None
         try:
             with request.env.cr.savepoint():
-                # (An empty saleId has no record, so it is never read either.)
-                if isinstance(sale_id, str) and method_sudo._musqet_needs_status_read(sale_id):
+                # An empty saleId names no sale (an unanswered record has none), so it is
+                # never read.
+                if (sale_id and isinstance(sale_id, str)
+                        and method_sudo._musqet_needs_status_read(sale_id)):
                     reply = method_sudo.musqet_get_sale(sale_id)
         except Exception:
             _logger.exception("Musqet webhook: could not settle sale %r", sale_id)

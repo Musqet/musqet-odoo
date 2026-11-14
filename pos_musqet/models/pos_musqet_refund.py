@@ -45,10 +45,6 @@ class PosMusqetRefund(models.Model):
     _unique_sale = models.Constraint(
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet refund is already recorded.')
 
-    # action_musqet_mark_failed (pos.musqet.record) moves any pending refund. A failed refund
-    # is never re-read, and its synced payment doesn't count either, so the amount leaves the
-    # cap for good.
-
     def _musqet_unanswered_message(self):
         return _(
             "Odoo did not get a clear answer from Musqet to a refund request for this order, so "
@@ -107,9 +103,11 @@ class PosMusqetRefund(models.Model):
         unrecorded_payments = all_recorded._musqet_unrecorded_synced(original)
         # A failed refund moved no money, so it neither counts nor blocks a retry.
         counting = all_recorded.filtered(lambda refund: refund.state != 'failed')
-        # A refund of this order whose reply was lost may have gone through: refuse before
-        # the cap (which counts it), so the cashier is told why.
-        if any(not refund.sale_id and refund.reference == reference for refund in counting):
+        # A refund of this refund order (of any sale) whose reply was lost may have gone
+        # through: refuse before the cap (which counts it), so the cashier is told why.
+        if self.sudo().search_count([
+            ('company_id', '=', original.company_id.id), ('reference', '=', reference),
+        ] + self._musqet_unanswered_domain(), limit=1):
             return self._musqet_unanswered_message()
         # Cumulative cap: the Musqet API enforces no limit across refunds (Musqet/musqet#2094),
         # so cap against what is left after every refund already sent for this sale.
@@ -154,13 +152,9 @@ class PosMusqetRefund(models.Model):
         for refund in self:
             note(refund.reference, refund.state)
         if self:
-            for payment in self.env['pos.payment'].sudo().search([
-                # Not an unanswered refund's empty saleId, which would match every payment
-                # with none.
-                ('transaction_id', 'in', [sale_id for sale_id in self.mapped('sale_id') if sale_id]),
-                ('payment_method_id', 'in', self.payment_method_id.ids),
-                ('company_id', '=', original.company_id.id),
-            ]):
+            for payment in self.env['pos.payment'].sudo().search(sale_key_domain(
+                'transaction_id', self.mapped('sale_id'), self.payment_method_id,
+            ) + [('company_id', '=', original.company_id.id)]):
                 state = state_by_key.get((payment.payment_method_id.id, payment.transaction_id))
                 if state:
                     for reference in payment._musqet_order_references():

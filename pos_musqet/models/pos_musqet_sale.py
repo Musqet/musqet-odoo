@@ -92,7 +92,7 @@ class PosMusqetSale(models.Model):
     def _musqet_may_mark_failed(self):
         """Only an unanswered sale: one with a saleId is settled by Musqet's replies, and
         marking it failed could hide a sale the customer paid."""
-        return super()._musqet_may_mark_failed() and not self.sale_id
+        return super()._musqet_may_mark_failed() and self._musqet_is_unanswered()
 
     def _musqet_unanswered_message(self):
         return _(
@@ -160,12 +160,11 @@ class PosMusqetSale(models.Model):
         The POS gives up on a sale it has polled for too long, or lost contact over, and a
         page refresh forgets the sale it was waiting on, yet the customer can still pay it
         on the terminal. A retry must not send a second sale for the same payment. So the
-        order's open sales (_musqet_open_sales_of) are read from Musqet first if still
-        pending, newest first, then:
-
-        0. an unanswered one (no saleId: the reply to its request never reached Odoo) refuses
-           the request before any read: it may have been paid, and nothing can read it, so a
-           manager has to check it in the Musqet app and mark it failed;
+        order's open sales (_musqet_open_sales_of) are looked at first. An unanswered one
+        (the reply to its request never reached Odoo, see pos.musqet.record) refuses the
+        request before anything is read: it may have been paid, and nothing can read it, so a
+        manager has to check it in the Musqet app and mark it failed. Otherwise they are read
+        from Musqet if still pending, newest first, then:
 
         1. one still pending that this request may not resume refuses the request: it may
            still be paid, so it has to end first (cancel it, or let it time out);
@@ -216,7 +215,7 @@ class PosMusqetSale(models.Model):
                 "A Musqet payment for this order is already being started. Wait for it, then "
                 "try again.")
         open_sales = self._musqet_open_sales_of(company, reference)
-        if any(not sale.sale_id for sale in open_sales):
+        if any(sale._musqet_is_unanswered() for sale in open_sales):
             return self.browse(), self._musqet_unanswered_message()
         answered_404 = self._musqet_read_pending(open_sales)
         on_lines = self._musqet_line_sale_ids(line_sale_ids)

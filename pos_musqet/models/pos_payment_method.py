@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import pprint
+import ssl
 import time
 import urllib.parse
 
@@ -48,18 +49,46 @@ MUSQET_DEFAULT_SALE_MODE = 'any'
 MUSQET_REFERENCE_MAX_LENGTH = 255
 MUSQET_LANGUAGE_MAX_LENGTH = 16
 # The request errors raised before anything reached the server: the connection was never
-# made (or never secured), or the request was never built. Any other request error may come
-# after the server got the request (_musqet_request_may_have_arrived).
+# made, or the request was never built. (Not SSLError or ProxyError: requests raises those
+# for failures after the request was sent too, a reset mid-response say.)
 MUSQET_NOT_SENT_ERRORS = (
     requests.exceptions.ConnectTimeout,
-    requests.exceptions.SSLError,
-    requests.exceptions.ProxyError,
     requests.exceptions.InvalidURL,
     requests.exceptions.InvalidSchema,
     requests.exceptions.MissingSchema,
     requests.exceptions.InvalidHeader,
     requests.exceptions.InvalidJSONError,
 )
+# The causes that show a request error came before anything was sent: the connection was
+# refused or its host not found (to Musqet or to a proxy), or Musqet's certificate failed
+# verification, which happens during the TLS handshake.
+MUSQET_NOT_SENT_CAUSES = (NewConnectionError, ssl.SSLCertVerificationError)
+
+
+def request_may_have_arrived(error):
+    """Whether the request that raised ``error`` (a requests error) may have reached Musqet.
+
+    No for an error of MUSQET_NOT_SENT_ERRORS, or one caused by one of
+    MUSQET_NOT_SENT_CAUSES; yes for any other (a read timeout, a connection dropped
+    mid-request, a TLS or proxy failure of any other kind), the safe side.
+    """
+    if isinstance(error, MUSQET_NOT_SENT_ERRORS):
+        return False
+    return not any(isinstance(cause, MUSQET_NOT_SENT_CAUSES) for cause in error_causes(error))
+
+
+def error_causes(error):
+    """``error`` and the errors it wraps: requests wraps urllib3's MaxRetryError in its
+    arguments, which names the error itself as its ``reason``, and urllib3 wraps the
+    underlying error in its arguments or as its cause."""
+    seen, stack = set(), [error]
+    while stack:
+        cause = stack.pop()
+        if not isinstance(cause, BaseException) or id(cause) in seen:
+            continue
+        seen.add(id(cause))
+        yield cause
+        stack.extend((getattr(cause, 'reason', None), cause.__cause__, *cause.args))
 
 
 class PosPaymentMethod(models.Model):
@@ -394,22 +423,6 @@ class PosPaymentMethod(models.Model):
             return None, None, self._musqet_error(_("No Musqet API key is configured."))
         return base_url, api_key, None
 
-    @api.model
-    def _musqet_request_may_have_arrived(self, error):
-        """Whether the request that raised ``error`` (a requests error) may have reached Musqet.
-
-        No for an error raised before the connection was made (MUSQET_NOT_SENT_ERRORS, or a
-        connection refused or a host not found, which requests wraps as a ConnectionError);
-        yes for any other, a read timeout or a connection dropped mid-request, say.
-        """
-        if isinstance(error, MUSQET_NOT_SENT_ERRORS):
-            return False
-        if isinstance(error, requests.exceptions.ConnectionError) and error.args:
-            # requests wraps urllib3's MaxRetryError, whose reason is the error itself.
-            reason = getattr(error.args[0], 'reason', error.args[0])
-            return not isinstance(reason, NewConnectionError)
-        return True
-
     def _musqet_request(self, method, path, payload=None):
         """Make one server-side call to the Musqet API.
 
@@ -446,7 +459,7 @@ class PosPaymentMethod(models.Model):
             # str(error) may include the URL but never the headers, so no key leaks.
             _logger.warning("Musqet %s %s failed: %s", method, path, error)
             details = {'exception': str(error)}
-            if self._musqet_request_may_have_arrived(error):
+            if request_may_have_arrived(error):
                 details['outcome_unknown'] = True
             return self._musqet_error(_("Could not reach the Musqet terminal service."), **details)
         if response.status_code // 100 != 2:
@@ -565,7 +578,7 @@ class PosPaymentMethod(models.Model):
         verified. A sale whose reply was lost is recorded unanswered
         (pos.musqet.record._musqet_record_sent), and the POS told so.
         """
-        return self._musqet_reply_to_sent('pos.musqet.sale', response, {
+        return self._musqet_record_and_reply('pos.musqet.sale', response, {
             'company_id': self._musqet_company().id,
             'payment_method_id': self.id,
             'reference': reference,
@@ -573,14 +586,12 @@ class PosPaymentMethod(models.Model):
             'currency': currency,
         }, "reference %r, %s minor units" % (reference, amount))
 
-    def _musqet_reply_to_sent(self, model, response, vals, details):
+    def _musqet_record_and_reply(self, model, response, vals, details):
         """Record the request sent to Musqet in ``model`` (_musqet_record_sent); return the reply
-        for the POS: ``response``, or an ``{error}`` saying why the order is now blocked if the
-        outcome is unknown."""
-        Records = self.env[model]
-        if Records._musqet_record_sent(response, vals, details):
-            return self._musqet_error(Records._musqet_unanswered_message())
-        return response
+        for the POS: ``response``, or if Musqet's answer is unknown an ``{error}`` saying what
+        to do."""
+        message = self.env[model]._musqet_record_sent(response, vals, details)
+        return self._musqet_error(message) if message else response
 
     @api.model
     def _musqet_valid_reference(self, reference):
@@ -679,7 +690,7 @@ class PosPaymentMethod(models.Model):
         its musqet_refund_of link (see pos.musqet.refund._musqet_unrecorded_synced). A refund
         whose reply was lost is recorded unanswered, and the POS told so.
         """
-        return self._musqet_reply_to_sent('pos.musqet.refund', response, {
+        return self._musqet_record_and_reply('pos.musqet.refund', response, {
             'company_id': original.company_id.id,
             'payment_method_id': self.id,
             'original_sale_id': original.sale_id,
