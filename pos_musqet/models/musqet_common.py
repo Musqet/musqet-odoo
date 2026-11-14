@@ -69,6 +69,26 @@ def reply_is_for(sale_id, reply):
     return echoed is None or echoed == str(sale_id)
 
 
+def reply_is_404(reply):
+    """Whether ``reply`` (a proxy result) is an HTTP 404 from the API, Musqet's own or not."""
+    error = reply.get('error') if isinstance(reply, dict) else None
+    return isinstance(error, dict) and error.get('status_code') == 404
+
+
+def reply_is_not_found(reply):
+    """Whether ``reply`` (a proxy result) is Musqet's own 404 NOT_FOUND: it has no such sale.
+
+    Musqet's API answers it with the JSON body ``{"error": {"code": 404, ...}}``, which
+    _musqet_request puts in the error's ``detail``. A bare 404 (a wrong base URL, a proxy in
+    the way) says nothing about the sale, and is not taken as one.
+    """
+    if not reply_is_404(reply):
+        return False
+    detail = reply['error'].get('detail')
+    body = detail.get('error') if isinstance(detail, dict) else None
+    return isinstance(body, dict) and body.get('code') == 404
+
+
 def sale_key_domain(sale_field, sale_ids, methods):
     """The domain of the rows with one of ``sale_ids`` in ``sale_field``, on one of ``methods``.
 

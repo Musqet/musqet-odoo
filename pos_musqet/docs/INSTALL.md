@@ -89,7 +89,9 @@ your Odoo addons path.
    first, so no sale is still in progress, then run `odoo -d <your_db> -u pos_musqet
    --stop-after-init`. The upgrade to 19.0.1.3.0 records each Musqet sale already
    synced; a sale started before it but synced after it has no record, so Odoo can't
-   refund it and marks its payment *Not verified* (see §8).
+   refund it and marks its payment *Not verified* (see §8). The upgrade to 19.0.1.4.0
+   adds a column to the Musqet Sales records (*Not Found at Musqet*); run it before the
+   new code takes a payment, or every Musqet sale fails until you do.
 
 ---
 
@@ -231,6 +233,18 @@ and make your **company currency match it** (and keep each POS on the company cu
    its Musqet sale id) and try again. Payment lines synced before this check existed
    start blank, and are checked once the line, its order's state or reference, or
    another line with the same Musqet sale changes.
+
+   **Cancel and retry.** When the cashier cancels a payment that is waiting on the
+   terminal, Odoo cancels it there and waits for Musqet to confirm before it lets the
+   line go. If the customer paid first, the line settles as paid. If Musqet can't
+   confirm the cancel, the line keeps waiting and Odoo asks the cashier to cancel on the
+   terminal. When Odoo stops waiting by itself (after about five minutes, or after losing
+   contact with the server), it cancels the sale on the terminal first in the same way.
+   Paying the same order again, for the same amount, on the same terminal, picks up a
+   sale still in progress or already paid at the terminal instead of starting another,
+   so a retry never charges the customer twice, even after the POS page was reloaded.
+   While a sale of the order for another amount, or on another terminal, is still in
+   progress, a new one is refused until it ends.
 5. **Refund test:** from the order, create a Refund and pay it with Musqet. A
    card-settled original refunds back to the card through the terminal. A
    Lightning-settled original shows a *manual refund* message and makes **no** API

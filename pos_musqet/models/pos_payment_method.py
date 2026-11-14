@@ -431,7 +431,7 @@ class PosPaymentMethod(models.Model):
                 _("Received an invalid response from the Musqet terminal service."),
                 status_code=response.status_code)
 
-    def musqet_create_sale(self, payload):
+    def musqet_create_sale(self, payload, line_sale_ids=None):
         """POST /terminal/sales — start a sale on the bound terminal.
 
         ``payload`` is built by the POS (§4.1: amountInCents, mode, shouldPrint, language,
@@ -446,6 +446,13 @@ class PosPaymentMethod(models.Model):
         must be the company currency, ``reference`` is required, and the remaining fields are
         checked before they are sent. The caller still chooses which payment method record
         this runs on; scoping that to the cashier's own POS is a separate check.
+
+        A sale of the same order already open at Musqet is resumed rather than sent again
+        (pos.musqet.sale._musqet_sale_to_resume), so a retry after the POS gave up on a sale,
+        or lost it to a page refresh, can't charge the customer twice. ``line_sale_ids`` are
+        the saleIds already on the order's payment lines, which are never resumed onto
+        another line. The reply is then ``{saleId, reference, resumed: true}``, and the POS
+        polls that sale as it would a new one (``resumed`` is for logs and support only).
         """
         error = self._musqet_check_terminal_request(payload)
         if error:
@@ -465,6 +472,13 @@ class PosPaymentMethod(models.Model):
         reference = payload.get('reference')
         if not self._musqet_valid_reference(reference):
             return self._musqet_error(_("The sale reference is invalid."))
+        resumed, refusal = self.env['pos.musqet.sale']._musqet_sale_to_resume(
+            self, reference=reference, amount=amount, currency=currency,
+            line_sale_ids=line_sale_ids)
+        if refusal:
+            return self._musqet_error(refusal)
+        if resumed:
+            return {'saleId': resumed.sale_id, 'reference': reference, 'resumed': True}
         response = self._musqet_send_terminal_command(
             payload, kind='sale', mode=mode, amount=amount, currency=currency, reference=reference)
         self._musqet_record_sale(response, amount=amount, currency=currency, reference=reference)
@@ -709,9 +723,18 @@ class PosPaymentMethod(models.Model):
         response = self._musqet_request(
             'GET', '/terminal/sales/%s' % urllib.parse.quote(str(sale_id), safe=''))
         self._musqet_sync_records(sale_id, response)
+        return self._musqet_reply_about(sale_id, response, 'read')
+
+    def _musqet_reply_about(self, sale_id, response, action):
+        """``response`` for the POS, if it is about ``sale_id``; else an ``{error}``.
+
+        A reply naming another saleId settles nothing (_musqet_sync_records), and must not
+        reach the till either, which would settle or release a line on it. ``action``
+        ('read' or 'cancel') only labels the log line.
+        """
         if isinstance(response, dict) and 'error' not in response and not reply_is_for(sale_id, response):
-            _logger.warning("Musqet replied about sale %r to a read of sale %r",
-                            response.get('saleId'), sale_id)
+            _logger.warning("Musqet replied about sale %r to a %s of sale %r",
+                            response.get('saleId'), action, sale_id)
             return self._musqet_error(_("Musqet replied about a different sale."))
         return response
 
@@ -719,9 +742,9 @@ class PosPaymentMethod(models.Model):
         """Settle this method's recorded sale and refund ``sale_id`` as ``response`` reports.
 
         ``response`` must be Musqet's own word about this sale: the reply to a status read of
-        it (musqet_get_sale; a signed webhook only triggers one). The reply carries its saleId
-        (the partner sale shape, Musqet/musqet#2094). Only a reply reply_is_for accepts is
-        applied.
+        it (musqet_get_sale; a signed webhook only triggers one), or to a cancel of it
+        (musqet_cancel_sale). The reply carries its saleId (the partner sale shape,
+        Musqet/musqet#2094). Only a reply reply_is_for accepts is applied.
         """
         if not sale_id or not reply_is_for(sale_id, response):
             return
@@ -737,10 +760,16 @@ class PosPaymentMethod(models.Model):
     def musqet_cancel_sale(self, sale_id):
         """POST /terminal/sales/:id/cancel — request cancellation of an in-flight sale.
 
-        Returns the parsed Musqet response or ``{error}``.
+        Returns the parsed Musqet response (``{saleId, status}``) or ``{error}``. Musqet
+        cancels only a sale still pending or processing, and answers 409 CONFLICT for any
+        other, so the POS reads the sale's status when a cancel fails. A cancel Musqet
+        accepted fails this method's record of the sale at once (_musqet_sync_records), so a
+        retry of the order starts a new sale instead of resuming this one.
         """
-        return self._musqet_request(
+        response = self._musqet_request(
             'POST', '/terminal/sales/%s/cancel' % urllib.parse.quote(str(sale_id), safe=''))
+        self._musqet_sync_records(sale_id, response)
+        return self._musqet_reply_about(sale_id, response, 'cancel')
 
     # -- Webhook (async push) -------------------------------------------------
     # Used only on publicly-reachable deployments. The public controller verifies the HMAC,
