@@ -64,9 +64,10 @@ your Odoo addons path.
    git clone --branch '<release tag>' https://github.com/Musqet/musqet-odoo.git
    # optional, for a fixed pin: a tag can be moved, so check out the release's full
    # commit SHA from the Releases page; it prints "pinned" only if HEAD is that commit
-   SHA='<full 40-character SHA>'
+   SHA="$(printf %s '<full 40-character SHA>' | tr A-F a-f)"   # git prints lowercase
    git -C musqet-odoo checkout --quiet --detach "$SHA" \
-     && test "$(git -C musqet-odoo rev-parse HEAD)" = "$SHA" && echo "pinned to $SHA"
+     && test "$(git -C musqet-odoo rev-parse HEAD)" = "$SHA" \
+     && echo "pinned to $SHA" || echo "NOT pinned: check the SHA" >&2
    # pos_musqet now lives at /opt/odoo/extra-addons/musqet-odoo/pos_musqet
    ```
 
