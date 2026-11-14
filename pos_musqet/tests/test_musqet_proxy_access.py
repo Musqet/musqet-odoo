@@ -6,6 +6,7 @@ from odoo.addons.pos_musqet.models import pos_payment_method
 from odoo.exceptions import AccessDenied, MissingError, ValidationError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
+from odoo.tools import SQL
 
 from .common import (
     clear_company,
@@ -13,6 +14,7 @@ from .common import (
     make_pos_user,
     open_plain_method,
     open_session,
+    write_between_sessions,
 )
 
 
@@ -216,6 +218,17 @@ class TestMusqetProxyScope(ProxyCallsMixin, TransactionCase):
         self.for_each_proxy_call(
             self.method.with_user(self.cashier), sent, names=('musqet_create_sale',))
 
+    def test_another_companys_till_listing_the_method_does_not_count(self):
+        # Listed there by a direct database write: Odoo and _check_musqet_company refuse it.
+        self.session.state = 'closed'
+        other_session = self._open_session_in(
+            self.other_company, self._other_company_method('MSQ-SCOPE-B04'))
+        self.env.cr.execute(SQL(
+            'INSERT INTO pos_config_pos_payment_method_rel (pos_config_id, pos_payment_method_id)'
+            ' VALUES (%s, %s)', other_session.config_id.id, self.method.id))
+        self.env.invalidate_all()
+        self.assertDenied(self.method)
+
     def test_an_internal_call_on_a_missing_method_fails_at_the_check(self):
         missing = self._missing_method()
         with self.assertRaises(MissingError):
@@ -232,6 +245,21 @@ class TestMusqetMethodCompany(ProxyCallsMixin, TransactionCase):
         method = create_musqet_method(self, 'MSQ-NOCO-002')
         with self.assertRaises(ValidationError):
             method.company_id = False
+
+    def test_a_musqet_method_cannot_take_a_company_another_companys_pos_lists_it_on(self):
+        # Shared before the rule: the manager must take it off the other company's POS first.
+        other_company = self.env['res.company'].create({'name': 'Other Rule Co'})
+        method = create_musqet_method(self, 'MSQ-NOCO-005')
+        other_session = open_session(
+            self.env(context={'allowed_company_ids': other_company.ids}),
+            create_musqet_method(self, 'MSQ-NOCO-006', company_id=other_company.id))
+        self.env.cr.execute(SQL(
+            'INSERT INTO pos_config_pos_payment_method_rel (pos_config_id, pos_payment_method_id)'
+            ' VALUES (%s, %s)', other_session.config_id.id, method.id))
+        clear_company(method)
+        method.invalidate_recordset(['config_ids'])
+        with self.assertRaises(ValidationError):
+            write_between_sessions(method, {'company_id': self.env.company.id})
 
     def test_other_methods_may_have_none(self):
         plain = self.env['pos.payment.method'].create({'name': 'Plain Method', 'company_id': False})

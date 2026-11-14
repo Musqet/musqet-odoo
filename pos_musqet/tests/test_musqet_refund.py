@@ -48,7 +48,7 @@ class TestMusqetCreateRefund(TransactionCase):
         self.manager = make_pos_user(
             self.env, 'musqet_manager_refund', group='point_of_sale.group_pos_manager')
         self.method = create_musqet_method(self, 'MSQ-RF-001')
-        open_session(self.env, self.method)
+        self.session = open_session(self.env, self.method)
         self.currency = self.method.company_id.currency_id.name
         self.other_currency = 'EUR' if self.currency != 'EUR' else 'USD'
 
@@ -322,6 +322,18 @@ class TestMusqetCreateRefund(TransactionCase):
         result, mock_request = self._call_refund({'amountInCents': 500}, original)
         self.assertIn('original payment', result['error']['message'])
         mock_request.assert_not_called()
+
+    def test_refuses_once_every_till_on_the_method_is_closing(self):
+        # Checked per method: the server can't tell which session the caller is on, so a
+        # refund is refused only once no till using the method is open.
+        self.session.state = 'closing_control'
+        result, mock_request = self._call_refund({'amountInCents': 500}, self._stub_original())
+        self.assertIn('No POS session using this Musqet terminal is open',
+                      result['error']['message'])
+        mock_request.assert_not_called()
+        open_session(self.env, self.method)
+        result, mock_request = self._call_refund({'amountInCents': 500}, self._stub_original())
+        self.assertNotIn('error', result)
 
     def test_rejects_when_no_serial_is_configured(self):
         write_between_sessions(self.method, {'musqet_terminal_serial': False})

@@ -98,7 +98,8 @@ your Odoo addons path.
    only on its company's POS sessions (§3). The upgrade gives a method with no company the
    company of the POS configs it is on; one it can't place (on no config, or on configs of
    several companies) is named in the log, starts no sale or refund, and its cashiers get
-   an access error, until a manager sets its company.
+   an access error, until a manager sets its company. Odoo refuses that company while
+   another company's POS still lists the method: remove it from there first.
 
 ---
 
@@ -200,8 +201,7 @@ and records its sales and refunds in that company. A cashier can drive its termi
 as a user of that company (one of the companies selected in Odoo), and only while a POS
 session using the method is not closed. Once every session using the method is being
 closed, a till can still check or cancel a payment in progress, but starts no new sale or
-refund. A refund's original payment must be
-of the same company.
+refund. A refund's original payment must be of the same company.
 
 ### 3.1 Currency match — the most likely footgun ⚠️
 

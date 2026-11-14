@@ -236,12 +236,21 @@ class PosPaymentMethod(models.Model):
     @api.constrains('use_payment_terminal', 'company_id')
     def _check_musqet_company(self):
         # A Musqet method acts for one company: its sales and refunds are recorded in it, and
-        # only that company's cashiers may drive it (_musqet_check_access).
+        # only that company's cashiers may drive it (_musqet_check_access). Odoo checks a
+        # method's configs against its company only when the configs change, so a method
+        # shared before this rule could be given one company while another's config still
+        # lists it: refused here. sudo(): the writer may not see the other company's configs.
         for method in self:
-            if method.use_payment_terminal == MUSQET_TERMINAL and not method.company_id:
+            if method.use_payment_terminal != MUSQET_TERMINAL:
+                continue
+            if not method.company_id:
                 raise ValidationError(_(
                     "Musqet payment method %(payment_method)s must have a company.",
                     payment_method=method.name))
+            if method.sudo().config_ids.company_id - method.company_id:
+                raise ValidationError(_(
+                    "Musqet payment method %(payment_method)s is on a point of sale of another "
+                    "company. Remove it from there first.", payment_method=method.name))
 
     @api.model
     def _musqet_set_missing_companies(self):
@@ -388,18 +397,21 @@ class PosPaymentMethod(models.Model):
         """``{method id: set of states}``: for each of these methods on a POS session in one
         of ``states``, the states of those sessions.
 
-        The session's config is in the method's company: Odoo keeps a config's payment methods
-        to the config's company.
+        Only sessions of a config in the method's own company count. Odoo keeps a config's
+        methods to its company, and _check_musqet_company a Musqet method's configs to the
+        method's, but a method listed on another company's config by a direct database write
+        must not count that company's tills as its own.
         """
         sessions = self.env['pos.session'].sudo().search([
             ('state', 'in', tuple(states)),
             ('config_id.payment_method_ids', 'in', self.ids),
         ])
-        method_ids = set(self.ids)
+        company_of = {method.id: method.company_id for method in self.sudo().exists()}
         session_states = {}
         for session in sessions:
-            for method_id in method_ids & set(session.config_id.payment_method_ids.ids):
-                session_states.setdefault(method_id, set()).add(session.state)
+            for method_id in company_of.keys() & set(session.config_id.payment_method_ids.ids):
+                if session.config_id.company_id == company_of[method_id]:
+                    session_states.setdefault(method_id, set()).add(session.state)
         return session_states
 
     def _musqet_check_method(self):
