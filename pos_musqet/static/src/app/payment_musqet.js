@@ -611,7 +611,8 @@ export class PaymentMusqet extends PaymentInterface {
         ]);
         if (!sale || sale.error || sale.saleId !== state.saleId) {
             // Nothing buffered for this sale, or a transient RPC failure: the poll loop is
-            // the backstop.
+            // the backstop. The saleId is checked here too so this never settles a line on
+            // a server that doesn't match it (one older than 19.0.1.7.0).
             return;
         }
         this._finishSale(line, sale, state);

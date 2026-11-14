@@ -12,7 +12,10 @@ _logger = logging.getLogger(__name__)
 
 # A sale notification is a few hundred bytes; anything far larger is refused (HTTP 413) before
 # the body is read, so an unauthenticated caller can't make Odoo parse megabytes of JSON.
+# docs/INSTALL.md §5 states this limit too.
 MUSQET_WEBHOOK_MAX_BYTES = 64 * 1024
+# Odoo parses these as form fields before the handler runs, leaving no raw body to verify.
+FORM_MIMETYPES = ('application/x-www-form-urlencoded', 'multipart/form-data')
 
 
 class MusqetController(http.Controller):
@@ -33,6 +36,9 @@ class MusqetController(http.Controller):
         MUSQET_WEBHOOK_MAX_BYTES is refused (HTTP 413), before anything else is checked.
         Query or form parameters are ignored: the signed body is the only input.
         """
+        if request.httprequest.mimetype in FORM_MIMETYPES:
+            _logger.warning("Musqet webhook: body sent as a form, not JSON")
+            return self._ack()
         raw_body = request.httprequest.data  # exact bytes — needed to verify the HMAC.
         try:
             payload = json.loads(raw_body or b'{}')
@@ -48,8 +54,8 @@ class MusqetController(http.Controller):
         # wrapped as {event, data}. Unwrap to the sale object either way.
         sale = payload['data'] if isinstance(payload.get('data'), dict) else payload
         serial = sale.get('serial')
-        if not serial or not isinstance(serial, str):
-            _logger.warning("Musqet webhook: no terminal serial in payload")
+        if not isinstance(serial, str) or not serial:
+            _logger.warning("Musqet webhook: terminal serial missing or not a string")
             return self._ack()
 
         # The serial only selects which method's secret to verify against; the HMAC is the
@@ -61,7 +67,14 @@ class MusqetController(http.Controller):
             return self._ack()
 
         signature = request.httprequest.headers.get('x-webhook-signature', '')
-        if not method_sudo._musqet_verify_webhook(signature, raw_body):
+        try:
+            verified = method_sudo._musqet_verify_webhook(signature, raw_body)
+        except Exception:
+            # Never expected; caught so that a failure here still answers [accepted], not an
+            # error only a registered serial could reach.
+            _logger.exception("Musqet webhook: signature check failed for %r", serial)
+            verified = False
+        if not verified:
             _logger.warning("Musqet webhook: signature verification failed for %r", serial)
             return self._ack()
 

@@ -83,11 +83,11 @@ class TestMusqetWebhookVerification(TransactionCase):
         # One unambiguous value of each: a repeat isn't resolved by taking either one.
         body = b'{"status":"COMPLETE"}'
         header = self._sign(body, int(time.time()))
-        timestamp, signature = header.split(',')
+        t_part, v1_part = header.split(',')
         # Other keys are ignored, repeated or not.
         self.assertTrue(self.method._musqet_verify_webhook(header + ',v0=a,v0=b', body))
-        for repeated in ('%s,%s' % (header, timestamp), '%s,%s' % (header, signature),
-                         '%s,%s' % (timestamp, header), 't=1,' + header):
+        for repeated in ('%s,%s' % (header, t_part), '%s,%s' % (header, v1_part),
+                         '%s,%s' % (t_part, header), 't=1,' + header):
             with self.subTest(header=repeated):
                 self.assertFalse(self.method._musqet_verify_webhook(repeated, body))
 
@@ -99,6 +99,17 @@ class TestMusqetWebhookVerification(TransactionCase):
         for timestamp in ('+%d' % now, '%s_%s' % (str(now)[:5], str(now)[5:]), arabic,
                           '%d.0' % now, '-%d' % now):
             with self.subTest(timestamp=timestamp):
+                header = self._sign(body, timestamp)
+                self.assertFalse(self.method._musqet_verify_webhook(header, body))
+
+    def test_rejects_a_timestamp_over_twelve_digits(self):
+        # Rejected, not raised: int() refuses over 4,300 digits, and a few hundred overflow
+        # the float age check.
+        body = b'{"status":"COMPLETE"}'
+        now = str(int(time.time()))
+        self.assertTrue(self.method._musqet_verify_webhook(self._sign(body, '00' + now), body))
+        for timestamp in ('000' + now, '9' * 400, '9' * 5000):
+            with self.subTest(digits=len(timestamp)):
                 header = self._sign(body, timestamp)
                 self.assertFalse(self.method._musqet_verify_webhook(header, body))
 
@@ -157,6 +168,9 @@ class TestMusqetLatestStatus(TransactionCase):
             with self.subTest(sale_id=other):
                 self.assertFalse(method_as_cashier.musqet_get_latest_status(other))
                 self.assertEqual(json.loads(self.method.musqet_latest_response), sale)
+        # A till still on the frontend from before 19.0.1.7.0 names no sale.
+        self.assertFalse(method_as_cashier.musqet_get_latest_status())
+        self.assertEqual(json.loads(self.method.musqet_latest_response), sale)
         self.assertEqual(method_as_cashier.musqet_get_latest_status('s-9'), sale)
 
     def test_denies_a_non_pos_user(self):
@@ -359,6 +373,26 @@ class TestMusqetWebhookRoute(HttpCase):
                 response, _ = self._post(body, secret=secret)
                 self.assertAccepted(response)
         self.assertEqual(self.sale.state, 'done')
+
+    def test_a_failing_signature_check_still_answers(self):
+        # A registered serial gets the same answer as an unknown one, whatever the header.
+        Method = type(self.env['pos.payment.method'])
+        with patch.object(Method, '_musqet_verify_webhook', side_effect=OverflowError), \
+             mute_logger('odoo.addons.pos_musqet.controllers.main'):
+            response, mock_request = self._post(self._body())
+        self.assertAccepted(response)
+        mock_request.assert_not_called()
+        self.assertEqual(self.sale.state, 'pending')
+
+    def test_a_form_body_is_dropped(self):
+        # Odoo reads a form body as fields, leaving nothing to verify.
+        for mimetype in ('application/x-www-form-urlencoded', 'multipart/form-data; boundary=x'):
+            with self.subTest(mimetype), \
+                 self.assertLogs('odoo.addons.pos_musqet.controllers.main', 'WARNING') as logs:
+                response = self.url_open('/musqet/webhook', data=b'serial=MSQ-WHR-001',
+                                         headers={'Content-Type': mimetype})
+            self.assertAccepted(response)
+            self.assertIn('sent as a form', logs.output[0])
 
     def test_a_serial_that_is_not_a_string_reads_nothing(self):
         # Signed, but the serial must name one terminal: a list, say, isn't looked up.

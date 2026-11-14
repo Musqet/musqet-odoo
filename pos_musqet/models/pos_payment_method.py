@@ -1036,7 +1036,7 @@ class PosPaymentMethod(models.Model):
         # the webhook controller to buffer its result during a session (mirrors pos_adyen).
         return super()._is_write_forbidden(fields - {'musqet_latest_response'})
 
-    def musqet_get_latest_status(self, sale_id):
+    def musqet_get_latest_status(self, sale_id=None):
         """Return the webhook-buffered result of sale ``sale_id`` for the POS frontend.
 
         Named with the ``musqet_`` prefix to match the proxy convention and the JS call site.
@@ -1045,6 +1045,8 @@ class PosPaymentMethod(models.Model):
         internal/sudo call, may read it.
         Returns Musqet's reply to the status read a verified webhook triggered (the partner
         sale shape, with its saleId), or ``False`` if nothing is buffered for that sale.
+        ``sale_id`` defaults to None so a till still running the frontend from before
+        19.0.1.7.0 gets ``False`` (its poll loop settles the line) rather than an error.
         """
         self.ensure_one()
         self._musqet_check_access()
@@ -1071,8 +1073,8 @@ class PosPaymentMethod(models.Model):
         the configured signing secret reproduces the signature AND the timestamp is fresh.
         Comparison is constant-time (consteq); a missing secret, malformed header or stale
         timestamp is rejected. A header naming ``t`` or ``v1`` more than once, or a timestamp
-        that isn't plain ASCII digits, is malformed: the check reads one unambiguous value
-        of each. ``raw_body`` must be the exact bytes received — re-encoding a parsed body
+        that isn't 1 to 12 plain ASCII digits, is malformed: the check reads one unambiguous
+        value of each. ``raw_body`` must be the exact bytes received — re-encoding a parsed body
         could change it and break the signature.
 
         A captured request still verifies again inside the tolerance window. That is
@@ -1096,7 +1098,9 @@ class PosPaymentMethod(models.Model):
         if not timestamp or not signature:
             return False
         # int() also takes '+12', '1_2' and non-ASCII digits: only the plain form is signed.
-        if not (timestamp.isascii() and timestamp.isdigit()):
+        # Epoch seconds are 10 digits until the year 2286; a far longer value would make int()
+        # or the float subtraction below raise instead of being rejected.
+        if not (timestamp.isascii() and timestamp.isdigit()) or len(timestamp) > 12:
             return False
         # Reject stale/future timestamps to blunt replay (seconds since the epoch).
         if abs(time.time() - int(timestamp)) > MUSQET_WEBHOOK_TOLERANCE:
