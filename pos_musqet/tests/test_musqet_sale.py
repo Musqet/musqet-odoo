@@ -15,6 +15,8 @@ from odoo.tests.common import TransactionCase
 from odoo.tools import mute_logger
 
 from .common import (
+    PROXY_LOGGER,
+    RECORD_LOGGER,
     create_musqet_method,
     dirty_field_names,
     make_pos_user,
@@ -254,7 +256,7 @@ class TestMusqetSaleRecords(TransactionCase):
     def test_a_reply_about_another_sale_changes_nothing(self):
         # Neither the record nor the till: the POS gets an error, not a COMPLETE to settle on.
         self._start_sale()
-        with self.assertLogs('odoo.addons.pos_musqet.models.pos_payment_method', 'WARNING'):
+        with self.assertLogs(PROXY_LOGGER, 'WARNING'):
             result = self._poll({**self.complete, 'saleId': 'sale-2'})
         self.assertEqual(self._sale().state, 'pending')
         self.assertIn('different sale', result['error']['message'])
@@ -304,10 +306,9 @@ class TestMusqetSaleRecords(TransactionCase):
     def test_a_complete_reply_without_a_valid_amount_or_currency_leaves_it_pending(self):
         # Done means Musqet confirmed what it captured.
         self._start_sale()
-        logger = 'odoo.addons.pos_musqet.models.pos_musqet_record'
         for bad in ({'amountInCents': True}, {'amountInCents': None}, {'amountInCents': 2 ** 31},
                     {'currency': 'GBPX'}, {'currency': None}):
-            with self.subTest(bad=bad), self.assertLogs(logger, 'WARNING'):
+            with self.subTest(bad=bad), self.assertLogs(RECORD_LOGGER, 'WARNING'):
                 self._poll({**self.complete, **bad})
                 self.assertEqual(self._sale().state, 'pending')
 
@@ -336,8 +337,7 @@ class TestMusqetSaleRecords(TransactionCase):
 
     def test_logs_a_sale_musqet_accepted_but_odoo_could_not_record(self):
         record_sale(self.env, self.method, 'sale-1')
-        logger = 'odoo.addons.pos_musqet.models.pos_musqet_record'
-        with self.assertLogs(logger, 'ERROR') as logs, mute_logger('odoo.sql_db'):
+        with self.assertLogs(RECORD_LOGGER, 'ERROR') as logs, mute_logger('odoo.sql_db'):
             result = self._start_sale()
         # The POS still gets the saleId, so it polls the sale.
         self.assertEqual(result, {'saleId': 'sale-1', 'status': 'PENDING'})
@@ -349,7 +349,7 @@ class TestMusqetSaleRecords(TransactionCase):
     def test_logs_the_reference_escaped(self):
         # A reference from the till can't forge lines in the reconciliation log.
         record_sale(self.env, self.method, 'sale-1')
-        with self.assertLogs('odoo.addons.pos_musqet.models.pos_musqet_record', 'ERROR') as logs, \
+        with self.assertLogs(RECORD_LOGGER, 'ERROR') as logs, \
              mute_logger('odoo.sql_db'):
             self._start_sale(reference='Order-1\nFORGED LINE')
         self.assertNotIn('\n', logs.records[0].getMessage())

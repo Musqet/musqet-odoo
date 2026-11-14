@@ -210,6 +210,8 @@ class TestMusqetWebhookRoute(HttpCase):
         # Settled already, never recorded, or no saleId: the POS's poll covers the till, and
         # a replay costs no call to Musqet. Nothing is buffered.
         done = record_sale(self.env, self.method, 'sale-done', rail='card')
+        # An unanswered sale has no saleId: an empty one in the body must not reach it.
+        lost = record_sale(self.env, self.method, False, state='pending', rail=False)
         for sale_id in ('sale-done', 'sale-unknown', ''):
             with self.subTest(sale_id=sale_id):
                 body = self._body()
@@ -217,8 +219,9 @@ class TestMusqetWebhookRoute(HttpCase):
                 _, mock_request = self._post(body, read=musqet_response(sale_id or 'x', 'COMPLETE'))
                 mock_request.assert_not_called()
                 self.assertIsNone(self._buffered())
-        done.invalidate_recordset()
+        (done | lost).invalidate_recordset()
         self.assertEqual(done.state, 'done')
+        self.assertEqual(lost.state, 'pending')
 
     def test_a_done_sale_without_a_rail_is_read_again(self):
         sale = record_sale(self.env, self.method, 'sale-norail', rail=False)

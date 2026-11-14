@@ -15,7 +15,14 @@ from odoo import fields, models, api, _
 from odoo.exceptions import AccessDenied, UserError, ValidationError
 from odoo.tools import consteq
 
-from .musqet_common import MUSQET_TERMINAL, parse_minor_amount, reply_is_for
+from .musqet_common import (
+    MUSQET_OUTCOME_UNKNOWN,
+    MUSQET_REFUSED_STATUSES,
+    MUSQET_TERMINAL,
+    parse_minor_amount,
+    reply_is_for,
+    request_may_have_arrived,
+)
 from .musqet_crypto import (
     ENV_KEY,
     MusqetEncryptionKeyUnavailable,
@@ -46,6 +53,12 @@ MUSQET_DEFAULT_SALE_MODE = 'any'
 # language: a short locale code ("en", "pt"); the API checks it against its own list.
 MUSQET_REFERENCE_MAX_LENGTH = 255
 MUSQET_LANGUAGE_MAX_LENGTH = 16
+# At most this much of a refusal's message is passed on to the POS.
+MUSQET_REFUSAL_MESSAGE_MAX_LENGTH = 500
+# At most this much of an untrusted value from a reply reaches the log: a body (at debug
+# level), and an id (a saleId it names).
+MUSQET_LOG_BODY_MAX_LENGTH = 500
+MUSQET_LOG_ID_MAX_LENGTH = 100
 
 
 class PosPaymentMethod(models.Model):
@@ -384,8 +397,15 @@ class PosPaymentMethod(models.Model):
         """Make one server-side call to the Musqet API.
 
         Returns the parsed JSON body on success, or a clean ``{'error': {...}}`` dict on
-        a configuration problem, a transport failure or a non-2xx response: never raises
-        the raw error, and never puts the API key in a log line.
+        a configuration problem, a transport failure, a non-2xx response or an unusable 2xx
+        body: never raises the raw error, and never puts the API key in a log line.
+
+        An error after which the request may still have reached Musqet and been acted on
+        carries ``outcome_unknown: True`` (the MUSQET_OUTCOME_UNKNOWN key, see
+        reply_outcome_is_unknown): a transport failure after the connection was made, a
+        non-2xx status not in MUSQET_REFUSED_STATUSES, or a 2xx body Odoo can't read, that
+        isn't a JSON object, or that carries a non-null ``error``. A null ``error`` in a 2xx
+        body is no error, and is dropped, so every caller can take an ``error`` key as one.
         """
         self.ensure_one()
         self._musqet_check_access()
@@ -409,27 +429,100 @@ class PosPaymentMethod(models.Model):
                 allow_redirects=False,
             )
         except requests.exceptions.RequestException as error:
-            # str(error) may include the URL but never the headers, so no key leaks.
+            # str(error) may include the URL but never the headers, so no key leaks. It stays
+            # in the log: the reply, which reaches the cashier's browser, names only its type.
             _logger.warning("Musqet %s %s failed: %s", method, path, error)
-            return self._musqet_error(
-                _("Could not reach the Musqet terminal service."), exception=str(error))
+            details = {'exception': type(error).__name__}
+            if request_may_have_arrived(error):
+                details[MUSQET_OUTCOME_UNKNOWN] = True
+            return self._musqet_error(_("Could not reach the Musqet terminal service."), **details)
         if response.status_code // 100 != 2:
             _logger.warning("Musqet %s %s returned HTTP %s", method, path, response.status_code)
-            # Prefer the structured JSON error body; fall back to raw text as a detail.
-            try:
-                detail = response.json()
-            except ValueError:
-                detail = response.text
+            details = {'status_code': response.status_code}
+            if response.status_code in MUSQET_REFUSED_STATUSES:
+                detail = self._musqet_refusal_detail(response, method, path)
+                if detail is not None:
+                    details['detail'] = detail
+            else:
+                details[MUSQET_OUTCOME_UNKNOWN] = True
+                self._musqet_log_body_at_debug(
+                    response, method, path, self._musqet_response_json(response))
+            return self._musqet_error(_("The Musqet terminal service returned an error."), **details)
+        body = self._musqet_2xx_body(response, method, path)
+        if body is None:
+            details = {'status_code': response.status_code, MUSQET_OUTCOME_UNKNOWN: True}
             return self._musqet_error(
-                _("The Musqet terminal service returned an error."),
-                status_code=response.status_code, detail=detail)
+                _("Received an invalid response from the Musqet terminal service."), **details)
+        return body
+
+    @api.model
+    def _musqet_response_json(self, response):
+        """``response``'s JSON body, or its text if it has none Odoo can read (any error: a
+        hostile body can raise anything, RecursionError on deep nesting, say)."""
         try:
             return response.json()
-        except ValueError:
-            _logger.warning("Musqet %s %s returned a non-JSON body", method, path)
-            return self._musqet_error(
-                _("Received an invalid response from the Musqet terminal service."),
-                status_code=response.status_code)
+        except Exception:
+            return response.text
+
+    @api.model
+    def _musqet_log_body_at_debug(self, response, method, path, body):
+        """Log ``body``, the parsed body of a non-2xx ``response`` (_musqet_response_json) that
+        may not be Musqet's (a gateway's or a WAF's page, say), at debug only: it is kept out
+        of the reply, which reaches the cashier's browser."""
+        _logger.debug("Musqet %s %s HTTP %s body: %.*r", method, path, response.status_code,
+                      MUSQET_LOG_BODY_MAX_LENGTH, body)
+
+    @api.model
+    def _musqet_refusal_detail(self, response, method, path):
+        """The ``{error}`` detail kept from a refusal ``response`` in Musqet's error shape
+        (reply_is_not_found reads its code), else None (the body logged at debug).
+
+        Only an integer code and a capped message are kept: the shape alone doesn't prove the
+        body is Musqet's.
+        """
+        body = self._musqet_response_json(response)
+        if not isinstance(body, dict) or not isinstance(body.get('error'), dict):
+            self._musqet_log_body_at_debug(response, method, path, body)
+            return None
+        error = {}
+        code = body['error'].get('code')
+        if isinstance(code, int) and not isinstance(code, bool):
+            error['code'] = code
+        message = body['error'].get('message')
+        if isinstance(message, str):
+            error['message'] = message[:MUSQET_REFUSAL_MESSAGE_MAX_LENGTH]
+        return {'error': error}
+
+    @api.model
+    def _musqet_2xx_body(self, response, method, path):
+        """The body of a 2xx ``response``, or None if it is unusable (logged here).
+
+        Only an {error} built by _musqet_request may say Musqet refused the request: a 2xx
+        body Odoo can't read, that isn't an object, or that carries a non-null error of its
+        own (a gateway's, say), says nothing of whether Musqet acted on it. Its body is kept
+        out of the reply: it may not be Musqet's, and the reply reaches the cashier's browser.
+        A null error is none, and is dropped, so no caller mistakes the key for one.
+        """
+        try:
+            body = response.json()
+        except Exception as error:
+            # Not only ValueError: a hostile body can raise anything (RecursionError on deep
+            # nesting), and Musqet may have acted on the request all the same.
+            _logger.warning("Musqet %s %s returned a body Odoo can't read: %r", method, path, error)
+            return None
+        if not isinstance(body, dict) or body.get('error') is not None:
+            # A string saleId, if any, helps reconcile it in the Musqet app; the body itself
+            # may hold payment details, so it is logged only at debug level.
+            sale_id = body.get('saleId') if isinstance(body, dict) else None
+            _logger.warning(
+                "Musqet %s %s returned an unexpected 2xx body (saleId %.*r, a %s)",
+                method, path, MUSQET_LOG_ID_MAX_LENGTH,
+                sale_id if isinstance(sale_id, str) else None, type(body).__name__)
+            _logger.debug("Musqet %s %s unexpected 2xx body: %.*r",
+                          method, path, MUSQET_LOG_BODY_MAX_LENGTH, body)
+            return None
+        body.pop('error', None)
+        return body
 
     def musqet_create_sale(self, payload, line_sale_ids=None):
         """POST /terminal/sales — start a sale on the bound terminal.
@@ -453,6 +546,12 @@ class PosPaymentMethod(models.Model):
         the saleIds already on the order's payment lines, which are never resumed onto
         another line. The reply is then ``{saleId, reference, resumed: true}``, and the POS
         polls that sale as it would a new one (``resumed`` is for logs and support only).
+
+        A sale whose reply never reached Odoo or was unusable (the errors _musqet_request marks
+        MUSQET_OUTCOME_UNKNOWN) may have been paid, and Musqet's API can't look it up
+        by reference, so it is recorded unanswered (pos.musqet.record._musqet_record_sent),
+        and every later sale of the order is refused until a manager who has checked it in
+        the Musqet app marks it failed.
         """
         error = self._musqet_check_terminal_request(payload)
         if error:
@@ -481,8 +580,7 @@ class PosPaymentMethod(models.Model):
             return {'saleId': resumed.sale_id, 'reference': reference, 'resumed': True}
         response = self._musqet_send_terminal_command(
             payload, kind='sale', mode=mode, amount=amount, currency=currency, reference=reference)
-        self._musqet_record_sale(response, amount=amount, currency=currency, reference=reference)
-        return response
+        return self._musqet_record_sale(response, amount=amount, currency=currency, reference=reference)
 
     def _musqet_send_terminal_command(self, payload, *, kind, mode, amount, currency, reference):
         """POST a sale or refund (``kind``) to this method's terminal; return Musqet's reply.
@@ -513,20 +611,29 @@ class PosPaymentMethod(models.Model):
         return self._musqet_request('POST', '/terminal/sales', payload=outgoing)
 
     def _musqet_record_sale(self, response, *, amount, currency, reference):
-        """Record a sale Musqet accepted, so its settle can be checked against Musqet's word.
+        """Record a sale sent to Musqet, so its settle can be checked against Musqet's word;
+        return the reply for the POS.
 
         Pending until Musqet says otherwise: the create reply is normally PENDING, and a
         status read settles it (_musqet_sync_records), polled or triggered by a signed webhook.
         If saving fails (logged), the sale can't be refunded here and its synced payment is Not
-        verified.
+        verified. A sale whose reply was lost is recorded unanswered
+        (pos.musqet.record._musqet_record_sent), and the POS told so.
         """
-        self.env['pos.musqet.sale']._musqet_record_accepted(response, {
+        return self._musqet_record_and_reply('pos.musqet.sale', response, {
             'company_id': self._musqet_company().id,
             'payment_method_id': self.id,
             'reference': reference,
             'amount_minor': amount,
             'currency': currency,
         }, "reference %r, %s minor units" % (reference, amount))
+
+    def _musqet_record_and_reply(self, model, response, vals, details):
+        """Record the request sent to Musqet in ``model`` (_musqet_record_sent); return the reply
+        for the POS: ``response``, or if Musqet's answer is unknown an ``{error}`` saying what
+        to do."""
+        message = self.env[model]._musqet_record_sent(response, vals, details)
+        return self._musqet_error(message) if message else response
 
     @api.model
     def _musqet_valid_reference(self, reference):
@@ -618,12 +725,14 @@ class PosPaymentMethod(models.Model):
         return original, None
 
     def _musqet_record_refund(self, response, *, original, amount, reference):
-        """Record a refund Musqet accepted, so the next refund of the sale counts it.
+        """Record a refund sent to Musqet, so the next refund of the sale counts it; return the
+        reply for the POS.
 
         If saving fails (logged), the refund's synced payment counts only if the POS writes
-        its musqet_refund_of link (see pos.musqet.refund._musqet_unrecorded_synced).
+        its musqet_refund_of link (see pos.musqet.refund._musqet_unrecorded_synced). A refund
+        whose reply was lost is recorded unanswered, and the POS told so.
         """
-        self.env['pos.musqet.refund']._musqet_record_accepted(response, {
+        return self._musqet_record_and_reply('pos.musqet.refund', response, {
             'company_id': original.company_id.id,
             'payment_method_id': self.id,
             'original_sale_id': original.sale_id,
@@ -661,12 +770,16 @@ class PosPaymentMethod(models.Model):
         reference, so a refund order carries at most one Musqet refund of a given sale. The cap
         and the duplicate check are pos.musqet.refund._musqet_refusal_message.
 
-        Not covered: a refund Musqet accepted but whose response never reached Odoo (a
-        timeout), or whose record Odoo failed to save. Neither has a record, and until its
+        A refund whose reply never reached Odoo or was unusable (the errors _musqet_request
+        marks MUSQET_OUTCOME_UNKNOWN) may have gone through, and Musqet's API can't
+        look it up by reference, so it is recorded unanswered
+        (pos.musqet.record._musqet_record_sent): it counts against the cap and refuses every
+        Musqet refund of its refund order until a manager who has checked it in the Musqet
+        app marks it failed (or refunded, action_musqet_mark_refunded).
+
+        Not covered: a refund whose record Odoo failed to save. It has no record, and until its
         refund order syncs with a musqet_refund_of link a retry of the same order is not
-        stopped here. Closing the first needs the abandoned-payment handling (look the
-        refund up at Musqet by reference before sending another); the second is logged for
-        reconciliation.
+        stopped here. It is logged for reconciliation.
         """
         error = self._musqet_check_terminal_request(payload)
         if error:
@@ -707,8 +820,8 @@ class PosPaymentMethod(models.Model):
         response = self._musqet_send_terminal_command(
             payload, kind='refund', mode='card', amount=amount, currency=currency,
             reference=reference)
-        self._musqet_record_refund(response, original=original, amount=amount, reference=reference)
-        return response
+        return self._musqet_record_refund(
+            response, original=original, amount=amount, reference=reference)
 
     def musqet_get_sale(self, sale_id):
         """GET /terminal/sales/:id — poll a sale's status.
@@ -733,8 +846,10 @@ class PosPaymentMethod(models.Model):
         ('read' or 'cancel') only labels the log line.
         """
         if isinstance(response, dict) and 'error' not in response and not reply_is_for(sale_id, response):
-            _logger.warning("Musqet replied about sale %r to a %s of sale %r",
-                            response.get('saleId'), action, sale_id)
+            echoed = response.get('saleId')
+            _logger.warning("Musqet replied about sale %.*r to a %s of sale %.*r",
+                            MUSQET_LOG_ID_MAX_LENGTH, echoed if isinstance(echoed, str) else None,
+                            action, MUSQET_LOG_ID_MAX_LENGTH, sale_id)
             return self._musqet_error(_("Musqet replied about a different sale."))
         return response
 
@@ -752,7 +867,10 @@ class PosPaymentMethod(models.Model):
             records._musqet_apply_response(response)
 
     def _musqet_records_of(self, sale_id):
-        """This method's sale and refund records of ``sale_id`` (each at most one)."""
+        """This method's sale and refund records of ``sale_id`` (each at most one). An empty
+        ``sale_id`` names none (an unanswered record has no saleId)."""
+        if not sale_id:
+            return self.env['pos.musqet.sale'].browse(), self.env['pos.musqet.refund'].browse()
         domain = [('payment_method_id', '=', self.id), ('sale_id', '=', str(sale_id))]
         return (self.env['pos.musqet.sale'].sudo().search(domain),
                 self.env['pos.musqet.refund'].sudo().search(domain))

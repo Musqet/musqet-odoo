@@ -1,5 +1,9 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 """Constants and helpers shared by the Musqet models."""
+import ssl
+
+import requests
+from urllib3.exceptions import NewConnectionError
 
 # The use_payment_terminal value of a Musqet payment method.
 MUSQET_TERMINAL = 'musqet'
@@ -12,6 +16,60 @@ MUSQET_FAILURE_STATUSES = ('ERROR', 'CANCELLED', 'CANCELLED_REMOTE', 'TIMED_OUT'
 # The rails a settled Musqet sale reports in its top-level ``rail`` field.
 MUSQET_RAIL_SELECTION = [('card', "Card"), ('bitcoin', "Bitcoin")]
 MUSQET_RAILS = tuple(rail for rail, _label in MUSQET_RAIL_SELECTION)
+
+# The key _musqet_request sets in an {error} after which the request may still have reached
+# Musqet and been acted on (reply_outcome_is_unknown).
+MUSQET_OUTCOME_UNKNOWN = 'outcome_unknown'
+
+# The HTTP statuses that mean Musqet refused a request without acting on it: a bad request,
+# a bad key, a wrong URL, a busy terminal (409 CONFLICT), a value it rejects. Any other non-2xx
+# (a 5xx, a gateway's 408 or 429, a redirect, which is never followed) may come after the
+# request was acted on, so its outcome is unknown.
+MUSQET_REFUSED_STATUSES = frozenset({400, 401, 403, 404, 409, 422})
+
+# The request errors raised before anything reached the server: the connection was never
+# made, or the request was never built. (Not SSLError or ProxyError: requests raises those
+# for failures after the request was sent too, a reset mid-response say.)
+MUSQET_NOT_SENT_ERRORS = (
+    requests.exceptions.ConnectTimeout,
+    requests.exceptions.InvalidURL,
+    requests.exceptions.InvalidSchema,
+    requests.exceptions.MissingSchema,
+    requests.exceptions.InvalidHeader,
+    requests.exceptions.InvalidJSONError,
+)
+# The causes that show a request error came before anything was sent: the connection was
+# refused or its host not found (to Musqet or to a proxy), or Musqet's certificate failed
+# verification, which happens during the TLS handshake. Any other handshake failure (urllib3's
+# own hostname CertificateError, say) is taken as possibly sent: the safe side.
+MUSQET_NOT_SENT_CAUSES = (NewConnectionError, ssl.SSLCertVerificationError)
+
+
+def iter_error_causes(error):
+    """``error`` and the errors it wraps: requests wraps urllib3's MaxRetryError in its
+    arguments, which names the error itself as its ``reason``, and urllib3 wraps the
+    underlying error in its arguments or as its cause."""
+    seen, stack = set(), [error]
+    while stack:
+        cause = stack.pop()
+        if not isinstance(cause, BaseException) or id(cause) in seen:
+            continue
+        seen.add(id(cause))
+        yield cause
+        stack.extend((getattr(cause, 'reason', None), cause.__cause__, *cause.args))
+
+
+def request_may_have_arrived(error):
+    """Whether the request that raised ``error`` (a requests error) may have reached Musqet.
+
+    No for an error of MUSQET_NOT_SENT_ERRORS, or one caused by one of
+    MUSQET_NOT_SENT_CAUSES; yes for any other (a read timeout, a connection dropped
+    mid-request, a TLS or proxy failure of any other kind), the safe side.
+    """
+    if isinstance(error, MUSQET_NOT_SENT_ERRORS):
+        return False
+    return not any(isinstance(cause, MUSQET_NOT_SENT_CAUSES) for cause in iter_error_causes(error))
+
 
 # The largest amount an Integer field (a Postgres int4) can store.
 MUSQET_MAX_MINOR_AMOUNT = 2 ** 31 - 1
@@ -76,10 +134,12 @@ def reply_is_404(reply):
 
 
 def reply_is_not_found(reply):
-    """Whether ``reply`` (a proxy result) is Musqet's own 404 NOT_FOUND: it has no such sale.
+    """Whether ``reply`` (a proxy result) is a 404 in Musqet's NOT_FOUND shape: taken as
+    Musqet having no such sale.
 
-    Musqet's API answers it with the JSON body ``{"error": {"code": 404, ...}}``, which
-    _musqet_request puts in the error's ``detail``. A bare 404 (a wrong base URL, a proxy in
+    Musqet's API answers it with the JSON body ``{"error": {"code": 404, ...}}``, whose code
+    and message _musqet_request keeps in the error's ``detail`` (the shape alone can't prove
+    the body is Musqet's). A bare 404 (a wrong base URL, a proxy in
     the way) says nothing about the sale, and is not taken as one.
     """
     if not reply_is_404(reply):
@@ -89,11 +149,30 @@ def reply_is_not_found(reply):
     return isinstance(body, dict) and body.get('code') == 404
 
 
+def reply_outcome_is_unknown(reply):
+    """Whether ``reply`` (a proxy result for a sale or refund request) leaves unknown whether
+    Musqet accepted the request.
+
+    True for a reply that names no saleId and is not an ``{error}`` saying Musqet refused the
+    request or never got it: the request may have reached Musqet while the reply was lost.
+    _musqet_request marks those errors MUSQET_OUTCOME_UNKNOWN (its docstring lists them).
+    """
+    if not isinstance(reply, dict):
+        return True
+    error = reply.get('error')
+    if error is not None:
+        return isinstance(error, dict) and error.get(MUSQET_OUTCOME_UNKNOWN) is True
+    return not reply.get('saleId')
+
+
 def sale_key_domain(sale_field, sale_ids, methods):
     """The domain of the rows with one of ``sale_ids`` in ``sale_field``, on one of ``methods``.
 
     A Musqet sale or refund is keyed on (method, saleId): ``sale_field`` is ``sale_id`` on a
     sale or refund record and ``transaction_id`` on a payment. This domain may also match a
-    listed saleId on another listed method, so callers still compare the key.
+    listed saleId on another listed method, so callers still compare the key. An empty saleId
+    (a record of a request whose reply was lost) is left out: it names no sale, and in a
+    domain it would match every row with none.
     """
-    return [(sale_field, 'in', list(sale_ids)), ('payment_method_id', 'in', methods.ids)]
+    return [(sale_field, 'in', [sale_id for sale_id in sale_ids if sale_id]),
+            ('payment_method_id', 'in', methods.ids)]

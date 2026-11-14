@@ -55,8 +55,9 @@ class PosMusqetSale(models.Model):
     payment line, and each synced Musqet payment line is checked against it
     (pos.payment.musqet_settle_check).
 
-    Created only by the server (sudo); nothing changes them from the browser. The upgrade
-    to 19.0.1.3.0 also created done records for the sales synced before it
+    Created only by the server (sudo); nothing changes them from the browser. A POS manager
+    can mark an unanswered one (no saleId) failed, and no other (action_musqet_mark_failed).
+    The upgrade to 19.0.1.3.0 also created done records for the sales synced before it
     (_musqet_record_synced_sales).
     """
     _name = 'pos.musqet.sale'
@@ -64,7 +65,10 @@ class PosMusqetSale(models.Model):
     _description = 'Musqet Sale'
     _musqet_kind = 'sale'
 
-    sale_id = fields.Char(string="Musqet Sale", help="The Musqet saleId of the sale.")
+    sale_id = fields.Char(
+        string="Musqet Sale",
+        help="The Musqet saleId of the sale. Empty if Musqet's reply to the sale request never "
+             "reached Odoo: check the sale in the Musqet app, then mark it failed.")
     amount_minor = fields.Integer(
         help="The amount in minor units of the currency (cents): the amount requested while "
              "pending, the amount Musqet captured once done.")
@@ -84,6 +88,18 @@ class PosMusqetSale(models.Model):
 
     _unique_sale = models.Constraint(
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet sale is already recorded.')
+
+    def _musqet_may_mark_failed(self):
+        """Only an unanswered sale: one with a saleId is settled by Musqet's replies, and
+        marking it failed could hide a sale the customer paid."""
+        return self._musqet_is_unanswered()
+
+    def _musqet_unanswered_message(self):
+        return _(
+            "Odoo did not get a clear answer from Musqet to a payment request for this order, so "
+            "it can't tell whether the customer was charged. A manager must check it in the "
+            "Musqet app and clear it under Musqet Sales before this order can take another "
+            "Musqet payment.")
 
     def _musqet_apply_response(self, response):
         """Settle as for any record; also, a done sale whose rail Musqet hadn't reported yet
@@ -144,8 +160,11 @@ class PosMusqetSale(models.Model):
         The POS gives up on a sale it has polled for too long, or lost contact over, and a
         page refresh forgets the sale it was waiting on, yet the customer can still pay it
         on the terminal. A retry must not send a second sale for the same payment. So the
-        order's open sales (_musqet_open_sales_of) are read from Musqet first if still
-        pending, newest first, then:
+        order's unanswered sale, on any method (the reply to its request never reached Odoo,
+        see pos.musqet.record), refuses the request before anything is read: it may have been
+        paid, and nothing can read it, so a manager has to check it in the Musqet app and mark
+        it failed. Otherwise the order's open sales (_musqet_open_sales_of) are read from
+        Musqet first if still pending, newest first, then:
 
         1. one still pending that this request may not resume refuses the request: it may
            still be paid, so it has to end first (cancel it, or let it time out);
@@ -166,7 +185,7 @@ class PosMusqetSale(models.Model):
         ``line_sale_ids`` comes from the browser, so it can only refuse more, or send a new
         sale where one was done, never hide a pending sale.
 
-        A pending sale whose read got Musqet's own not-found reply (reply_is_not_found) and
+        A pending sale whose read got a 404 in Musqet's NOT_FOUND shape (reply_is_not_found) and
         that is older than MUSQET_SALE_STALE_AFTER can't still be paid on the terminal: it
         is stamped not_found_at, logged once for reconciliation, and left out of this request
         and later ones (they no longer read it), unless a later reply settles it, which clears
@@ -195,6 +214,8 @@ class PosMusqetSale(models.Model):
             return self.browse(), _(
                 "A Musqet payment for this order is already being started. Wait for it, then "
                 "try again.")
+        if self._musqet_has_unanswered(company, reference):
+            return self.browse(), self._musqet_unanswered_message()
         open_sales = self._musqet_open_sales_of(company, reference)
         answered_404 = self._musqet_read_pending(open_sales)
         on_lines = self._musqet_line_sale_ids(line_sale_ids)

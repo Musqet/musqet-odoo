@@ -20,6 +20,7 @@ from odoo.tests.common import TransactionCase
 from odoo.tools import SQL
 
 from .common import (
+    PROXY_LOGGER,
     MusqetPosRecordsCase,
     create_musqet_method,
     make_pos_user,
@@ -28,12 +29,10 @@ from .common import (
 )
 
 
-# Loggers: the proxy warns of a failed or mismatched Musqet call, the sale records of a stale
-# sale Musqet no longer knows.
-PROXY_LOGGER = 'odoo.addons.pos_musqet.models.pos_payment_method'
+# The sale records log a stale sale Musqet no longer knows.
 SALE_LOGGER = 'odoo.addons.pos_musqet.models.pos_musqet_sale'
-# Replies for stub_reply: Musqet's own answer for a saleId it doesn't know, and a bare 404
-# from something else (a wrong base URL, a proxy in the way).
+# Replies for stub_reply: a 404 in Musqet's NOT_FOUND shape (its answer for a saleId it
+# doesn't know), and a bare 404 from something else (a wrong base URL, a proxy in the way).
 NOT_FOUND = {'status_code': 404, 'body': {'error': {'code': 404, 'message': 'Terminal sale not found.'}}}
 BARE_404 = {'status_code': 404, 'body': 'Not Found'}
 
@@ -311,7 +310,7 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
             result = self._create(fake)
         self.assertRefusedInProgress(result, fake)
 
-    def test_a_recent_pending_sale_still_blocks_on_musqets_not_found(self):
+    def test_a_recent_pending_sale_still_blocks_on_a_not_found_in_musqets_shape(self):
         # It may be a sale of the business the API key belonged to before it was changed.
         self._sale('sale-p', amount_minor=700)
         fake = FakeMusqet(statuses={'sale-p': NOT_FOUND})
@@ -411,9 +410,9 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
 
 @tagged('post_install', '-at_install')
 class TestMusqetReplyIsNotFound(TransactionCase):
-    """reply_is_not_found takes only Musqet's own 404 body as "no such sale"."""
+    """reply_is_not_found takes only a 404 in Musqet's NOT_FOUND shape as "no such sale"."""
 
-    def test_only_musqets_own_not_found(self):
+    def test_only_a_not_found_in_musqets_shape(self):
         def proxy_error(status_code, detail):
             return {'error': {'message': 'x', 'status_code': status_code, 'detail': detail}}
 
@@ -458,6 +457,16 @@ class TestMusqetCancelSale(TransactionCase):
             result = self._cancel(status='CANCELLED_REMOTE', status_code=409)
         self.assertIn('error', result)
         self.assertEqual(self.sale.state, 'pending')
+
+    def test_a_null_error_in_a_cancel_reply_is_no_error(self):
+        # Dropped by the proxy: the record syncs, and the different-sale guard still holds.
+        with self.assertLogs(PROXY_LOGGER, 'WARNING'):
+            result = self._cancel(status='CANCELLED_REMOTE', saleId='sale-other', error=None)
+        self.assertIn('different sale', result['error']['message'])
+        self.assertEqual(self.sale.state, 'pending')
+        result = self._cancel(status='CANCELLED_REMOTE', error=None)
+        self.assertEqual(result, {'saleId': 'sale-c', 'status': 'CANCELLED_REMOTE'})
+        self.assertEqual(self.sale.state, 'failed')
 
     def test_a_cancel_reply_about_another_sale_changes_nothing(self):
         # Neither the record nor the till: the POS gets an error, not a cancel to release on.

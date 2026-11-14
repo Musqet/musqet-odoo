@@ -28,7 +28,10 @@
                 <header>
                     <button name="action_musqet_mark_failed" type="object" string="Mark as Failed"
                             invisible="state != 'pending'"
-                            confirm="Only do this once the Musqet app shows this refund did not go through. It then stops counting against the original sale, and this cannot be undone."/>
+                            confirm="Only do this once the Musqet app shows this refund did not go through. It then stops counting against the original sale (and no longer blocks its refund order, if its reply was lost), and this cannot be undone."/>
+                    <button name="action_musqet_mark_refunded" type="object" string="Mark as Refunded"
+                            invisible="state != 'pending' or sale_id"
+                            confirm="Only do this once the Musqet app shows this refund went through. It keeps counting against the original sale, the rest of its refund order can be refunded again, and this cannot be undone."/>
                     <field name="state" widget="statusbar"/>
                 </header>
                 <sheet>
@@ -46,6 +49,22 @@
                     </group>
                 </sheet>
             </form>
+        </field>
+    </record>
+
+    <record id="pos_musqet_refund_view_search" model="ir.ui.view">
+        <field name="name">pos.musqet.refund.search</field>
+        <field name="model">pos.musqet.refund</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="reference"/>
+                <field name="sale_id"/>
+                <field name="original_sale_id"/>
+                <field name="payment_method_id"/>
+                <filter name="pending" string="Pending" domain="[('state', '=', 'pending')]"/>
+                <filter name="unanswered" string="Reply lost"
+                        domain="[('state', '=', 'pending'), ('sale_id', '=', False)]"/>
+            </search>
         </field>
     </record>
 

@@ -1,7 +1,7 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 {
     'name': 'POS Musqet',
-    'version': '19.0.1.4.0',
+    'version': '19.0.1.5.0',
     'category': 'Sales/Point of Sale',
     'sequence': 6,
     'summary': 'Integrate your POS with a Musqet dual-rail (card + Bitcoin Lightning) payment terminal',

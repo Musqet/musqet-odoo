@@ -28,6 +28,9 @@
         <field name="arch" type="xml">
             <form create="false" edit="false" delete="false">
                 <header>
+                    <button name="action_musqet_mark_failed" type="object" string="Mark as Failed"
+                            invisible="state != 'pending' or sale_id"
+                            confirm="Only do this once the Musqet app shows no payment was taken for this request. Odoo then lets the order take another Musqet payment, and this cannot be undone."/>
                     <field name="state" widget="statusbar"/>
                 </header>
                 <sheet>
@@ -47,6 +50,21 @@
                     </group>
                 </sheet>
             </form>
+        </field>
+    </record>
+
+    <record id="pos_musqet_sale_view_search" model="ir.ui.view">
+        <field name="name">pos.musqet.sale.search</field>
+        <field name="model">pos.musqet.sale</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="reference"/>
+                <field name="sale_id"/>
+                <field name="payment_method_id"/>
+                <filter name="pending" string="Pending" domain="[('state', '=', 'pending')]"/>
+                <filter name="unanswered" string="Reply lost"
+                        domain="[('state', '=', 'pending'), ('sale_id', '=', False)]"/>
+            </search>
         </field>
     </record>
 

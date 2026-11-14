@@ -20,11 +20,12 @@ class PosMusqetRefund(models.Model):
     cumulative limit (Musqet/musqet#2094), so the over-refund cap and the duplicate check
     in ``pos.payment.method.musqet_create_refund`` read these records. They are created
     only by the server (sudo), and exist as soon as Musqet accepts the refund, before the
-    refund order reaches Odoo (except in the cases the "Not covered" paragraph of
-    musqet_create_refund names). A POS manager can mark a pending one failed
-    (action_musqet_mark_failed); nothing else changes them from the browser. The upgrade
-    to 19.0.1.2.0 also created done records for the refunds synced before it
-    (_musqet_record_synced_refunds).
+    refund order reaches Odoo (except in the case the "Not covered" paragraph of
+    musqet_create_refund names), or as soon as its reply is lost (unanswered, with no
+    saleId). A POS manager can mark a pending one failed (action_musqet_mark_failed), or an
+    unanswered one refunded (action_musqet_mark_refunded); nothing else changes them from the
+    browser. The upgrade to 19.0.1.2.0 also created done records for the refunds synced
+    before it (_musqet_record_synced_refunds).
     """
     _name = 'pos.musqet.refund'
     _inherit = ['pos.musqet.record']
@@ -34,30 +35,40 @@ class PosMusqetRefund(models.Model):
     original_sale_id = fields.Char(
         string="Original Musqet Sale", required=True, readonly=True, index=True,
         help="The Musqet saleId of the card sale this refund reverses.")
-    sale_id = fields.Char(string="Musqet Refund Sale", help="The Musqet saleId of the refund itself.")
+    sale_id = fields.Char(
+        string="Musqet Refund Sale",
+        help="The Musqet saleId of the refund itself. Empty if Musqet's reply to the refund "
+             "request never reached Odoo: check the refund in the Musqet app, then mark it "
+             "failed or refunded.")
     reference = fields.Char(help="The refund order reference sent to Musqet.")
     amount_minor = fields.Integer(
         help="The amount in minor units of the company currency (cents): the amount requested "
-             "while pending, the amount Musqet reports refunded once done.")
+             "while pending, the amount Musqet reports refunded once done (or the amount "
+             "requested, if a manager marked it refunded).")
     state = fields.Selection(help="Pending and Done count against the original sale; Failed does not.")
 
     _unique_sale = models.Constraint(
         'UNIQUE (payment_method_id, sale_id)', 'This Musqet refund is already recorded.')
 
-    def action_musqet_mark_failed(self):
-        """Mark pending refunds failed, for a POS manager who has checked them in Musqet.
+    def action_musqet_mark_refunded(self):
+        """Mark unanswered refunds done, for a POS manager who has found them refunded in the
+        Musqet app.
 
-        A pending refund keeps counting against its sale until Musqet reports how it ended.
-        If that read can never succeed (Musqet doesn't know the saleId, or the method has
-        lost its Musqet configuration), this is the way out. Only pending refunds move.
-
-        It can't be undone: a failed refund is never re-read, and its synced payment doesn't
-        count either, so the amount leaves the cap for good.
+        A done refund keeps counting against its sale at the amount requested, and makes its
+        refund order's reference a duplicate for that sale, but it no longer blocks the other
+        refunds of its refund order. Only unanswered refunds (pending, no saleId) move: one
+        with a saleId is settled by Musqet's replies. It can't be undone.
         """
-        # Explicit, not left to the read of `state`. Read access is POS managers' only
-        # (ir.model.access.csv), within their companies (pos_musqet_security.xml).
+        # As action_musqet_mark_failed: managers only, within their companies.
         self.check_access('read')
-        self.filtered(lambda refund: refund.state == 'pending').sudo().write({'state': 'failed'})
+        self.filtered(lambda refund: refund._musqet_is_unanswered())._musqet_mark_by_manager('done')
+
+    def _musqet_unanswered_message(self):
+        return _(
+            "Odoo did not get a clear answer from Musqet to a refund request for this order, so "
+            "it can't tell whether the card was refunded. A manager must check it in the Musqet "
+            "app and clear it under Musqet Refunds before this order can send another Musqet "
+            "refund.")
 
     def _musqet_done_vals(self, response):
         """A refund settles at the amount Musqet reports refunded.
@@ -86,6 +97,8 @@ class PosMusqetRefund(models.Model):
         pending = self.sudo().search(
             self._musqet_sale_refunds_domain(company, sale_id) + [
                 ('state', '=', 'pending'),
+                # An unanswered refund has no saleId to read.
+                ('sale_id', '!=', False),
                 # A refund whose method is no longer a Musqet one can't be re-read, so it
                 # mustn't use up the limit.
                 ('payment_method_id.use_payment_terminal', '=', MUSQET_TERMINAL),
@@ -99,8 +112,16 @@ class PosMusqetRefund(models.Model):
         """Return why a refund of ``amount`` over the cap or repeating one is refused, else None.
 
         ``original`` is the pos.musqet.sale being refunded. Must run after
-        original._musqet_claim_for_refund, so it sees every earlier refund's record.
+        original._musqet_claim_for_refund, so it sees every earlier refund of that sale.
+
+        An unanswered refund (see pos.musqet.record) with this refund order's ``reference``,
+        of any sale, refuses it first: it may have gone through. Not covered: the claim is per
+        sale, so a refund of another sale in the same refund order, decided at the same moment
+        on another till, may miss an unanswered refund being recorded; each sale's cap still
+        holds.
         """
+        if self._musqet_has_unanswered(original.company_id, reference):
+            return self._musqet_unanswered_message()
         all_recorded = self.sudo().search(
             self._musqet_sale_refunds_domain(original.company_id, original.sale_id))
         # All records, failed ones too: a synced payment of a refund Musqet reports as failed
@@ -151,11 +172,9 @@ class PosMusqetRefund(models.Model):
         for refund in self:
             note(refund.reference, refund.state)
         if self:
-            for payment in self.env['pos.payment'].sudo().search([
-                ('transaction_id', 'in', self.mapped('sale_id')),
-                ('payment_method_id', 'in', self.payment_method_id.ids),
-                ('company_id', '=', original.company_id.id),
-            ]):
+            for payment in self.env['pos.payment'].sudo().search(sale_key_domain(
+                'transaction_id', self.mapped('sale_id'), self.payment_method_id,
+            ) + [('company_id', '=', original.company_id.id)]):
                 state = state_by_key.get((payment.payment_method_id.id, payment.transaction_id))
                 if state:
                     for reference in payment._musqet_order_references():
