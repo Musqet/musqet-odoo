@@ -21,17 +21,15 @@ from odoo.tests.common import TransactionCase
 from odoo.tools import mute_logger
 
 from .common import (
+    PROXY_LOGGER,
+    RECORD_LOGGER,
+    UNANSWERED,
     MusqetPosRecordsCase,
     create_musqet_method,
     make_pos_user,
     musqet_response,
     record_sale,
 )
-
-RECORD_LOGGER = 'odoo.addons.pos_musqet.models.pos_musqet_record'
-PROXY_LOGGER = 'odoo.addons.pos_musqet.models.pos_payment_method'
-# The words of the message refusing an order with an unanswered sale or refund.
-UNANSWERED = 'did not get a clear answer from Musqet'
 
 
 def wrapped(reason, error=requests.exceptions.ConnectionError):
@@ -41,10 +39,12 @@ def wrapped(reason, error=requests.exceptions.ConnectionError):
 
 
 def reply(status_code=200, body=None, unreadable=False):
-    """A stubbed HTTP response: ``body`` as JSON, or a body that isn't JSON."""
+    """A stubbed HTTP response: ``body`` as JSON, or a body that isn't JSON (``unreadable``:
+    True, or the error parsing it raises)."""
     response = MagicMock(status_code=status_code, text='<html>')
     if unreadable:
-        response.json.side_effect = ValueError('not JSON')
+        response.json.side_effect = (
+            unreadable if isinstance(unreadable, Exception) else ValueError('not JSON'))
     else:
         response.json.return_value = body
     return response
@@ -65,6 +65,7 @@ LOST = [
     ('500', reply(500, {'error': {'code': 500}})),
     ('504 without JSON', reply(504, unreadable=True)),
     ('2xx without JSON', reply(200, unreadable=True)),
+    ('2xx nested too deep to parse', reply(200, unreadable=RecursionError('too deep'))),
     ('2xx without a saleId', reply(200, {'status': 'PENDING'})),
     ('2xx with an empty saleId', reply(200, {'saleId': '', 'status': 'PENDING'})),
     ('2xx not an object', reply(200, ['PENDING'])),
@@ -173,7 +174,7 @@ class TestMusqetLostSaleReply(TransactionCase):
                 self.assertIn(UNANSWERED, result['error']['message'])
                 stub.assert_not_called()
         # Another order is not held up.
-        result, stub = self._create(musqet_response('sale-other'), reference='Order-M')
+        result, _stub = self._create(musqet_response('sale-other'), reference='Order-M')
         self.assertEqual(result['saleId'], 'sale-other')
         # Once a manager has checked it in the Musqet app and marked it failed, the order may
         # take a new sale.
@@ -182,6 +183,15 @@ class TestMusqetLostSaleReply(TransactionCase):
         result, stub = self._create(musqet_response('sale-retry'))
         self.assertEqual(result['saleId'], 'sale-retry')
         self.assertEqual(len(stub.mock_calls), 1)
+
+    def test_still_refuses_once_its_method_is_no_longer_musqet(self):
+        # Unlike a sale with a saleId, an unanswered one is never read, so its method's
+        # configuration doesn't matter.
+        self._lose()
+        self.method.use_payment_terminal = False
+        result, stub = self._create(musqet_response('new-sale'), method=self.other_method)
+        self.assertIn(UNANSWERED, result['error']['message'])
+        stub.assert_not_called()
 
     def test_refuses_before_reading_a_pending_sale_of_the_order(self):
         # A pending sale with a saleId would be read, and resumed; the unanswered one wins.
@@ -209,7 +219,7 @@ class TestMusqetLostSaleReply(TransactionCase):
             self._sales().with_user(self.cashier).action_musqet_mark_failed()
         self.assertEqual(self._sales().state, 'pending')
 
-    def test_a_read_failure_carries_no_unknown_outcome_to_a_status_read(self):
+    def test_a_lost_status_read_records_nothing(self):
         # A status read whose reply is lost changes nothing: reads are safe to repeat, and an
         # unanswered record comes only from a create.
         record_sale(self.env, self.method, 'sale-p', state='pending', rail=False, reference='Order-L')

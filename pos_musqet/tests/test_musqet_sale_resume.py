@@ -20,6 +20,7 @@ from odoo.tests.common import TransactionCase
 from odoo.tools import SQL
 
 from .common import (
+    PROXY_LOGGER,
     MusqetPosRecordsCase,
     create_musqet_method,
     make_pos_user,
@@ -28,9 +29,7 @@ from .common import (
 )
 
 
-# Loggers: the proxy warns of a failed or mismatched Musqet call, the sale records of a stale
-# sale Musqet no longer knows.
-PROXY_LOGGER = 'odoo.addons.pos_musqet.models.pos_payment_method'
+# The sale records log a stale sale Musqet no longer knows.
 SALE_LOGGER = 'odoo.addons.pos_musqet.models.pos_musqet_sale'
 # Replies for stub_reply: Musqet's own answer for a saleId it doesn't know, and a bare 404
 # from something else (a wrong base URL, a proxy in the way).

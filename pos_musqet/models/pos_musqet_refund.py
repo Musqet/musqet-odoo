@@ -94,8 +94,16 @@ class PosMusqetRefund(models.Model):
         """Return why a refund of ``amount`` over the cap or repeating one is refused, else None.
 
         ``original`` is the pos.musqet.sale being refunded. Must run after
-        original._musqet_claim_for_refund, so it sees every earlier refund's record.
+        original._musqet_claim_for_refund, so it sees every earlier refund of that sale.
+
+        An unanswered refund (see pos.musqet.record) with this refund order's ``reference``,
+        of any sale, refuses it first: it may have gone through. Not covered: the claim is per
+        sale, so a refund of another sale in the same refund order, decided at the same moment
+        on another till, may miss an unanswered refund being recorded; each sale's cap still
+        holds.
         """
+        if self._musqet_has_unanswered(original.company_id, reference):
+            return self._musqet_unanswered_message()
         all_recorded = self.sudo().search(
             self._musqet_sale_refunds_domain(original.company_id, original.sale_id))
         # All records, failed ones too: a synced payment of a refund Musqet reports as failed
@@ -103,12 +111,6 @@ class PosMusqetRefund(models.Model):
         unrecorded_payments = all_recorded._musqet_unrecorded_synced(original)
         # A failed refund moved no money, so it neither counts nor blocks a retry.
         counting = all_recorded.filtered(lambda refund: refund.state != 'failed')
-        # A refund of this refund order (of any sale) whose reply was lost may have gone
-        # through: refuse before the cap (which counts it), so the cashier is told why.
-        if self.sudo().search_count([
-            ('company_id', '=', original.company_id.id), ('reference', '=', reference),
-        ] + self._musqet_unanswered_domain(), limit=1):
-            return self._musqet_unanswered_message()
         # Cumulative cap: the Musqet API enforces no limit across refunds (Musqet/musqet#2094),
         # so cap against what is left after every refund already sent for this sale.
         captured = original.amount_minor

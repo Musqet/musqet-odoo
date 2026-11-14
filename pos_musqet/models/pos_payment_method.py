@@ -61,7 +61,8 @@ MUSQET_NOT_SENT_ERRORS = (
 )
 # The causes that show a request error came before anything was sent: the connection was
 # refused or its host not found (to Musqet or to a proxy), or Musqet's certificate failed
-# verification, which happens during the TLS handshake.
+# verification, which happens during the TLS handshake. Any other handshake failure (urllib3's
+# own hostname CertificateError, say) is taken as possibly sent: the safe side.
 MUSQET_NOT_SENT_CAUSES = (NewConnectionError, ssl.SSLCertVerificationError)
 
 
@@ -74,10 +75,10 @@ def request_may_have_arrived(error):
     """
     if isinstance(error, MUSQET_NOT_SENT_ERRORS):
         return False
-    return not any(isinstance(cause, MUSQET_NOT_SENT_CAUSES) for cause in error_causes(error))
+    return not any(isinstance(cause, MUSQET_NOT_SENT_CAUSES) for cause in iter_error_causes(error))
 
 
-def error_causes(error):
+def iter_error_causes(error):
     """``error`` and the errors it wraps: requests wraps urllib3's MaxRetryError in its
     arguments, which names the error itself as its ``reason``, and urllib3 wraps the
     underlying error in its arguments or as its cause."""
@@ -431,7 +432,7 @@ class PosPaymentMethod(models.Model):
         the raw error, and never puts the API key in a log line.
 
         An error after which the request may still have reached Musqet and been acted on
-        carries ``outcome_unknown: True`` (see reply_outcome_unknown): a transport failure
+        carries ``outcome_unknown: True`` (see reply_outcome_is_unknown): a transport failure
         after the connection was made, a 5xx, or a 2xx body that isn't JSON.
         """
         self.ensure_one()
@@ -477,8 +478,10 @@ class PosPaymentMethod(models.Model):
             return self._musqet_error(_("The Musqet terminal service returned an error."), **details)
         try:
             return response.json()
-        except ValueError:
-            _logger.warning("Musqet %s %s returned a non-JSON body", method, path)
+        except Exception as error:
+            # Not only ValueError: a hostile body can raise anything (RecursionError on deep
+            # nesting), and Musqet may have acted on the request all the same.
+            _logger.warning("Musqet %s %s returned a body Odoo can't read: %r", method, path, error)
             return self._musqet_error(
                 _("Received an invalid response from the Musqet terminal service."),
                 status_code=response.status_code, outcome_unknown=True)
@@ -731,7 +734,7 @@ class PosPaymentMethod(models.Model):
         A refund whose reply never reached Odoo (a read timeout, a dropped connection, a 5xx)
         may have gone through, and Musqet's API can't look it up by reference, so it is
         recorded unanswered (pos.musqet.record._musqet_record_sent): it counts against the cap
-        and refuses a retry of the same refund order until a manager who has checked it in the
+        and refuses every Musqet refund of its refund order until a manager who has checked it in the
         Musqet app marks it failed.
 
         Not covered: a refund whose record Odoo failed to save. It has no record, and until its
@@ -822,7 +825,10 @@ class PosPaymentMethod(models.Model):
             records._musqet_apply_response(response)
 
     def _musqet_records_of(self, sale_id):
-        """This method's sale and refund records of ``sale_id`` (each at most one)."""
+        """This method's sale and refund records of ``sale_id`` (each at most one). An empty
+        ``sale_id`` names none (an unanswered record has no saleId)."""
+        if not sale_id:
+            return self.env['pos.musqet.sale'].browse(), self.env['pos.musqet.refund'].browse()
         domain = [('payment_method_id', '=', self.id), ('sale_id', '=', str(sale_id))]
         return (self.env['pos.musqet.sale'].sudo().search(domain),
                 self.env['pos.musqet.refund'].sudo().search(domain))

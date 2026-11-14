@@ -89,7 +89,7 @@ def reply_is_not_found(reply):
     return isinstance(body, dict) and body.get('code') == 404
 
 
-def reply_outcome_unknown(reply):
+def reply_outcome_is_unknown(reply):
     """Whether ``reply`` (a proxy result for a sale or refund request) leaves unknown whether
     Musqet accepted the request.
 

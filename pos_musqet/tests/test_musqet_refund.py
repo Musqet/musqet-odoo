@@ -13,6 +13,9 @@ from odoo.tests.common import TransactionCase
 from odoo.tools import mute_logger
 
 from .common import (
+    PROXY_LOGGER,
+    RECORD_LOGGER,
+    UNANSWERED,
     create_musqet_method,
     dirty_field_names,
     make_pos_user,
@@ -451,8 +454,7 @@ class TestMusqetCreateRefund(TransactionCase):
         # The same saleId already recorded on this method: the record can't be saved, so the
         # log is the trail for reconciling a refund Musqet has made.
         record_refund(self.env, self.method, 'refund-1', original_sale_id='sale-orig-other')
-        logger = 'odoo.addons.pos_musqet.models.pos_musqet_record'
-        with self.assertLogs(logger, 'ERROR') as logs, mute_logger('odoo.sql_db'):
+        with self.assertLogs(RECORD_LOGGER, 'ERROR') as logs, mute_logger('odoo.sql_db'):
             result, _ = self._call_refund(
                 {'amountInCents': 500, 'reference': 'REFUND-LOST'}, self._stub_original(amount=10.0))
         # The POS still gets the saleId, so it polls the refund and syncs its payment.
@@ -465,15 +467,14 @@ class TestMusqetCreateRefund(TransactionCase):
 
     def _lose_refund(self, original, amount, reference):
         """Send a refund whose reply times out."""
-        with mute_logger('odoo.addons.pos_musqet.models.pos_payment_method',
-                         'odoo.addons.pos_musqet.models.pos_musqet_record'):
+        with mute_logger(PROXY_LOGGER, RECORD_LOGGER):
             return self._call_refund(
                 {'amountInCents': amount, 'reference': reference}, original,
                 post_error=requests.exceptions.ReadTimeout('timed out'))[0]
 
     def test_records_a_refund_whose_reply_was_lost(self):
         result = self._lose_refund(self._stub_original(amount=10.0), 600, 'REFUND-A')
-        self.assertIn('did not get a clear answer from Musqet', result['error']['message'])
+        self.assertIn(UNANSWERED, result['error']['message'])
         refund = self._recorded_refunds()
         self.assertEqual(len(refund), 1)
         self.assertFalse(refund.sale_id)
@@ -487,7 +488,7 @@ class TestMusqetCreateRefund(TransactionCase):
         # Its refund order is refused whatever the amount, and told why.
         result, mock_request = self._call_refund(
             {'amountInCents': 100, 'reference': 'REFUND-A'}, original, sale_id='refund-a2')
-        self.assertIn('did not get a clear answer from Musqet', result['error']['message'])
+        self.assertIn(UNANSWERED, result['error']['message'])
         self.assertFalse(self._posts(mock_request))
         # It counts against the sale: another refund order may take only what is left.
         result, mock_request = self._call_refund(
@@ -506,7 +507,7 @@ class TestMusqetCreateRefund(TransactionCase):
         original = self._stub_original(amount=10.0)
         result, mock_request = self._call_refund(
             {'amountInCents': 100, 'reference': 'REFUND-A'}, original)
-        self.assertIn('did not get a clear answer from Musqet', result['error']['message'])
+        self.assertIn(UNANSWERED, result['error']['message'])
         self.assertFalse(self._posts(mock_request))
         # Not once a manager has marked it failed.
         lost.state = 'failed'
@@ -621,9 +622,8 @@ class TestMusqetCreateRefund(TransactionCase):
     def test_a_refund_settles_at_the_amount_musqet_reports(self):
         self._call_refund({'amountInCents': 500}, self._stub_original(amount=10.0))
         refund = self._recorded_refunds()
-        logger = 'odoo.addons.pos_musqet.models.pos_musqet_record'
         for bad in (None, True, '500'):
-            with self.subTest(amount=bad), self.assertLogs(logger, 'WARNING'):
+            with self.subTest(amount=bad), self.assertLogs(RECORD_LOGGER, 'WARNING'):
                 refund._musqet_apply_response({'status': 'COMPLETE', 'amountInCents': bad})
                 self.assertEqual(refund.state, 'pending')
         refund._musqet_apply_response({'status': 'COMPLETE', 'amountInCents': 450})

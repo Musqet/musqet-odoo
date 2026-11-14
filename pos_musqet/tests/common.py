@@ -43,6 +43,14 @@ def create_musqet_method(test, serial, **overrides):
     })
 
 
+# Loggers: the proxy warns of a failed Musqet call, the records of a request whose reply was
+# lost.
+PROXY_LOGGER = 'odoo.addons.pos_musqet.models.pos_payment_method'
+RECORD_LOGGER = 'odoo.addons.pos_musqet.models.pos_musqet_record'
+# The words of the message refusing an order with an unanswered sale or refund.
+UNANSWERED = 'did not get a clear answer from Musqet'
+
+
 def make_pos_user(env, login, group='point_of_sale.group_pos_user', **values):
     """Create a user in a POS group (a cashier by default) and nothing else."""
     return env['res.users'].create({

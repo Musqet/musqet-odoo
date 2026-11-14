@@ -9,7 +9,7 @@ from .musqet_common import (
     MUSQET_FAILURE_STATUSES,
     MUSQET_MAX_MINOR_AMOUNT,
     MUSQET_SUCCESS_STATUS,
-    reply_outcome_unknown,
+    reply_outcome_is_unknown,
     sale_key_domain,
 )
 
@@ -64,15 +64,24 @@ class PosMusqetRecord(models.AbstractModel):
         self.filtered(lambda record: record._musqet_may_mark_failed()).sudo().write({'state': 'failed'})
 
     def _musqet_is_unanswered(self):
-        """Whether this is an unanswered record: the reply to its request never reached Odoo,
-        so it has no saleId (whatever its state)."""
+        """Whether this record is unanswered and still pending: the reply to its request never
+        reached Odoo (it has no saleId), and no manager has marked it failed."""
         self.ensure_one()
-        return not self.sale_id
+        return self.state == 'pending' and not self.sale_id
 
     @api.model
     def _musqet_unanswered_domain(self):
-        """The domain of the unanswered records still pending (see _musqet_is_unanswered)."""
-        return [('sale_id', '=', False), ('state', '=', 'pending')]
+        """The domain of the records _musqet_is_unanswered selects. The managers' "Reply lost"
+        filters (views/pos_musqet_sale_views.xml, views/pos_musqet_refund_views.xml) copy it."""
+        return [('state', '=', 'pending'), ('sale_id', '=', False)]
+
+    @api.model
+    def _musqet_has_unanswered(self, company, reference):
+        """Whether order ``reference`` of ``company`` has an unanswered record of this kind, on
+        any payment method (it is never read, so a method no longer Musqet's still counts)."""
+        return bool(self.sudo().search_count([
+            ('company_id', '=', company.id), ('reference', '=', reference),
+        ] + self._musqet_unanswered_domain(), limit=1))
 
     def _musqet_may_mark_failed(self):
         """Whether a POS manager may mark this record failed: it is pending."""
@@ -124,32 +133,45 @@ class PosMusqetRecord(models.AbstractModel):
     def _musqet_record_sent(self, response, vals, details):
         """Record a sale or refund request sent to Musqet, as its create ``response`` says.
 
-        Returns None if Musqet's answer is known, else the message for the POS.
-
-        A response with a saleId is recorded under it, with ``vals``. Runs in a savepoint,
-        and never raises: Musqet already has the command, so the POS must still get the
-        saleId to poll it, and failing the request would leave the terminal armed with a
-        command Odoo knows nothing about. A failure is logged with ``details``, enough to
-        reconcile it by hand.
-
-        A response that leaves unknown whether Musqet accepted the request
-        (reply_outcome_unknown) is recorded unanswered: with ``vals`` but no saleId, pending
-        until a manager marks it failed, and the message says the order is blocked until
-        then. If that record can't be saved (logged), nothing blocks a retry, and the message
-        says to check the Musqet app first. Musqet's refusal records nothing.
+        Returns None if Musqet's answer is known, else the message for the POS. A response
+        with a saleId is recorded under it (_musqet_record_accepted); one that leaves unknown
+        whether Musqet accepted the request (reply_outcome_is_unknown) is recorded unanswered
+        (_musqet_record_unanswered). Musqet's refusal records nothing. ``vals`` are the
+        record's values but the saleId; ``details`` describe the request for the logs.
         """
         sale_id = response.get('saleId') if isinstance(response, dict) else None
         if sale_id:
-            try:
-                with self.env.cr.savepoint():
-                    self.sudo().create({'sale_id': str(sale_id), **vals})._musqet_apply_response(response)
-            except Exception:
-                _logger.exception(
-                    "Musqet accepted %s %r (%s) but Odoo could not record it",
-                    self._musqet_kind, sale_id, details)
+            self._musqet_record_accepted(response, str(sale_id), vals, details)
             return None
-        if not reply_outcome_unknown(response):
-            return None
+        if reply_outcome_is_unknown(response):
+            return self._musqet_record_unanswered(vals, details)
+        return None
+
+    @api.model
+    def _musqet_record_accepted(self, response, sale_id, vals, details):
+        """Record the request Musqet accepted as ``sale_id``, settled as ``response`` says.
+
+        Runs in a savepoint, and never raises: Musqet already has the command, so the POS must
+        still get the saleId to poll it, and failing the request would leave the terminal armed
+        with a command Odoo knows nothing about. A failure is logged with ``details``, enough
+        to reconcile it by hand.
+        """
+        try:
+            with self.env.cr.savepoint():
+                self.sudo().create({'sale_id': sale_id, **vals})._musqet_apply_response(response)
+        except Exception:
+            _logger.exception(
+                "Musqet accepted %s %r (%s) but Odoo could not record it",
+                self._musqet_kind, sale_id, details)
+
+    @api.model
+    def _musqet_record_unanswered(self, vals, details):
+        """Record a request Musqet may have accepted, its reply lost; return the POS message.
+
+        Pending with no saleId until a manager marks it failed, and the message says the
+        order is blocked until then. If it can't be saved (in a savepoint, logged), nothing
+        blocks a retry, and the message says to check the Musqet app first.
+        """
         try:
             with self.env.cr.savepoint():
                 self.sudo().create(vals)
