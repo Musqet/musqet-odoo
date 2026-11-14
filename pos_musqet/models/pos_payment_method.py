@@ -17,8 +17,8 @@ from odoo.tools import consteq
 
 from .musqet_common import (
     MUSQET_OUTCOME_UNKNOWN,
-    MUSQET_REFUSED_STATUSES,
     MUSQET_PROVIDER,
+    MUSQET_REFUSED_STATUSES,
     parse_minor_amount,
     reply_is_for,
     request_may_have_arrived,

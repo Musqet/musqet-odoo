@@ -7,9 +7,9 @@ from odoo import _, api, fields, models
 from odoo.tools import SQL
 
 from .musqet_common import (
+    MUSQET_PROVIDER,
     MUSQET_RAIL_SELECTION,
     MUSQET_SUCCESS_STATUS,
-    MUSQET_PROVIDER,
     MUSQET_UNPAID_ORDER_STATES,
     minor_units,
     parse_iso_currency,
