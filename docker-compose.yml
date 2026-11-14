@@ -8,7 +8,7 @@
 #   docker compose run --rm odoo \
 #     odoo -d test -i pos_musqet --test-enable --test-tags=/pos_musqet --stop-after-init
 
-# Both images are pinned by dated tag and digest so every run gets the same build;
+# Both images are pinned by exact tag and digest so every run gets the same build;
 # docs/DEV.md says how to move them.
 services:
   db:
