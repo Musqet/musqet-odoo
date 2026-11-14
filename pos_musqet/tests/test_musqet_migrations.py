@@ -2,7 +2,7 @@
 """The upgrade backfills of sale and refund records."""
 from odoo.tests import tagged
 
-from .common import MusqetPosRecordsCase, load_migration
+from .common import RECORD_LOGGER, MusqetPosRecordsCase, load_migration
 
 
 @tagged('post_install', '-at_install')
@@ -74,8 +74,7 @@ class TestMusqetUpgradeBackfills(MusqetPosRecordsCase):
 
     def test_sale_backfill_skips_an_amount_too_large_to_store(self):
         self._payment(amount=30000000.0, transaction_id='sale-huge')
-        logger = 'odoo.addons.pos_musqet.models.pos_musqet_record'
-        with self.assertLogs(logger, 'WARNING') as logs:
+        with self.assertLogs(RECORD_LOGGER, 'WARNING') as logs:
             self.env['pos.musqet.sale']._musqet_record_synced_sales()
         self.assertIn('sale-huge', logs.output[0])
         self.assertFalse(self.env['pos.musqet.sale'].search([('sale_id', '=', 'sale-huge')]))

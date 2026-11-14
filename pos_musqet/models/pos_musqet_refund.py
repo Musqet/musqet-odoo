@@ -24,9 +24,8 @@ class PosMusqetRefund(models.Model):
     musqet_create_refund names), or as soon as its reply is lost (unanswered, with no
     saleId). A POS manager can mark a pending one failed (action_musqet_mark_failed), or an
     unanswered one refunded (action_musqet_mark_refunded); nothing else changes them from the
-    browser. The upgrade
-    to 19.0.1.2.0 also created done records for the refunds synced before it
-    (_musqet_record_synced_refunds).
+    browser. The upgrade to 19.0.1.2.0 also created done records for the refunds synced
+    before it (_musqet_record_synced_refunds).
     """
     _name = 'pos.musqet.refund'
     _inherit = ['pos.musqet.record']

@@ -177,6 +177,17 @@ class TestMusqetLostSaleReply(TransactionCase):
         self.assertEqual(read('sale-r'), {'saleId': 'sale-r', 'status': 'CANCELLED'})
         self.assertEqual(sale.state, 'failed')
 
+    def test_only_musqet_s_own_refusal_reaches_the_till_with_its_body(self):
+        # A gateway's page (an unknown outcome) stays out of the reply, which reaches the
+        # cashier's browser; Musqet's refusal keeps its body (reply_is_not_found reads it).
+        record_sale(self.env, self.method, 'sale-r', state='pending', rail=False)
+        for status_code, has_detail in ((502, False), (404, True)):
+            with self.subTest(status_code=status_code), mute_logger(PROXY_LOGGER):
+                stub = MagicMock(return_value=reply(status_code, {'error': {'code': status_code}}))
+                with patch.object(pos_payment_method.requests, 'request', stub):
+                    result = self.method.with_user(self.cashier).musqet_get_sale('sale-r')
+                self.assertEqual('detail' in result['error'], has_detail)
+
     def test_records_nothing_when_musqet_refused_or_never_got_the_request(self):
         for index, (label, outcome) in enumerate(NOT_ACCEPTED):
             reference = 'Order-N%d' % index
