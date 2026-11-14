@@ -61,7 +61,7 @@ your Odoo addons path.
    cd /opt/odoo/extra-addons        # any directory already on addons_path
    # a release tag in production; main is development code (and, until the
    # first release is tagged, the only branch to use)
-   git clone --branch <release tag> https://github.com/Musqet/musqet-odoo.git
+   git clone --branch '<release tag>' https://github.com/Musqet/musqet-odoo.git
    # pos_musqet now lives at /opt/odoo/extra-addons/musqet-odoo/pos_musqet
    ```
 

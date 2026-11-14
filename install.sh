@@ -112,14 +112,14 @@ if [[ -n "$SOURCE_DIR" ]]; then
   [[ -z "$REF" ]] || err "warning: ignoring --ref with --source (the checkout is used as it is)"
 else
   [[ -n "$REF" ]] || { err "missing required --ref: a release tag from" \
-    "https://github.com/Musqet/musqet-odoo/releases, a commit SHA, or main for development code"; usage 1; }
+    "https://github.com/Musqet/musqet-odoo/releases, a full 40-character commit SHA, or main for development code"; usage 1; }
   plain_ref "$REF" || die "--ref '$REF' is not a plain tag, branch or commit name"
   ref_lower="$(printf '%s' "$REF" | tr 'A-F' 'a-f')"   # not ${REF,,}: bash 3.2 lacks it
-  # Only a full SHA is checked against the fetched commit (below), so refuse a short
-  # one rather than let it look like a pin. An all-hex branch or tag name is refused
+  # Only a full SHA is checked against the fetched commit (below), so refuse any other
+  # length rather than let it look like a pin. An all-hex branch or tag name is refused
   # too; this repo names neither that way.
-  [[ "$ref_lower" =~ ^[0-9a-f]{4,39}$ ]] \
-    && die "--ref $REF looks like a short commit SHA; pass the full 40-character SHA"
+  [[ "$ref_lower" =~ ^[0-9a-f]{4,}$ && ${#ref_lower} -ne 40 ]] \
+    && die "--ref $REF looks like a commit SHA but is not 40 characters; pass the full SHA"
 fi
 
 # --upgrade and any `-- <extra odoo args>` are only meaningful with --db; don't let
