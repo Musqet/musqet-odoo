@@ -67,7 +67,8 @@ your Odoo addons path.
    SHA="$(printf %s '<full 40-character SHA>' | tr A-F a-f)"   # git prints lowercase
    git -C musqet-odoo checkout --quiet --detach "$SHA" \
      && test "$(git -C musqet-odoo rev-parse HEAD)" = "$SHA" \
-     && echo "pinned to $SHA" || echo "NOT pinned: check the SHA" >&2
+     && echo "pinned to $SHA" \
+     || echo "NOT pinned: do not install from this clone; check the SHA and retry" >&2
    # pos_musqet now lives at /opt/odoo/extra-addons/musqet-odoo/pos_musqet
    ```
 
