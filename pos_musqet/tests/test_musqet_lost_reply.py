@@ -202,6 +202,12 @@ class TestMusqetLostSaleReply(TransactionCase):
             result = self.method.with_user(self.cashier).musqet_get_sale('sale-r')
         self.assertEqual(result['error']['detail'],
                          {'error': {'code': 404, 'message': 'Terminal sale not found.'}})
+        # A boolean is no code, and a long message is capped.
+        stub = MagicMock(return_value=reply(404, {'error': {'code': True, 'message': 'x' * 5000}}))
+        with patch.object(pos_payment_method.requests, 'request', stub), mute_logger(PROXY_LOGGER):
+            result = self.method.with_user(self.cashier).musqet_get_sale('sale-r')
+        self.assertEqual(result['error']['detail'], {'error': {
+            'message': 'x' * pos_payment_method.MUSQET_REFUSAL_MESSAGE_MAX_LENGTH}})
 
     def test_records_nothing_when_musqet_refused_or_never_got_the_request(self):
         for index, (label, outcome) in enumerate(NOT_ACCEPTED):

@@ -53,6 +53,8 @@ MUSQET_DEFAULT_SALE_MODE = 'any'
 # language: a short locale code ("en", "pt"); the API checks it against its own list.
 MUSQET_REFERENCE_MAX_LENGTH = 255
 MUSQET_LANGUAGE_MAX_LENGTH = 16
+# At most this much of a refusal's message is passed on to the POS.
+MUSQET_REFUSAL_MESSAGE_MAX_LENGTH = 500
 
 
 class PosPaymentMethod(models.Model):
@@ -443,11 +445,16 @@ class PosPaymentMethod(models.Model):
                 details[MUSQET_OUTCOME_UNKNOWN] = True
             if refused and isinstance(detail, dict) and isinstance(detail.get('error'), dict):
                 # Musqet's own refusal, in its error shape: it says why (reply_is_not_found
-                # reads its code). Only the error's scalar code and message are kept.
-                details['detail'] = {'error': {
-                    key: value for key, value in detail['error'].items()
-                    if key in ('code', 'message') and isinstance(value, (int, str))
-                }}
+                # reads its code). Only an integer code and a capped message are kept: the
+                # shape alone doesn't prove the body is Musqet's.
+                error = {}
+                code = detail['error'].get('code')
+                if isinstance(code, int) and not isinstance(code, bool):
+                    error['code'] = code
+                message = detail['error'].get('message')
+                if isinstance(message, str):
+                    error['message'] = message[:MUSQET_REFUSAL_MESSAGE_MAX_LENGTH]
+                details['detail'] = {'error': error}
             else:
                 # Maybe not Musqet's (a gateway's or a WAF's page, say): kept out of the reply,
                 # which reaches the cashier's browser.

@@ -35,7 +35,11 @@ class PosMusqetRefund(models.Model):
     original_sale_id = fields.Char(
         string="Original Musqet Sale", required=True, readonly=True, index=True,
         help="The Musqet saleId of the card sale this refund reverses.")
-    sale_id = fields.Char(string="Musqet Refund Sale", help="The Musqet saleId of the refund itself.")
+    sale_id = fields.Char(
+        string="Musqet Refund Sale",
+        help="The Musqet saleId of the refund itself. Empty if Musqet's reply to the refund "
+             "request never reached Odoo: check the refund in the Musqet app, then mark it "
+             "failed or refunded.")
     reference = fields.Char(help="The refund order reference sent to Musqet.")
     amount_minor = fields.Integer(
         help="The amount in minor units of the company currency (cents): the amount requested "
