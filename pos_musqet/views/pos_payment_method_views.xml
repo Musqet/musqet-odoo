@@ -5,24 +5,25 @@
         <field name="model">pos.payment.method</field>
         <field name="inherit_id" ref="point_of_sale.pos_payment_method_view_form"/>
         <field name="arch" type="xml">
-            <xpath expr="//field[@name='use_payment_terminal']" position="after">
-                <!-- Musqet -->
-                <field name="musqet_api_key"
-                       invisible="use_payment_terminal != 'musqet'"
-                       required="use_payment_terminal == 'musqet'"
-                       password="True"/>
-                <field name="musqet_base_url"
-                       invisible="use_payment_terminal != 'musqet'"
-                       required="use_payment_terminal == 'musqet'"/>
-                <field name="musqet_terminal_serial"
-                       invisible="use_payment_terminal != 'musqet'"
-                       required="use_payment_terminal == 'musqet'"/>
-                <!-- Webhook (optional; public-HTTPS deployments only — the pilot uses polling) -->
-                <field name="musqet_webhook_secret"
-                       invisible="use_payment_terminal != 'musqet'"
-                       password="True"/>
-                <field name="musqet_webhook_url"
-                       invisible="use_payment_terminal != 'musqet'"/>
+            <!-- Odoo 20 terminal settings sit in their own notebook page (as pos_adyen does). -->
+            <xpath expr="//sheet" position="inside">
+                <notebook invisible="payment_provider != 'musqet'">
+                    <page name="musqet_settings" string="Musqet">
+                        <group>
+                            <field name="musqet_api_key"
+                                   required="payment_provider == 'musqet'"
+                                   password="True"/>
+                            <field name="musqet_base_url"
+                                   required="payment_provider == 'musqet'"/>
+                            <field name="musqet_terminal_serial"
+                                   required="payment_provider == 'musqet'"/>
+                            <!-- Webhook (optional; public-HTTPS deployments only: the pilot uses polling) -->
+                            <field name="musqet_webhook_secret" password="True"/>
+                            <field name="musqet_webhook_url"
+                                   widget="CopyClipboardChar"/>
+                        </group>
+                    </page>
+                </notebook>
             </xpath>
         </field>
     </record>

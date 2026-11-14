@@ -8,9 +8,9 @@ import { patch } from "@web/core/utils/patch";
 // line so the driver knows which sale to reverse (and on which rail). Without this,
 // updateRefundPaymentLine never fires and the refund has no original sale to reverse.
 patch(PaymentScreen.prototype, {
-    async addNewPaymentLine(paymentMethod) {
+    async addNewPaymentLine(paymentMethod, args = {}) {
         let matchedPaymentLine = null;
-        if (paymentMethod.use_payment_terminal === "musqet" && this.isRefundOrder) {
+        if (paymentMethod.payment_provider === "musqet" && this.isRefundOrder) {
             const refundedOrder = this.currentOrder.lines[0]?.refunded_orderline_id?.order_id;
             // Compare in rounded minor units so sub-cent float drift in remainingDue (e.g.
             // 10.000000001) can't make an exact full refund miss its original sale.
@@ -24,7 +24,7 @@ patch(PaymentScreen.prototype, {
             // refund lines (negative) — a refund-of-refund finds no candidate and bails.
             const candidates = (refundedOrder?.payment_ids ?? []).filter(
                 (line) =>
-                    line.payment_method_id.use_payment_terminal === "musqet" &&
+                    line.payment_method_id?.payment_provider === "musqet" &&
                     line.transaction_id &&
                     toMinor(line.amount) >= dueMinor
             );
@@ -34,7 +34,7 @@ patch(PaymentScreen.prototype, {
             matchedPaymentLine =
                 candidates.find((line) => line.musqet_rail === "card") || candidates[0] || null;
         }
-        const added = await super.addNewPaymentLine(paymentMethod);
+        const added = await super.addNewPaymentLine(paymentMethod, args);
         if (added && matchedPaymentLine) {
             this.paymentLines.at(-1).updateRefundPaymentLine(matchedPaymentLine);
         }

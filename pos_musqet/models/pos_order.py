@@ -1,7 +1,7 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
 from odoo import models
 
-from .musqet_common import MUSQET_TERMINAL
+from .musqet_common import MUSQET_PROVIDER
 
 
 class PosOrder(models.Model):
@@ -14,6 +14,6 @@ class PosOrder(models.Model):
         # order's reference; see pos.payment.musqet_settle_check.
         if {'state', 'pos_reference', 'uuid'} & vals.keys():
             self.payment_ids.filtered(
-                lambda payment: payment.payment_method_id.use_payment_terminal == MUSQET_TERMINAL,
+                lambda payment: payment.payment_method_id.payment_provider == MUSQET_PROVIDER,
             )._musqet_check_settles()
         return result

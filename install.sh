@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# install.sh — side-load the Musqet POS integration (pos_musqet) into Odoo 19.
+# install.sh — side-load the Musqet POS integration (pos_musqet) into Odoo 20
+# (or Odoo 19, from a 19.0 ref).
 #
 # Places the pos_musqet addon onto an Odoo addons path (fetched from GitHub via git,
-# or curl/wget when git is absent — e.g. the stock odoo:19 image — or copied from a
+# or curl/wget when git is absent — e.g. the stock odoo image — or copied from a
 # local checkout) and OPTIONALLY installs it into a database. Until pos_musqet
 # is on the Odoo App Store this is the supported way to install it; it is also what
 # the Musqet demo image runs at build time.
@@ -21,7 +22,8 @@
 #   --ref REF           Release tag, full commit SHA or branch to install. Required unless
 #                       --source. Use a release from the Releases page in production. A tag
 #                       can be moved; a full 40-character SHA is checked against what is
-#                       fetched. `main` is unreleased development code.
+#                       fetched. A branch (20.0, or 19.0 for Odoo 19) is unreleased
+#                       development code.
 #   --repo URL          Source repo (default: https://github.com/Musqet/musqet-odoo.git).
 #   --source DIR        Use a local checkout instead of cloning (no git/network needed).
 #   --odoo-bin CMD      Odoo executable (default: odoo).
@@ -34,10 +36,10 @@
 #   install.sh --addons-path /opt/odoo/extra --db live -- -c /etc/odoo/odoo.conf
 #
 # Examples:
-#   install.sh --addons-path /mnt/extra-addons --ref v19.0.1.0.0     # place only (Docker build)
-#   install.sh --addons-path /opt/odoo/extra --ref v19.0.1.0.0 --db live \
+#   install.sh --addons-path /mnt/extra-addons --ref v20.0.1.7.0     # place only (Docker build)
+#   install.sh --addons-path /opt/odoo/extra --ref v20.0.1.7.0 --db live \
 #              --restart "sudo systemctl restart odoo"               # merchant: place + install
-#   install.sh --addons-path /mnt/extra-addons --ref main            # development code
+#   install.sh --addons-path /mnt/extra-addons --ref 20.0            # development code
 #   install.sh --source . --addons-path /mnt/extra-addons           # from a local checkout
 #
 set -euo pipefail
@@ -75,7 +77,7 @@ Usage: install.sh --addons-path DIR [options] [-- <extra odoo args>]
   --ref REF           Release tag, full commit SHA or branch. Required unless --source.
                       Use a release in production. A tag can be moved; a full
                       40-character SHA is checked against what is fetched.
-                      main is development code.
+                      A branch (20.0, or 19.0) is development code.
   --repo URL          Source repo (default: Musqet/musqet-odoo).
   --source DIR        Use a local checkout instead of cloning.
   --odoo-bin CMD      Odoo executable (default: odoo).
@@ -113,7 +115,7 @@ if [[ -n "$SOURCE_DIR" ]]; then
   [[ -z "$REF" ]] || err "warning: ignoring --ref with --source (the checkout is used as it is)"
 else
   [[ -n "$REF" ]] || { err "missing required --ref: a release tag from" \
-    "https://github.com/Musqet/musqet-odoo/releases, a full 40-character commit SHA, or main for development code"; usage 1; }
+    "https://github.com/Musqet/musqet-odoo/releases, a full 40-character commit SHA, or a branch (20.0, 19.0) for development code"; usage 1; }
   plain_ref "$REF" || die "--ref '$REF' is not a plain tag, branch or commit name"
   ref_lower="$(printf '%s' "$REF" | tr 'A-F' 'a-f')"   # not ${REF,,}: bash 3.2 lacks it
   # Only a full SHA is checked against the fetched commit (below), so refuse any other
@@ -147,7 +149,7 @@ elif command -v git >/dev/null 2>&1; then
   COMMIT="$(git -C "$TMP/repo" rev-parse HEAD)"
   SRC="$TMP/repo"
 else
-  # No git (e.g. the stock odoo:19 image) — download a tarball with curl/wget instead.
+  # No git (e.g. the stock odoo image) — download a tarball with curl/wget instead.
   # Works for GitHub repos and any --ref (branch, tag, or commit SHA).
   # Validate the github.com prefix BEFORE stripping .git, else a non-GitHub repo
   # ending in .git (e.g. gitlab.com/foo/bar.git) would slip past the guard.

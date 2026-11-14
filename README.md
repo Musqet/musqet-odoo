@@ -2,7 +2,7 @@
 
 Musqet's Odoo integration.
 
-This repository contains **`pos_musqet`**, an Odoo 19 Point of Sale addon that adds a
+This repository contains **`pos_musqet`**, an Odoo 20 Point of Sale addon that adds a
 **Musqet** dual-rail payment terminal (card + Bitcoin Lightning) to the POS payment
 screen. A cashier picks *Musqet* as the payment, the customer pays by card or Lightning
 on the physical terminal, and the result settles back onto the Odoo order
@@ -15,18 +15,19 @@ automatically.
 
 ## Quickstart
 
-The quickest way to side-load onto an existing Odoo 19 server is the install script,
+The quickest way to side-load onto an existing Odoo 20 server is the install script,
 which fetches the addon from GitHub and drops it on your addons path. Name what you
 install with `--ref`: in production, a release from the
 [Releases](https://github.com/Musqet/musqet-odoo/releases) page, with the script taken
 from the same ref. A tag can be moved, so for a fixed pin use the release's full
 40-character commit SHA, copied from that page: the script then refuses anything but
 that commit. Take the SHA only from Musqet's Releases page, since GitHub also serves
-commits from forks under this repo's URLs. `main` is unreleased development code;
-until the first release is tagged, it is the only ref there is.
+commits from forks under this repo's URLs. The `20.0` branch is unreleased development
+code for Odoo 20 (`19.0` for Odoo 19); until the first release is tagged, use the branch
+for your Odoo version.
 
 ```bash
-REF='<release tag>'     # until the first release is tagged: REF=main
+REF='<release tag>'     # until the first release is tagged: REF=20.0
 # place the files only:
 curl -fsSL "https://raw.githubusercontent.com/Musqet/musqet-odoo/$REF/install.sh" \
   | bash -s -- --addons-path /opt/odoo/extra-addons --ref "$REF"
@@ -66,7 +67,7 @@ install, configuration, webhook, accounting, and merchant-onboarding guide.
 
 ## Testing it yourself
 
-A throwaway **Odoo 19 + Postgres** Docker stack is included so you can install the
+A throwaway **Odoo 20 + Postgres** Docker stack is included so you can install the
 addon and run its tests without setting up Odoo locally:
 
 ```bash
@@ -79,7 +80,9 @@ See **[docs/DEV.md](docs/DEV.md)** for the full contributor/testing guide.
 
 ## Compatibility
 
-- Odoo **19.0** (Community or Enterprise) with the Point of Sale module.
+- Odoo **20.0** (Community or Enterprise) with the Point of Sale module. For Odoo 19.0,
+  use the [`19.0` branch](https://github.com/Musqet/musqet-odoo/tree/19.0) and its
+  releases.
 
 ## License
 

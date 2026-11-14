@@ -1,4 +1,4 @@
-# Local Odoo 19 stack for developing and testing the pos_musqet addon.
+# Local Odoo 20 stack for developing and testing the pos_musqet addon.
 #
 # Throwaway by design — `docker compose down -v` removes the database and
 # filestore so you can start clean. See docs/DEV.md for full usage.
@@ -26,7 +26,7 @@ services:
       retries: 10
 
   odoo:
-    image: odoo:19.0-20261015@sha256:27f920e002c43a1af7022a68f3cc17db71a2f9f3348800cb050721ce54893e49
+    image: odoo:20.0-20261112@sha256:8bcae4c1f895683ee851e19dd3e7d999e81e770defe9015bc9dad8bbf10f2b0d
     depends_on:
       db:
         condition: service_healthy

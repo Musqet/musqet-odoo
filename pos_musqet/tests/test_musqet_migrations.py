@@ -1,17 +1,12 @@
 # Part of the Musqet POS integration. See LICENSE file for full copyright and licensing details.
-"""The upgrade backfills of sale and refund records, and of Musqet methods' companies."""
+"""The upgrade backfills of sale and refund records."""
 from odoo.tests import tagged
 
 from .common import (
     RECORD_LOGGER,
     MusqetPosRecordsCase,
-    clear_company,
-    create_musqet_method,
-    list_method_on_config,
     load_migration,
 )
-
-METHOD_LOGGER = 'odoo.addons.pos_musqet.models.pos_payment_method'
 
 
 @tagged('post_install', '-at_install')
@@ -150,59 +145,3 @@ class TestMusqetUpgradeBackfills(MusqetPosRecordsCase):
         self._payment(amount=10.0, transaction_id='sale-legacy', musqet_rail='card')
         load_migration('19.0.1.3.0', 'post-migration').migrate(self.env.cr, None)
         self.assertFalse(self.env['pos.musqet.sale'].search([]))
-
-
-@tagged('post_install', '-at_install')
-class TestMusqetUpgradeCompanies(MusqetPosRecordsCase):
-    """The 19.0.1.6.0 upgrade gives a Musqet method with no company its configs' company."""
-
-    def _migrate(self, version='19.0.1.5.0'):
-        load_migration('19.0.1.6.0', 'post-migration').migrate(self.env.cr, version)
-
-    def test_takes_the_company_of_its_configs(self):
-        # self.method is on setUp's config, with its session open.
-        company = self.method.company_id
-        clear_company(self.method)
-        with self.assertLogs(METHOD_LOGGER, 'INFO') as logs:
-            self._migrate()
-        self.assertEqual(self.method.company_id, company)
-        self.assertIn('[%d]' % self.method.id, '\n'.join(logs.output))
-
-    def test_logs_a_method_no_config_can_place(self):
-        lone = create_musqet_method(self, 'MSQ-UPG-LONE')
-        clear_company(lone)
-        with self.assertLogs(METHOD_LOGGER, 'WARNING') as logs:
-            self._migrate()
-        self.assertFalse(lone.company_id)
-        self.assertIn('[%d]' % lone.id, '\n'.join(logs.output))
-
-    def test_logs_an_archived_method_it_cannot_place_too(self):
-        # It may be restored later, and would then start nothing without saying why.
-        archived = create_musqet_method(self, 'MSQ-UPG-ARCH', active=False)
-        clear_company(archived)
-        with self.assertLogs(METHOD_LOGGER, 'WARNING') as logs:
-            self._migrate()
-        self.assertIn('[%d]' % archived.id, '\n'.join(logs.output))
-
-    def test_logs_a_method_whose_configs_name_two_companies(self):
-        # Shared across companies before the rule: there is no telling which one it is for.
-        other_company = self.env['res.company'].create({'name': 'Other Upgrade Co'})
-        env_other = self.env(context={'allowed_company_ids': other_company.ids})
-        other_config = env_other['pos.config'].create(
-            {'name': 'Other Upgrade POS', 'payment_method_ids': [(6, 0, [])]})
-        list_method_on_config(self.method, other_config)
-        clear_company(self.method)
-        with self.assertLogs(METHOD_LOGGER, 'WARNING') as logs:
-            self._migrate()
-        self.assertFalse(self.method.company_id)
-        self.assertIn('[%d]' % self.method.id, '\n'.join(logs.output))
-
-    def test_leaves_other_methods_alone(self):
-        clear_company(self.plain)
-        self._migrate()
-        self.assertFalse(self.plain.company_id)
-
-    def test_does_nothing_on_a_fresh_install(self):
-        clear_company(self.method)
-        self._migrate(version=None)
-        self.assertFalse(self.method.company_id)

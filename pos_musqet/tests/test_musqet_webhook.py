@@ -273,6 +273,8 @@ class TestMusqetWebhookRoute(HttpCase):
         pinged = {call.args[0].id for call in notify.mock_calls}
         self.assertEqual(pinged, {sessions[state].config_id.id for state in (
             'opening_control', 'opened', 'closing_control')})
+        # Odoo 20 lets the buffer be written while sessions using the method are open.
+        self.assertEqual(self._buffered()['saleId'], self.SALE_ID)
 
     def test_pings_no_till_of_another_company_listing_the_method(self):
         # Listed there by a direct database write: those tills don't use the method.

@@ -2,7 +2,7 @@
 import { _t } from "@web/core/l10n/translation";
 import { PaymentInterface } from "@point_of_sale/app/utils/payment/payment_interface";
 import { AlertDialog } from "@web/core/confirmation_dialog/confirmation_dialog";
-import { register_payment_method } from "@point_of_sale/app/services/pos_store";
+import { registry } from "@web/core/registry";
 import { logPosMessage } from "@point_of_sale/app/utils/pretty_console_log";
 import { formatInteger } from "@web/views/fields/formatters";
 
@@ -58,29 +58,37 @@ export class PaymentMusqet extends PaymentInterface {
         // settled makes the shared settler run exactly once across the poll loop and an
         // inbound webhook; resolve is the request promise both paths resolve through.
         this.pollState = {};
+        // Push path for publicly-reachable deployments. When the backend webhook controller
+        // buffers a verified sale result it pings this channel, and the line waiting on that
+        // sale asks for it. The pilot is behind NAT and settles via polling instead, so this
+        // channel simply never fires there: the poll loop remains the source of truth.
+        // connectWebSocket subscribes once per channel, however many Musqet methods there are.
+        this.connectWebSocket("MUSQET_LATEST_RESPONSE", () => {
+            const pendingLine = this.pos.getPendingPaymentLine("musqet");
+            if (pendingLine) {
+                pendingLine.payment_interface.handleMusqetStatusResponse(pendingLine);
+            }
+        });
     }
 
     /**
-     * Require the cashier to confirm the amount before driving the terminal —
-     * the terminal then prompts for the rail (card or Lightning) itself.
+     * Start a sale (or, for a negative line, a refund) on the terminal and wait for it to
+     * settle. Odoo 20 never calls this when the line is added (only bank QR codes send at
+     * once): the cashier confirms the amount and presses Send, and the terminal then prompts
+     * for the rail (card or Lightning) itself.
      */
-    get fastPayments() {
-        return false;
-    }
-
-    async sendPaymentRequest(uuid) {
-        await super.sendPaymentRequest(uuid);
-        const order = this.pos.getOrder();
-        const line = order.getSelectedPaymentline();
-        if (!line) {
+    async sendPaymentRequest(line) {
+        await super.sendPaymentRequest(...arguments);
+        const order = line?.pos_order_id;
+        if (!order) {
             return false;
         }
 
-        // A refund order rings a negative payment line. Odoo 19 routes it through this same
-        // sendPaymentRequest (no shipped terminal driver implements sendPaymentReversal, and
-        // supports_reversals is unused in 19.0), so we mirror pos_stripe: a negative amount
-        // means refund the original Musqet sale via type:"refund". Everything downstream —
-        // the create→poll engine and the shared settle-back — is identical to a sale.
+        // A refund order rings a negative payment line. Odoo 20 leaves it unsent ("Refund
+        // available") until the cashier presses Refund, which comes through this same
+        // sendPaymentRequest (supports_refunds is true by default), so we mirror pos_stripe: a
+        // negative amount means refund the original Musqet sale via type:"refund". Everything
+        // downstream (the create→poll engine and the shared settle-back) is identical to a sale.
         const isRefund = line.amount < 0;
         const payload = isRefund
             ? this._refundPreflight(order, line)
@@ -202,18 +210,18 @@ export class PaymentMusqet extends PaymentInterface {
 
     /**
      * Cancel the line's sale on the terminal, and say whether it ended. True: it can no
-     * longer be paid, and the core payment screen puts the line back to "retry" (or removes
+     * longer be paid, and the core line puts itself back to "retry" (or the screen removes
      * it). False: it completed first, or Musqet couldn't confirm the cancel, so the customer
      * may still pay it; the line keeps waiting and the poll loop settles it. Never answering
      * true while a sale can still be paid is what stops a retry from charging twice.
      */
-    async sendPaymentCancel(order, uuid) {
-        await super.sendPaymentCancel(order, uuid);
-        const state = this.pollState[uuid];
+    async sendPaymentCancel(line) {
+        await super.sendPaymentCancel(...arguments);
+        const state = this.pollState[line.uuid];
         if (!state) {
             return true;
         }
-        // The core screen sets the line's status from our answer, after we return, so the
+        // The core line sets its status from our answer, after we return, so the
         // poll loop must not settle the line meanwhile: a "done" set now would be overwritten.
         state.cancelRequested = true;
         let outcome;
@@ -233,11 +241,11 @@ export class PaymentMusqet extends PaymentInterface {
         }
         // Keep waiting on the sale, unless it settled before the cancel began (its status is
         // already final). No message if it completed: the poll loop settles it as paid. The
-        // line goes back to "waitingCard": the core screen does this itself after a cancel
-        // button, but leaves a deleted line "waitingCancel".
+        // core line puts itself back to "waitingCard" on our false (a Musqet method is always
+        // a "terminal" one: _check_musqet_terminal_type). A refused delete then restores the
+        // status the line had when it began, which the poll loop corrects if it was "waiting".
         if (!state.settled) {
             this._keepWaiting(state, outcome.sale?.status !== SUCCESS_STATUS);
-            order.payment_ids.find((line) => line.uuid === uuid)?.setPaymentStatus("waitingCard");
         }
         return false;
     }
@@ -416,11 +424,17 @@ export class PaymentMusqet extends PaymentInterface {
         this._restartWait(state);
         while (!state.cancelled && !state.settled) {
             if (state.cancelRequested) {
-                // A cancel is finding out how the sale ended; the core screen sets the line's
-                // status from its answer. Wait for it: it either ends the sale (cancelled) or
+                // A cancel is finding out how the sale ended; the core line sets its status
+                // from its answer. Wait for it: it either ends the sale (cancelled) or
                 // leaves it to this loop.
                 await this._sleep(POLL_INTERVAL_MS);
                 continue;
+            }
+            // The sale is armed, so the line waits on the card. A refused delete that began
+            // during the create round-trip puts the line back to the status it had then
+            // ("waiting": no Cancel button), after our answer, so put it right here.
+            if (line.getPaymentStatus() === "waiting") {
+                line.setPaymentStatus("waitingCard");
             }
             const timedOut = Date.now() - state.waitStart >= POLL_TIMEOUT_MS;
             if (timedOut || state.connectionFailures >= MAX_POLL_CONNECTION_FAILURES) {
@@ -550,8 +564,8 @@ export class PaymentMusqet extends PaymentInterface {
      */
     _finishSale(line, sale, state) {
         // Settle at most once (settled) and never settle a line the cashier already
-        // cancelled (cancelled), or is cancelling (cancelRequested: the core screen sets the
-        // line's status from the cancel's answer, after it). The poll loop observes both on
+        // cancelled (cancelled), or is cancelling (cancelRequested: the core line sets its
+        // status from the cancel's answer, after it). The poll loop observes both on
         // its own wake, but a webhook can funnel a result in here at any time, so guard it
         // here too: the shared funnel can't break the cancel invariant the other paths hold.
         if (state.settled || state.cancelled || state.cancelRequested) {
@@ -575,7 +589,8 @@ export class PaymentMusqet extends PaymentInterface {
             if (refundOf) {
                 line.musqet_refund_of = refundOf;
             }
-            line.setReceiptInfo(this._receiptInfo(sale));
+            // ticket holds the line's receipt text; append, as other terminals may add to it.
+            line.ticket = (line.ticket || "") + this._receiptInfo(sale);
             line.setPaymentStatus("done");
             state.resolve?.(true);
         } else if (FAILURE_STATUSES.includes(status)) {
@@ -588,16 +603,15 @@ export class PaymentMusqet extends PaymentInterface {
     }
 
     /**
-     * Handle an inbound webhook (push path). Invoked by the PosStore websocket patch once the
-     * backend controller has verified a signature and buffered the result. Asks for the
-     * buffered result of this line's saleId and settles the line with it; with no saleId yet
-     * (or after a page reload) it does nothing and the poll loop settles the line. Only fires
-     * on publicly-reachable deployments; the pilot settles via the poll loop and never
-     * reaches here.
+     * Handle an inbound webhook (push path) for ``line``, the pending Musqet line. Invoked by
+     * the websocket subscription in setup once the backend controller has verified a
+     * signature and buffered the result. Asks for the buffered result of this line's saleId
+     * and settles the line with it; with no saleId yet (or after a page reload) it does
+     * nothing and the poll loop settles the line. Only fires on publicly-reachable
+     * deployments; the pilot settles via the poll loop and never reaches here.
      */
-    async handleMusqetStatusResponse() {
-        const line = this.pos.getPendingPaymentLine("musqet");
-        const state = line && this.pollState[line.uuid];
+    async handleMusqetStatusResponse(line) {
+        const state = this.pollState[line.uuid];
         // Only the sale this line is waiting on: before our own create has returned
         // (state.saleId still null) we can't name it, so the poll loop settles it. With no
         // poll state (the page was reloaded mid-payment) this tab has no sale to take a
@@ -613,8 +627,8 @@ export class PaymentMusqet extends PaymentInterface {
         ]);
         if (!sale || sale.error || sale.saleId !== state.saleId) {
             // Nothing buffered for this sale, or a transient RPC failure: the poll loop is
-            // the backstop. The saleId is checked here too so this never settles a line on
-            // a server that doesn't match it (one older than 19.0.1.7.0).
+            // the backstop. The saleId is checked here too, so a reply for another sale
+            // never settles this line whatever the server sends.
             return;
         }
         this._finishSale(line, sale, state);
@@ -694,4 +708,4 @@ export class PaymentMusqet extends PaymentInterface {
     }
 }
 
-register_payment_method("musqet", PaymentMusqet);
+registry.category("pos_payment_providers").add("musqet", PaymentMusqet);

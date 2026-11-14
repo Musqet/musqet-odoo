@@ -35,7 +35,9 @@ def create_musqet_method(test, serial, **overrides):
     use_test_encryption_key(test)
     return test.env['pos.payment.method'].create({
         'name': 'Musqet Terminal %s' % serial,
-        'use_payment_terminal': 'musqet',
+        'type': 'bank',
+        'payment_method_type': 'terminal',
+        'payment_provider': 'musqet',
         'musqet_base_url': 'https://api.musqet.tech/api/v1',
         'musqet_api_key': 'secret-token',
         'musqet_terminal_serial': serial,
@@ -69,37 +71,27 @@ def open_session(env, *methods):
     return env['pos.session'].create({'config_id': config.id, 'user_id': env.uid})
 
 
+def create_plain_method(env, name, **vals):
+    """A payment method that isn't a Musqet one (Odoo 20 requires its type)."""
+    return env['pos.payment.method'].create({'type': 'bank', 'name': name, **vals})
+
+
 def open_plain_method(env):
     """A payment method that isn't a Musqet one, on an open POS session: so the method check
     (pos.payment.method._musqet_check_method), not the session check, is what refuses it."""
-    plain = env['pos.payment.method'].create({'name': 'Plain Method'})
+    plain = create_plain_method(env, 'Plain Method')
     open_session(env, plain)
     return plain
 
 
-def clear_company(method):
-    """Leave ``method`` with no company, as one saved before 19.0.1.6.0 may be. Raw SQL: the
-    ORM refuses it (pos.payment.method._check_musqet_company)."""
-    method.env.cr.execute(SQL(
-        'UPDATE pos_payment_method SET company_id = NULL WHERE id = %s', method.id))
-    method.invalidate_recordset(['company_id'])
-
-
 def list_method_on_config(method, config):
-    """List ``method`` on ``config`` whatever their companies, as a method shared before
-    19.0.1.6.0 may be. Raw SQL: Odoo keeps a config's methods to its company."""
+    """List ``method`` on ``config`` whatever their companies, as a direct database write
+    could. Raw SQL: Odoo keeps a config's methods to its company."""
     method.env.cr.execute(SQL(
         'INSERT INTO pos_config_pos_payment_method_rel (pos_config_id, pos_payment_method_id)'
         ' VALUES (%s, %s)', config.id, method.id))
     method.invalidate_recordset(['config_ids'])
     config.invalidate_recordset(['payment_method_ids'])
-
-
-def write_between_sessions(records, vals):
-    """Write ``vals`` on payment methods as if no POS session using them were open: Odoo
-    refuses most edits to a method while one is, and a test's cashier needs one open."""
-    with patch.object(type(records), '_is_write_forbidden', return_value=False):
-        records.write(vals)
 
 
 def musqet_response(sale_id, status='PENDING', status_code=200, **fields):
@@ -164,7 +156,7 @@ class MusqetPosRecordsCase(TransactionCase):
     def setUp(self):
         super().setUp()
         self.method = create_musqet_method(self, 'MSQ-LINK-001')
-        self.plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
+        self.plain = create_plain_method(self.env, 'Plain Method')
         self.second = create_musqet_method(self, 'MSQ-LINK-002')
         self.session = open_session(self.env, self.method, self.plain, self.second)
         self.order = self._order()

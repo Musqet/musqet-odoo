@@ -6,7 +6,14 @@ from odoo.addons.pos_musqet.models import pos_payment_method
 from odoo.exceptions import AccessError
 from odoo.tests import tagged
 
-from .common import MusqetPosRecordsCase, make_pos_user, musqet_response, record_refund, record_sale
+from .common import (
+    MusqetPosRecordsCase,
+    create_plain_method,
+    make_pos_user,
+    musqet_response,
+    record_refund,
+    record_sale,
+)
 
 
 @tagged('post_install', '-at_install')
@@ -221,7 +228,7 @@ class TestMusqetRefundWithPosRecords(MusqetPosRecordsCase):
 
     def test_manager_sees_only_their_companies_refunds(self):
         other = self.env['res.company'].create({'name': 'Other Co'})
-        plain_other = self.env['pos.payment.method'].create({'name': 'Other Method', 'company_id': other.id})
+        plain_other = create_plain_method(self.env, 'Other Method', company_id=other.id)
         record_refund(self.env, plain_other, 'refund-other', original_sale_id='sale-other')
         manager = make_pos_user(self.env, 'musqet_manager', group='point_of_sale.group_pos_manager', company_id=self.method.company_id.id,
             company_ids=[(6, 0, self.method.company_id.ids)])
@@ -230,7 +237,7 @@ class TestMusqetRefundWithPosRecords(MusqetPosRecordsCase):
 
     def test_manager_sees_only_their_companies_sales(self):
         other = self.env['res.company'].create({'name': 'Other Co'})
-        plain_other = self.env['pos.payment.method'].create({'name': 'Other Method', 'company_id': other.id})
+        plain_other = create_plain_method(self.env, 'Other Method', company_id=other.id)
         record_sale(self.env, plain_other, 'sale-other')
         record_sale(self.env, self.method, 'sale-mine')
         manager = make_pos_user(
@@ -238,6 +245,27 @@ class TestMusqetRefundWithPosRecords(MusqetPosRecordsCase):
             company_id=self.method.company_id.id, company_ids=[(6, 0, self.method.company_id.ids)])
         seen = self.env['pos.musqet.sale'].with_user(manager).search([])
         self.assertEqual(seen.mapped('sale_id'), ['sale-mine'])
+
+    def test_manager_only_reads_sale_and_refund_records(self):
+        # The company restriction in ir.access covers every operation, but grants none: a
+        # manager's own access stays read-only, so records change only through the server.
+        manager = make_pos_user(self.env, 'musqet_manager_ro', group='point_of_sale.group_pos_manager')
+        sale = record_sale(self.env, self.method, 'sale-ro')
+        refund = self.env['pos.musqet.refund'].search([('sale_id', '=', 'refund-1')])
+        for record, vals in ((sale, {'sale_id': 'sale-forged', 'company_id': sale.company_id.id,
+                                     'payment_method_id': self.method.id}),
+                             (refund, {'sale_id': 'refund-forged', 'original_sale_id': 'sale-ro',
+                                       'company_id': refund.company_id.id,
+                                       'payment_method_id': self.method.id})):
+            Model = record.with_user(manager)
+            with self.subTest(model=record._name):
+                self.assertTrue(Model.search([('id', '=', record.id)]))
+                with self.assertRaises(AccessError):
+                    Model.write({'state': 'done'})
+                with self.assertRaises(AccessError):
+                    Model.create(vals)
+                with self.assertRaises(AccessError):
+                    Model.unlink()
 
     def test_manager_can_mark_a_stuck_pending_refund_failed(self):
         manager = make_pos_user(self.env, 'musqet_manager_fail', group='point_of_sale.group_pos_manager')

@@ -5,8 +5,8 @@ import ssl
 import requests
 from urllib3.exceptions import NewConnectionError
 
-# The use_payment_terminal value of a Musqet payment method.
-MUSQET_TERMINAL = 'musqet'
+# The payment_provider value of a Musqet payment method.
+MUSQET_PROVIDER = 'musqet'
 
 # The Musqet sale statuses (a refund uses the same ones) that end a sale. Same lists as
 # SUCCESS_STATUS and FAILURE_STATUSES in static/src/app/payment_musqet.js.

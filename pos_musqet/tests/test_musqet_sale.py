@@ -24,7 +24,6 @@ from .common import (
     open_plain_method,
     open_session,
     record_sale,
-    write_between_sessions,
 )
 
 
@@ -194,7 +193,7 @@ class TestMusqetCreateSale(TransactionCase):
             cash.with_user(self.cashier).musqet_create_sale({'amountInCents': 500})
 
     def test_rejects_when_no_serial_is_configured(self):
-        write_between_sessions(self.method, {'musqet_terminal_serial': False})
+        self.method.write({'musqet_terminal_serial': False})
         result, mock_request = self._call_sale({'amountInCents': 500})
         self.assertIn('error', result)
         mock_request.assert_not_called()

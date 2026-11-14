@@ -59,8 +59,8 @@ class PosMusqetRecord(models.AbstractModel):
         It can't be undone: a failed record is never re-read. (A failed refund's synced
         payment doesn't count either, so its amount leaves the over-refund cap for good.)
         """
-        # Explicit, not left to the read of `state`. Read access is POS managers' only
-        # (ir.model.access.csv), within their companies (pos_musqet_security.xml).
+        # Explicit, not left to the read of `state`. Only POS managers may read these, and
+        # only for their own companies (security/ir.access.csv).
         self.check_access('read')
         self.filtered(lambda record: record._musqet_may_mark_failed())._musqet_mark_by_manager('failed')
 

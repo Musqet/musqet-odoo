@@ -20,8 +20,8 @@ patch(PosPayment.prototype, {
     },
 
     updateRefundPaymentLine(refundedPaymentLine) {
-        // Verified against Odoo 19.0 source: core point_of_sale defines the base no-op
-        // updateRefundPaymentLine(refundedPaymentLine) {} at app/models/pos_payment.js:80
+        // Verified against Odoo 20.0 source: core point_of_sale defines the base no-op
+        // updateRefundPaymentLine(refundedPaymentLine) {} in app/models/pos_payment.js
         // ("Override in dependent modules to update the refund payment line"), so this super
         // call resolves through point_of_sale alone — no dependency on pos_stripe.
         super.updateRefundPaymentLine(refundedPaymentLine);

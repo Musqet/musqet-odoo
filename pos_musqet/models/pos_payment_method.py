@@ -13,12 +13,12 @@ from urllib3.util import parse_url
 
 from odoo import fields, models, api, _
 from odoo.exceptions import AccessDenied, UserError, ValidationError
-from odoo.tools import SQL, consteq
+from odoo.tools import consteq
 
 from .musqet_common import (
     MUSQET_OUTCOME_UNKNOWN,
+    MUSQET_PROVIDER,
     MUSQET_REFUSED_STATUSES,
-    MUSQET_TERMINAL,
     parse_minor_amount,
     reply_is_for,
     request_may_have_arrived,
@@ -74,8 +74,8 @@ MUSQET_LOG_ID_MAX_LENGTH = 100
 class PosPaymentMethod(models.Model):
     _inherit = 'pos.payment.method'
 
-    def _get_payment_terminal_selection(self):
-        return super()._get_payment_terminal_selection() + [(MUSQET_TERMINAL, 'Musqet')]
+    def _get_terminal_provider_selection(self):
+        return super()._get_terminal_provider_selection() + [(MUSQET_PROVIDER, 'Musqet')]
 
     # Musqet
     # Secrets are encrypted at rest: `*_encrypted` holds a Fernet ciphertext (key in the
@@ -139,8 +139,9 @@ class PosPaymentMethod(models.Model):
     )
     # Buffer for the latest asynchronous webhook result, read by the POS frontend after a
     # MUSQET_LATEST_RESPONSE notification (mirrors pos_adyen.adyen_latest_response). Restricted
-    # like the other Musqet config; whitelisted in _is_write_forbidden so the public webhook
-    # controller can write it while a POS session is open.
+    # like the other Musqet config. Odoo 20 blocks only a fixed set of accounting fields while
+    # a POS session is open (_get_write_forbidden_fields), so the webhook controller can write
+    # it during a session.
     musqet_latest_response = fields.Char(copy=False, groups='base.group_erp_manager')
     musqet_webhook_url = fields.Char(
         string="Musqet Webhook URL",
@@ -237,62 +238,35 @@ class PosPaymentMethod(models.Model):
                     'Terminal %(terminal)s is already in use elsewhere.',
                     terminal=payment_method.musqet_terminal_serial))
 
-    @api.constrains('use_payment_terminal', 'company_id')
+    @api.constrains('payment_provider', 'payment_method_type')
+    def _check_musqet_terminal_type(self):
+        # Odoo 20 sets the integration type from the provider only in the form (onchange), so
+        # a method created another way could carry the Musqet provider on a non-terminal
+        # type. The POS treats only "terminal" methods as card terminals (a refused cancel
+        # puts the line back to waiting for the card), which the driver relies on.
+        for method in self:
+            if method.payment_provider == MUSQET_PROVIDER and method.payment_method_type != 'terminal':
+                raise ValidationError(_(
+                    "Musqet payment method %(payment_method)s must use the Terminal integration.",
+                    payment_method=method.name))
+
+    @api.constrains('payment_provider', 'company_id')
     def _check_musqet_company(self):
         # A Musqet method acts for one company: its sales and refunds are recorded in it, and
-        # only that company's cashiers may drive it (_musqet_check_access). Odoo checks a
-        # method's configs against its company only when the configs change, so a method
-        # shared before this rule could be given one company while another's config still
-        # lists it: refused here. sudo(): the writer may not see the other company's configs.
+        # only that company's cashiers may drive it (_musqet_check_access). Odoo 20 requires
+        # every method's company, but checks a method's configs against it only when the
+        # configs change, so a method listed on another company's config could be given a
+        # company that config doesn't share: refused here. sudo(): the writer may not see the
+        # other company's configs.
         for method in self:
-            if method.use_payment_terminal != MUSQET_TERMINAL:
+            if method.payment_provider != MUSQET_PROVIDER:
                 continue
-            if not method.company_id:
-                raise ValidationError(_(
-                    "Musqet payment method %(payment_method)s must have a company.",
-                    payment_method=method.name))
-            # Archived configs too: one may be restored, and the upgrade counts them.
+            # Archived configs too: one may be restored.
             configs = method.sudo().with_context(active_test=False).config_ids
             if configs.company_id - method.company_id:
                 raise ValidationError(_(
                     "Musqet payment method %(payment_method)s is on a point of sale of another "
                     "company. Remove it from there first.", payment_method=method.name))
-
-    @api.model
-    def _musqet_set_missing_companies(self):
-        """Give each Musqet method with no company the company of the POS configs it is on.
-
-        For the upgrade to 19.0.1.6.0, which requires the company (_check_musqet_company);
-        safe to run again. Only a method whose configs all name one company gets it; any other
-        is logged, and starts no sale or refund until a manager sets one. Raw SQL: a write
-        through the ORM is refused while a session using the method is open.
-        """
-        self.env.flush_all()
-        self.env.cr.execute(SQL("""
-            UPDATE pos_payment_method method SET company_id = configs.company_id
-              FROM (SELECT rel.pos_payment_method_id AS method_id,
-                           MIN(config.company_id) AS company_id
-                      FROM pos_config_pos_payment_method_rel rel
-                      JOIN pos_config config ON config.id = rel.pos_config_id
-                     GROUP BY rel.pos_payment_method_id
-                    HAVING COUNT(DISTINCT config.company_id) = 1) configs
-             WHERE method.id = configs.method_id
-               AND method.company_id IS NULL
-               AND method.use_payment_terminal = %s
-         RETURNING method.id
-        """, MUSQET_TERMINAL))
-        updated = [row[0] for row in self.env.cr.fetchall()]
-        self.browse(updated).invalidate_recordset(['company_id'])
-        if updated:
-            _logger.info("pos_musqet: set the company of Musqet payment method(s) %s from "
-                         "their POS configs", updated)
-        # Archived ones too: the UPDATE above covers them, and one may be restored later.
-        missing = self.sudo().with_context(active_test=False).search(
-            [('use_payment_terminal', '=', MUSQET_TERMINAL), ('company_id', '=', False)])
-        if missing:
-            _logger.warning(
-                "pos_musqet: Musqet payment method(s) %s have no company and start no sale or "
-                "refund until a manager sets one", missing.ids)
 
     @api.constrains('musqet_base_url')
     def _check_musqet_base_url(self):
@@ -379,8 +353,7 @@ class PosPaymentMethod(models.Model):
         Why: the caller picks the method's id over RPC, and the proxy reads the method's
         restricted fields with sudo(), which skips the multi-company record rule, so this
         check alone keeps a cashier to their own company's terminals. Every refusal is the same
-        AccessDenied (a method with no company included), so it says nothing about which ids
-        exist or whose they are.
+        AccessDenied, so it says nothing about which ids exist or whose they are.
 
         Returns, for a caller other than sudo, the states of the live sessions each method is
         on (``{method id: set of states}``, see _musqet_session_states); None for sudo.
@@ -429,16 +402,11 @@ class PosPaymentMethod(models.Model):
     def _musqet_check_method(self):
         # Only a Musqet payment method drives a Musqet terminal: refuse to run the proxy on
         # any other method record a caller points it at.
-        if any(method.use_payment_terminal != MUSQET_TERMINAL for method in self):
+        if any(method.payment_provider != MUSQET_PROVIDER for method in self):
             raise AccessDenied()
 
     def _musqet_company(self):
-        """The company a Musqet request acts for: the method's own.
-
-        Required on a Musqet method (_check_musqet_company). One saved without (before the
-        rule, or by a direct database write) starts no sale or refund
-        (_musqet_check_terminal_request), so it never acts for a company it doesn't name.
-        """
+        """The company a Musqet request acts for: the method's own (Odoo 20 requires it)."""
         self.ensure_one()
         return self.company_id
 
@@ -460,13 +428,12 @@ class PosPaymentMethod(models.Model):
         return currency if payload.get('currency', currency) == currency else None
 
     def _musqet_check_terminal_request(self, payload):
-        """Shared opening checks for a sale or refund: access, payload shape, serial, company.
+        """Shared opening checks for a sale or refund: access, payload shape, serial.
 
         Raises AccessDenied for a caller or method that may not drive the terminal; returns
         an ``{error}`` dict for a cashier's method on no session in
         MUSQET_PAYING_SESSION_STATES (every till using it is being closed), a malformed
-        payload, a method with no serial or a method with no company (reached only by an
-        internal call: a cashier is refused it in _musqet_check_access), else None.
+        payload or a method with no serial, else None.
         """
         self.ensure_one()
         session_states = self._musqet_check_access()
@@ -479,9 +446,6 @@ class PosPaymentMethod(models.Model):
             return self._musqet_error(_("The terminal request is invalid."))
         if not self.musqet_terminal_serial:
             return self._musqet_error(_("No Musqet terminal serial is configured."))
-        if not self._musqet_company():
-            return self._musqet_error(_(
-                "This Musqet payment method has no company. Ask a manager to set one."))
         return None
 
     def _musqet_headers(self, api_key):
@@ -820,7 +784,7 @@ class PosPaymentMethod(models.Model):
         if not payment or payment.company_id != self._musqet_company():
             return None, self._musqet_error(_(
                 "The original payment to refund could not be found."))
-        if payment.payment_method_id.use_payment_terminal != MUSQET_TERMINAL or not payment.transaction_id:
+        if payment.payment_method_id.payment_provider != MUSQET_PROVIDER or not payment.transaction_id:
             return None, self._musqet_card_only_error()
         # A paid sale line only. (The settle check refuses any other line too; this saves
         # reading the sale from Musqet for nothing.)
@@ -1034,11 +998,6 @@ class PosPaymentMethod(models.Model):
         """Whether this method has a record of ``sale_id`` that a status read would settle."""
         return any(record._musqet_needs_status_read() for record in self._musqet_records_of(sale_id)
                    if record)
-
-    def _is_write_forbidden(self, fields):
-        # The base blocks writes to most config fields while a POS session is open. Allow
-        # the webhook controller to buffer its result during a session (mirrors pos_adyen).
-        return super()._is_write_forbidden(fields - {'musqet_latest_response'})
 
     def musqet_get_latest_status(self, sale_id=None):
         """Return the webhook-buffered result of sale ``sale_id`` for the POS frontend.
