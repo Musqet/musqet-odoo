@@ -357,7 +357,7 @@ class TestMusqetSaleResume(ResumeHelpers, TransactionCase):
         self.assertNotIn(('GET', '/terminal/sales/sale-old'), fake.calls)
 
     def test_stops_reading_once_the_read_budget_is_spent(self):
-        # Slow reads: each takes most of the budget. The sale not read still blocks.
+        # A slow first read uses up the budget. The sale not read still blocks.
         self._sale('sale-old', amount_minor=700)
         self._sale('sale-new', amount_minor=700)
         clock = iter([0, 1, MUSQET_SALE_READ_BUDGET + 1])
