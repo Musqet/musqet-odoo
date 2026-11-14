@@ -60,6 +60,48 @@ def make_pos_user(env, login, group='point_of_sale.group_pos_user', **values):
     })
 
 
+def open_session(env, *methods):
+    """Open a POS session on a new config taking ``methods``: a cashier may drive only a
+    terminal on an open session (pos.payment.method._musqet_check_access)."""
+    config = env['pos.config'].create({
+        'name': 'Musqet POS',
+        'payment_method_ids': [(6, 0, [method.id for method in methods])]})
+    return env['pos.session'].create({'config_id': config.id, 'user_id': env.uid})
+
+
+def open_plain_method(env):
+    """A payment method that isn't a Musqet one, on an open POS session: so the method check
+    (pos.payment.method._musqet_check_method), not the session check, is what refuses it."""
+    plain = env['pos.payment.method'].create({'name': 'Plain Method'})
+    open_session(env, plain)
+    return plain
+
+
+def clear_company(method):
+    """Leave ``method`` with no company, as one saved before 19.0.1.6.0 may be. Raw SQL: the
+    ORM refuses it (pos.payment.method._check_musqet_company)."""
+    method.env.cr.execute(SQL(
+        'UPDATE pos_payment_method SET company_id = NULL WHERE id = %s', method.id))
+    method.invalidate_recordset(['company_id'])
+
+
+def list_method_on_config(method, config):
+    """List ``method`` on ``config`` whatever their companies, as a method shared before
+    19.0.1.6.0 may be. Raw SQL: Odoo keeps a config's methods to its company."""
+    method.env.cr.execute(SQL(
+        'INSERT INTO pos_config_pos_payment_method_rel (pos_config_id, pos_payment_method_id)'
+        ' VALUES (%s, %s)', config.id, method.id))
+    method.invalidate_recordset(['config_ids'])
+    config.invalidate_recordset(['payment_method_ids'])
+
+
+def write_between_sessions(records, vals):
+    """Write ``vals`` on payment methods as if no POS session using them were open: Odoo
+    refuses most edits to a method while one is, and a test's cashier needs one open."""
+    with patch.object(type(records), '_is_write_forbidden', return_value=False):
+        records.write(vals)
+
+
 def musqet_response(sale_id, status='PENDING', status_code=200, **fields):
     """A stubbed Musqet API response carrying a sale's id, status and any other ``fields``."""
     response = MagicMock(status_code=status_code)
@@ -124,10 +166,7 @@ class MusqetPosRecordsCase(TransactionCase):
         self.method = create_musqet_method(self, 'MSQ-LINK-001')
         self.plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
         self.second = create_musqet_method(self, 'MSQ-LINK-002')
-        config = self.env['pos.config'].create({
-            'name': 'Musqet Link POS',
-            'payment_method_ids': [(6, 0, (self.method | self.plain | self.second).ids)]})
-        self.session = self.env['pos.session'].create({'config_id': config.id, 'user_id': self.env.uid})
+        self.session = open_session(self.env, self.method, self.plain, self.second)
         self.order = self._order()
         self._record_refund('refund-1', amount_minor=500)
 

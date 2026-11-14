@@ -6,6 +6,7 @@ from odoo import http
 from odoo.http import request
 
 from ..models.musqet_common import reply_is_for
+from ..models.pos_payment_method import MUSQET_LIVE_SESSION_STATES
 
 _logger = logging.getLogger(__name__)
 
@@ -81,12 +82,12 @@ class MusqetController(http.Controller):
             _logger.exception("Musqet webhook: could not settle sale %r", sale_id)
         if not reply_is_for(sale_id, reply):
             return self._ack()
-        # Buffer Musqet's reply and ping every open session that can show it. The frontend
-        # pulls the buffer and settles the pending line idempotently (a poll may have already
-        # settled it — see payment_musqet.js _finishSale).
+        # Buffer Musqet's reply and ping every live session that can show it (one being closed
+        # may still have the sale in progress). The frontend pulls the buffer and settles the
+        # pending line idempotently (a poll may have already settled it — see
+        # payment_musqet.js _finishSale).
         method_sudo.musqet_latest_response = json.dumps({**reply, 'saleId': sale_id})
-        sessions = request.env['pos.session'].sudo().search(
-            [('payment_method_ids', 'in', method_sudo.id), ('state', '=', 'opened')])
+        sessions = method_sudo._musqet_sessions(MUSQET_LIVE_SESSION_STATES)
         for config in sessions.config_id:
             config._notify("MUSQET_LATEST_RESPONSE", config.id)
         return self._ack()

@@ -12,7 +12,16 @@ from odoo.tests import tagged
 from odoo.tests.common import HttpCase, TransactionCase
 from odoo.tools import mute_logger
 
-from .common import create_musqet_method, make_pos_user, musqet_response, record_refund, record_sale
+from .common import (
+    create_musqet_method,
+    list_method_on_config,
+    make_pos_user,
+    musqet_response,
+    open_plain_method,
+    open_session,
+    record_refund,
+    record_sale,
+)
 
 
 @tagged('post_install', '-at_install')
@@ -84,10 +93,11 @@ class TestMusqetLatestStatus(TransactionCase):
         super().setUp()
         self.cashier = make_pos_user(self.env, 'musqet_cashier_status')
         self.method = create_musqet_method(self, 'MSQ-WH-002')
+        open_session(self.env, self.method)
 
     def test_denies_a_non_musqet_payment_method_and_keeps_its_buffer(self):
         # The method check guards the buffer itself: a refused read must not consume it.
-        plain = self.env['pos.payment.method'].create({'name': 'Plain Method'})
+        plain = open_plain_method(self.env)
         plain.musqet_latest_response = '{"status": "COMPLETE"}'
         with self.assertRaises(AccessDenied):
             plain.with_user(self.cashier).musqet_get_latest_status()
@@ -181,6 +191,30 @@ class TestMusqetWebhookRoute(HttpCase):
                          ('done', 900, 'card'))
         # The till gets the reply, not the body.
         self.assertEqual(self._buffered()['amountInCents'], 900)
+
+    def test_pings_every_live_session_of_the_method(self):
+        # A till being closed may still have the sale in progress; a closed one is gone.
+        sessions = {state: open_session(self.env, self.method) for state in (
+            'opening_control', 'opened', 'closing_control', 'closed')}
+        for state, session in sessions.items():
+            session.state = state
+        with patch.object(type(self.env['pos.config']), '_notify', autospec=True) as notify:
+            self._post(self._body())
+        pinged = {call.args[0].id for call in notify.mock_calls}
+        self.assertEqual(pinged, {sessions[state].config_id.id for state in (
+            'opening_control', 'opened', 'closing_control')})
+
+    def test_pings_no_till_of_another_company_listing_the_method(self):
+        # Listed there by a direct database write: those tills don't use the method.
+        other_company = self.env['res.company'].create({'name': 'Other Webhook Co'})
+        env_other = self.env(context={'allowed_company_ids': other_company.ids})
+        other_session = open_session(
+            env_other, create_musqet_method(self, 'MSQ-WHR-B01', company_id=other_company.id))
+        list_method_on_config(self.method, other_session.config_id)
+        mine = open_session(self.env, self.method)
+        with patch.object(type(self.env['pos.config']), '_notify', autospec=True) as notify:
+            self._post(self._body())
+        self.assertEqual({call.args[0].id for call in notify.mock_calls}, {mine.config_id.id})
 
     def test_the_body_alone_settles_nothing(self):
         # Musqet still reports the sale in progress: the body's COMPLETE reaches neither the

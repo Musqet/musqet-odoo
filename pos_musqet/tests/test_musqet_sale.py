@@ -21,7 +21,10 @@ from .common import (
     dirty_field_names,
     make_pos_user,
     musqet_response,
+    open_plain_method,
+    open_session,
     record_sale,
+    write_between_sessions,
 )
 
 
@@ -39,6 +42,7 @@ class TestMusqetCreateSale(TransactionCase):
         super().setUp()
         self.cashier = make_pos_user(self.env, 'musqet_cashier_sale')
         self.method = create_musqet_method(self, 'MSQ-SALE-001')
+        open_session(self.env, self.method)
         self.currency = self.method.company_id.currency_id.name
         self.sales_sent = 0
 
@@ -185,12 +189,12 @@ class TestMusqetCreateSale(TransactionCase):
                 mock_request.assert_not_called()
 
     def test_denies_a_non_musqet_payment_method(self):
-        cash = self.env['pos.payment.method'].create({'name': 'Plain Method'})
+        cash = open_plain_method(self.env)
         with self.assertRaises(AccessDenied):
             cash.with_user(self.cashier).musqet_create_sale({'amountInCents': 500})
 
     def test_rejects_when_no_serial_is_configured(self):
-        self.method.musqet_terminal_serial = False
+        write_between_sessions(self.method, {'musqet_terminal_serial': False})
         result, mock_request = self._call_sale({'amountInCents': 500})
         self.assertIn('error', result)
         mock_request.assert_not_called()
@@ -214,6 +218,7 @@ class TestMusqetSaleRecords(TransactionCase):
         super().setUp()
         self.cashier = make_pos_user(self.env, 'musqet_cashier_records')
         self.method = create_musqet_method(self, 'MSQ-REC-001')
+        open_session(self.env, self.method)
         self.currency = self.method.company_id.currency_id.name
         # A complete card sale of the requested amount, as Musqet reports it.
         self.complete = {'status': 'COMPLETE', 'amountInCents': 1250, 'currency': self.currency,
@@ -332,7 +337,9 @@ class TestMusqetSaleRecords(TransactionCase):
 
     def test_another_method_cannot_settle_the_sale(self):
         self._start_sale()
-        self._poll(self.complete, method=create_musqet_method(self, 'MSQ-REC-002'))
+        other = create_musqet_method(self, 'MSQ-REC-002')
+        open_session(self.env, other)
+        self._poll(self.complete, method=other)
         self.assertEqual(self._sale().state, 'pending')
 
     def test_logs_a_sale_musqet_accepted_but_odoo_could_not_record(self):
